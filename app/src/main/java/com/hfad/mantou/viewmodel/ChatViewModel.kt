@@ -13,21 +13,23 @@ import com.hfad.mantou.data.api.ApiMessage
 import com.hfad.mantou.data.api.ChatRequest
 import com.hfad.mantou.data.api.ContentPart
 import com.hfad.mantou.data.api.ImageUrl
-import com.hfad.mantou.data.api.RetrofitClient
+import com.hfad.mantou.data.api.StreamingApiService
 import com.hfad.mantou.data.database.AppDatabase
 import com.hfad.mantou.data.database.ChatMessageEntity
 import com.hfad.mantou.data.database.ChatSessionEntity
 import com.hfad.mantou.data.repository.ChatRepository
 import com.hfad.mantou.utils.ImageUtils
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
  * 聊天 ViewModel
  * 管理聊天会话、消息和 AI API 调用
- * 支持文本和图片消息
+ * 支持流式输出
  */
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -35,13 +37,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     
     private val database = AppDatabase.getDatabase(application)
     private val repository = ChatRepository(database.chatDao())
-    private val apiService = RetrofitClient.apiService
 
     // 当前会话 ID
     private val _currentSessionId = MutableLiveData<Long?>()
     val currentSessionId: LiveData<Long?> = _currentSessionId
 
-    // 当前会话的消息列表
+    // 当前会话的消息列表（包含流式输出中的临时消息）
     private val _messages = MutableLiveData<List<ChatMessage>>()
     val messages: LiveData<List<ChatMessage>> = _messages
 
@@ -55,6 +56,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // 错误信息
     private val _errorMessage = MutableLiveData<String?>()
     val errorMessage: LiveData<String?> = _errorMessage
+
+    // 流式输出任务
+    private var streamingJob: Job? = null
+    
+    // 当前流式输出的内容
+    private var streamingContent = StringBuilder()
+    
+    // 临时的流式消息 ID（用于 UI 更新）
+    private val STREAMING_MESSAGE_ID = -1L
 
     /**
      * 创建新会话
@@ -73,16 +83,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 创建空会话（不插入任何消息）
-     * 用于 new_chat 按钮
+     * 创建空会话
      */
     fun createEmptySession() {
         viewModelScope.launch {
             try {
-                // 创建一个临时标题的会话
                 val sessionId = repository.createSession("新会话")
                 _currentSessionId.value = sessionId
-                _messages.value = emptyList()  // 清空消息列表
+                _messages.value = emptyList()
                 Log.d(TAG, "创建空会话成功: $sessionId")
             } catch (e: Exception) {
                 Log.e(TAG, "创建空会话失败", e)
@@ -95,6 +103,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * 切换到指定会话
      */
     fun switchToSession(sessionId: Long) {
+        // 取消当前流式输出
+        cancelStreaming()
         _currentSessionId.value = sessionId
         loadMessages(sessionId)
     }
@@ -116,30 +126,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 发送用户消息并获取 AI 回复
-     * @param content 文本内容
-     * @param imagePath 图片路径（可选）
-     * @param imageUris 图片 URI 列表（可选，用于多图）
+     * 发送用户消息并获取 AI 回复（流式输出）
      */
     fun sendMessage(content: String, imagePath: String? = null, imageUris: List<Uri>? = null) {
         val sessionId = _currentSessionId.value
         
         if (sessionId == null) {
-            // 如果没有当前会话，创建新会话
             createNewSessionAndSendMessage(content, imagePath, imageUris)
             return
         }
 
-        viewModelScope.launch {
+        // 取消之前的流式输出
+        cancelStreaming()
+
+        streamingJob = viewModelScope.launch {
             try {
                 _isLoading.value = true
                 _errorMessage.value = null
+                streamingContent.clear()
 
-                // 1. 处理图片（如果有）
+                // 1. 处理图片
                 val imageBase64List = mutableListOf<String>()
                 val finalImagePath = imagePath ?: imageUris?.firstOrNull()?.toString()
                 
-                // 将图片转换为 Base64
                 if (imageUris != null && imageUris.isNotEmpty()) {
                     withContext(Dispatchers.IO) {
                         imageUris.take(ApiConfig.MAX_IMAGE_COUNT).forEach { uri ->
@@ -147,7 +156,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 val base64 = ImageUtils.uriToBase64(getApplication(), uri)
                                 if (base64 != null) {
                                     imageBase64List.add(base64)
-                                    Log.d(TAG, "图片转换成功: ${uri}, Base64长度: ${base64.length}")
                                 }
                             } catch (e: Exception) {
                                 Log.e(TAG, "图片转换失败: $uri", e)
@@ -155,14 +163,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 } else if (imagePath != null) {
-                    // 单张图片
                     withContext(Dispatchers.IO) {
                         try {
                             val uri = Uri.parse(imagePath)
                             val base64 = ImageUtils.uriToBase64(getApplication(), uri)
                             if (base64 != null) {
                                 imageBase64List.add(base64)
-                                Log.d(TAG, "图片转换成功: $imagePath, Base64长度: ${base64.length}")
                             }
                         } catch (e: Exception) {
                             Log.e(TAG, "图片转换失败: $imagePath", e)
@@ -171,65 +177,82 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 // 2. 保存用户消息到数据库
-                val userMessageId = repository.sendUserMessage(sessionId, content, finalImagePath)
+                repository.sendUserMessage(sessionId, content, finalImagePath)
                 
-                // 3. 更新会话标题（如果是第一条消息）
+                // 3. 更新会话标题
                 val messageCount = repository.getMessageCount(sessionId)
                 if (messageCount == 1) {
-                    // 第一条消息，更新会话标题
                     val title = if (content.isNotEmpty()) content else "[图片]"
                     repository.updateSessionTitle(sessionId, title)
                 }
 
-                // 4. 从数据库读取历史消息
+                // 4. 获取历史消息
                 val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
 
-                // 5. 组装 API 请求的 messages
+                // 5. 组装 API 请求
                 val hasImages = imageBase64List.isNotEmpty()
                 val apiMessages = buildApiMessages(historyMessages, imageBase64List)
-
-                // 6. 调用 AI API
-                Log.d(TAG, "发送请求，包含图片: $hasImages, 图片数量: ${imageBase64List.size}")
-                
-                // 根据是否有图片选择合适的模型
                 val model = ApiConfig.getModelForRequest(hasImages)
-                Log.d(TAG, "使用模型: $model, 视觉支持: ${ApiConfig.isVisionSupported()}")
                 
-                val response = apiService.chatCompletion(
-                    request = ChatRequest(
-                        model = model,
-                        messages = apiMessages,
-                        maxTokens = ApiConfig.MAX_TOKENS,
-                        temperature = ApiConfig.TEMPERATURE
-                    )
+                Log.d(TAG, "发送流式请求，模型: $model")
+
+                val request = ChatRequest(
+                    model = model,
+                    messages = apiMessages,
+                    maxTokens = ApiConfig.MAX_TOKENS,
+                    temperature = ApiConfig.TEMPERATURE,
+                    stream = true
                 )
 
-                if (response.isSuccessful && response.body() != null) {
-                    val chatResponse = response.body()!!
-                    val assistantContent = chatResponse.choices.firstOrNull()?.message?.content as? String
-                        ?: "抱歉，我无法生成回复。"
+                // 6. 添加一个空的 AI 消息占位符（用于流式显示）
+                addStreamingPlaceholder()
 
-                    // 7. 保存 AI 回复到数据库
-                    repository.addAssistantMessage(sessionId, assistantContent)
-
-                    Log.d(TAG, "AI 回复成功: $assistantContent")
-                } else {
-                    val errorBody = response.errorBody()?.string()
-                    Log.e(TAG, "API 调用失败: ${response.code()} - $errorBody")
-                    
-                    // 解析错误信息
-                    val errorMsg = parseErrorMessage(response.code(), errorBody)
-                    _errorMessage.value = errorMsg
-                    
-                    // 如果是图片相关错误，添加提示消息
-                    if (hasImages && (errorBody?.contains("image") == true || errorBody?.contains("vision") == true)) {
-                        repository.addAssistantMessage(sessionId, "抱歉，当前模型不支持图片识别。请使用纯文本对话，或切换到支持视觉的模型。")
+                // 7. 开始流式请求
+                StreamingApiService.streamChatCompletion(request)
+                    .catch { e ->
+                        Log.e(TAG, "流式请求异常", e)
+                        _errorMessage.value = "请求失败: ${e.message}"
+                        removeStreamingPlaceholder()
                     }
-                }
+                    .collect { event ->
+                        when (event) {
+                            is StreamingApiService.StreamEvent.Start -> {
+                                Log.d(TAG, "流式输出开始")
+                            }
+                            is StreamingApiService.StreamEvent.Content -> {
+                                // 追加内容并更新 UI
+                                streamingContent.append(event.text)
+                                updateStreamingMessage(streamingContent.toString())
+                            }
+                            is StreamingApiService.StreamEvent.Done -> {
+                                Log.d(TAG, "流式输出完成")
+                                // 保存完整消息到数据库
+                                val finalContent = streamingContent.toString()
+                                if (finalContent.isNotEmpty()) {
+                                    repository.addAssistantMessage(sessionId, finalContent)
+                                }
+                                // 移除临时消息，数据库会自动刷新
+                                streamingContent.clear()
+                            }
+                            is StreamingApiService.StreamEvent.Error -> {
+                                Log.e(TAG, "流式输出错误: ${event.message}")
+                                _errorMessage.value = event.message
+                                // 如果有部分内容，保存它
+                                val partialContent = streamingContent.toString()
+                                if (partialContent.isNotEmpty()) {
+                                    repository.addAssistantMessage(sessionId, partialContent)
+                                } else {
+                                    removeStreamingPlaceholder()
+                                }
+                                streamingContent.clear()
+                            }
+                        }
+                    }
 
             } catch (e: Exception) {
                 Log.e(TAG, "发送消息失败", e)
                 _errorMessage.value = "发送失败: ${e.message}"
+                removeStreamingPlaceholder()
             } finally {
                 _isLoading.value = false
             }
@@ -237,23 +260,49 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 解析错误信息
+     * 添加流式输出占位消息
      */
-    private fun parseErrorMessage(code: Int, errorBody: String?): String {
-        return when (code) {
-            400 -> {
-                when {
-                    errorBody?.contains("image") == true -> "当前模型不支持图片，请使用纯文本"
-                    errorBody?.contains("Model Not Exist") == true -> "模型不存在，请检查配置"
-                    else -> "请求参数错误: $errorBody"
-                }
-            }
-            401 -> "API Key 无效或已过期"
-            403 -> "没有访问权限"
-            429 -> "请求过于频繁，请稍后重试"
-            500, 502, 503 -> "服务器错误，请稍后重试"
-            else -> "请求失败 ($code): $errorBody"
+    private fun addStreamingPlaceholder() {
+        val currentList = _messages.value?.toMutableList() ?: mutableListOf()
+        val streamingMessage = ChatMessage(
+            messageId = STREAMING_MESSAGE_ID,
+            role = ChatMessage.ROLE_ASSISTANT,
+            content = "",
+            isStreaming = true
+        )
+        currentList.add(streamingMessage)
+        _messages.value = currentList
+    }
+
+    /**
+     * 更新流式输出消息内容
+     */
+    private fun updateStreamingMessage(content: String) {
+        val currentList = _messages.value?.toMutableList() ?: return
+        val index = currentList.indexOfFirst { it.messageId == STREAMING_MESSAGE_ID }
+        if (index >= 0) {
+            currentList[index] = currentList[index].copy(content = content)
+            _messages.value = currentList
         }
+    }
+
+    /**
+     * 移除流式输出占位消息
+     */
+    private fun removeStreamingPlaceholder() {
+        val currentList = _messages.value?.toMutableList() ?: return
+        currentList.removeAll { it.messageId == STREAMING_MESSAGE_ID }
+        _messages.value = currentList
+    }
+
+    /**
+     * 取消流式输出
+     */
+    private fun cancelStreaming() {
+        streamingJob?.cancel()
+        streamingJob = null
+        streamingContent.clear()
+        removeStreamingPlaceholder()
     }
 
     /**
@@ -267,7 +316,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _currentSessionId.value = sessionId
                 loadMessages(sessionId)
                 
-                // 发送消息
+                // 延迟发送消息，确保会话已创建
+                kotlinx.coroutines.delay(100)
                 sendMessage(content, imagePath, imageUris)
             } catch (e: Exception) {
                 Log.e(TAG, "创建会话并发送消息失败", e)
@@ -278,10 +328,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * 组装 API 请求的 messages
-     * 支持文本和图片混合消息
-     * 
-     * @param historyMessages 历史消息列表
-     * @param currentImageBase64List 当前消息的图片 Base64 列表（只用于最后一条用户消息）
      */
     private fun buildApiMessages(
         historyMessages: List<ChatMessageEntity>,
@@ -293,7 +339,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         messages.add(
             ApiMessage(
                 role = "system",
-                content = "你是馒头，一个友好、专业的 AI 助手。请用简洁、准确的语言回答用户的问题。如果用户发送了图片，请仔细分析图片内容并给出详细的描述和回答。"
+                content = "你是馒头，一个友好、专业的 AI 助手。请用简洁、准确的语言回答用户的问题。"
             )
         )
 
@@ -302,15 +348,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val isLastUserMessage = index == historyMessages.lastIndex && entity.role == "user"
             
             if (isLastUserMessage && currentImageBase64List.isNotEmpty()) {
-                // 最后一条用户消息且有图片，使用多模态格式
                 val contentParts = mutableListOf<ContentPart>()
-                
-                // 添加文本部分
                 if (entity.content.isNotEmpty()) {
                     contentParts.add(ContentPart(type = "text", text = entity.content))
                 }
-                
-                // 添加图片部分
                 currentImageBase64List.forEach { base64 ->
                     contentParts.add(
                         ContentPart(
@@ -319,21 +360,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     )
                 }
-                
-                messages.add(
-                    ApiMessage(
-                        role = entity.role,
-                        content = contentParts
-                    )
-                )
+                messages.add(ApiMessage(role = entity.role, content = contentParts))
             } else {
-                // 普通文本消息
-                messages.add(
-                    ApiMessage(
-                        role = entity.role,
-                        content = entity.content
-                    )
-                )
+                messages.add(ApiMessage(role = entity.role, content = entity.content))
             }
         }
 
@@ -375,9 +404,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * 清空当前会话（用于创建新会话）
+     * 清空当前会话
      */
     fun clearCurrentSession() {
+        cancelStreaming()
         _currentSessionId.value = null
         _messages.value = emptyList()
     }
@@ -387,6 +417,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun clearError() {
         _errorMessage.value = null
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        cancelStreaming()
     }
 }
 
@@ -399,7 +434,7 @@ private fun ChatMessageEntity.toChatMessage(): ChatMessage {
         role = this.role,
         content = this.content,
         imagePath = this.imagePath,
-        timestamp = this.timestamp
+        timestamp = this.timestamp,
+        isStreaming = false
     )
 }
-

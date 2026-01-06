@@ -15,6 +15,7 @@ import com.hfad.mantou.databinding.ItemChatUserBinding
 /**
  * 聊天消息适配器
  * 使用 ListAdapter + DiffUtil 实现高效更新
+ * 支持流式输出的实时更新
  */
 class ChatAdapter(
     private val onDataChanged: ((itemCount: Int) -> Unit)? = null
@@ -63,12 +64,28 @@ class ChatAdapter(
         }
     }
 
+    /**
+     * 支持局部更新（用于流式输出）
+     */
+    override fun onBindViewHolder(
+        holder: RecyclerView.ViewHolder,
+        position: Int,
+        payloads: MutableList<Any>
+    ) {
+        if (payloads.isNotEmpty() && holder is AssistantMessageViewHolder) {
+            // 只更新文本内容，不重新绑定整个 ViewHolder
+            val message = getItem(position)
+            holder.updateContent(message.content)
+        } else {
+            super.onBindViewHolder(holder, position, payloads)
+        }
+    }
+
     override fun onCurrentListChanged(
         previousList: MutableList<ChatMessage>,
         currentList: MutableList<ChatMessage>
     ) {
         super.onCurrentListChanged(previousList, currentList)
-        // 通知数据变化，用于控制 flGreeting 的显示/隐藏
         onDataChanged?.invoke(currentList.size)
     }
 
@@ -80,10 +97,8 @@ class ChatAdapter(
     ) : RecyclerView.ViewHolder(binding.root) {
 
         fun bind(message: ChatMessage) {
-            // 设置文本内容
             binding.tvMessage.text = message.content
 
-            // 处理图片
             if (message.imagePath != null) {
                 binding.ivImage.visibility = View.VISIBLE
                 Glide.with(binding.ivImage.context)
@@ -99,16 +114,15 @@ class ChatAdapter(
 
     /**
      * AI 助手消息 ViewHolder（左侧气泡）
+     * 支持流式输出的实时更新
      */
     inner class AssistantMessageViewHolder(
         private val binding: ItemChatAssistantBinding
     ) : RecyclerView.ViewHolder(binding.root) {
 
         fun bind(message: ChatMessage) {
-            // 设置文本内容
             binding.tvMessage.text = message.content
 
-            // AI 消息通常不包含图片，但保留扩展性
             if (message.imagePath != null) {
                 binding.ivImage.visibility = View.VISIBLE
                 Glide.with(binding.ivImage.context)
@@ -120,11 +134,19 @@ class ChatAdapter(
                 binding.ivImage.visibility = View.GONE
             }
         }
+
+        /**
+         * 只更新文本内容（用于流式输出）
+         */
+        fun updateContent(content: String) {
+            binding.tvMessage.text = content
+        }
     }
 }
 
 /**
- * DiffUtil 回调，用于高效计算列表差异
+ * DiffUtil 回调
+ * 优化流式输出时的更新效率
  */
 class ChatMessageDiffCallback : DiffUtil.ItemCallback<ChatMessage>() {
     override fun areItemsTheSame(oldItem: ChatMessage, newItem: ChatMessage): Boolean {
@@ -133,6 +155,19 @@ class ChatMessageDiffCallback : DiffUtil.ItemCallback<ChatMessage>() {
 
     override fun areContentsTheSame(oldItem: ChatMessage, newItem: ChatMessage): Boolean {
         return oldItem == newItem
+    }
+
+    /**
+     * 返回变化的内容，用于局部更新
+     */
+    override fun getChangePayload(oldItem: ChatMessage, newItem: ChatMessage): Any? {
+        // 如果只是内容变化（流式输出），返回 payload 触发局部更新
+        if (oldItem.messageId == newItem.messageId && 
+            oldItem.content != newItem.content &&
+            oldItem.role == newItem.role) {
+            return "content_changed"
+        }
+        return null
     }
 }
 
