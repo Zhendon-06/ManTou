@@ -42,30 +42,48 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val errorMessage: LiveData<String?> = _errorMessage
 
     private var streamingJob: Job? = null
+    private var messagesJob: Job? = null  // 消息加载任务
     private var streamingContent = StringBuilder()
     private val STREAMING_MESSAGE_ID = -1L
 
     /** 创建空会话 */
     fun createEmptySession() {
+        cancelStreaming()  // 取消流式输出
+        messagesJob?.cancel()  // 取消之前的消息加载
         viewModelScope.launch {
             val sessionId = repository.createSession("新会话")
             _currentSessionId.value = sessionId
             _messages.value = emptyList()
+            loadMessages(sessionId)  // 绑定新会话的消息监听
         }
     }
 
     /** 切换到指定会话 */
     fun switchToSession(sessionId: Long) {
         cancelStreaming()
+        messagesJob?.cancel()  // 取消之前的消息加载
         _currentSessionId.value = sessionId
         loadMessages(sessionId)
     }
 
     /** 加载指定会话的消息 */
     private fun loadMessages(sessionId: Long) {
-        viewModelScope.launch {
+        messagesJob = viewModelScope.launch {
             repository.getMessagesBySessionId(sessionId).collect { entities ->
-                _messages.value = entities.map { it.toChatMessage() }
+                // 只有当前会话才更新消息
+                if (_currentSessionId.value == sessionId) {
+                    val dbMessages = entities.map { it.toChatMessage() }
+                    
+                    // 如果正在流式输出，保留流式占位消息
+                    val currentList = _messages.value
+                    val streamingMessage = currentList?.find { it.messageId == STREAMING_MESSAGE_ID }
+                    
+                    _messages.value = if (streamingMessage != null) {
+                        dbMessages + streamingMessage
+                    } else {
+                        dbMessages
+                    }
+                }
             }
         }
     }
@@ -131,6 +149,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         is StreamingApiService.StreamEvent.Done -> {
                             val finalContent = streamingContent.toString()
+                            removeStreamingPlaceholder()  // 先移除占位消息
                             if (finalContent.isNotEmpty()) {
                                 repository.addAssistantMessage(sessionId, finalContent)
                             }
@@ -139,10 +158,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         is StreamingApiService.StreamEvent.Error -> {
                             _errorMessage.value = event.message
                             val partialContent = streamingContent.toString()
+                            removeStreamingPlaceholder()  // 先移除占位消息
                             if (partialContent.isNotEmpty()) {
                                 repository.addAssistantMessage(sessionId, partialContent)
-                            } else {
-                                removeStreamingPlaceholder()
                             }
                             streamingContent.clear()
                         }
@@ -193,9 +211,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     /** 创建新会话并发送消息 */
     private fun createNewSessionAndSendMessage(content: String, imagePath: String?, imageUris: List<Uri>?) {
+        messagesJob?.cancel()  // 取消之前的消息加载
         viewModelScope.launch {
             val sessionId = repository.createSession(content.ifEmpty { "[图片]" })
             _currentSessionId.value = sessionId
+            _messages.value = emptyList()  // 先清空，再加载
             loadMessages(sessionId)
             kotlinx.coroutines.delay(100)
             sendMessage(content, imagePath, imageUris)
@@ -271,6 +291,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         cancelStreaming()
+        messagesJob?.cancel()
     }
 }
 
