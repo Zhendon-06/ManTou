@@ -1,207 +1,215 @@
-# BanaMusic
+# 馒头AI (ManTou AI)
 
-🎵 一款现代Android音乐播放器应用，专注于提供流畅的音乐播放体验与精美的视觉设计。
+一个基于Kotlin开发的Android智能聊天应用，支持多轮对话、流式输出、本地持久化存储等功能。
 
-## 🌟 功能特性
+## 功能特性
 
-### 核心功能
+- **智能对话**：支持多轮上下文对话，自动维护对话历史
+- **流式输出**：AI回复实时显示，提升交互体验
+- **本地存储**：使用Room数据库存储聊天记录，支持历史会话恢复
+- **图片对话**：支持发送图片进行多模态对话
+- **会话管理**：支持创建、切换、删除会话，自动使用首条消息作为会话标题
+- **响应式设计**：使用Kotlin Flow实现数据变化的实时监听
 
-- **多源音乐管理**：支持本地音乐扫描、网络音乐搜索及在线播放
-- **系统级集成**：前台服务确保后台播放，支持锁屏控制、耳机线控
-- **媒体通知**：实时显示歌曲信息、播放控制和进度条
-- **歌词显示**：支持逐行高亮、平滑滚动和点击定位
-- **播放控制**：上一首、下一首、播放/暂停、进度拖动
-- **播放模式**：顺序播放、随机播放、单曲循环
-- **收藏功能**：一键收藏喜欢的歌曲
-- **历史记录**：自动记录播放历史
+## 技术栈
 
-### 技术亮点
+| 层级 | 技术 |
+|------|------|
+| **UI层** | ViewBinding、RecyclerView、ConstraintLayout |
+| **架构层** | MVVM、ViewModel、LiveData |
+| **数据层** | Room、Flow、Repository模式 |
+| **网络层** | OkHttp、SSE（Server-Sent Events） |
+| **图片加载** | Glide |
+| **异步处理** | Kotlin Coroutines |
 
-- **现代Android架构**：MVVM + Repository + Kotlin协程
-- **响应式UI**：LiveData + Flow实现数据与UI的响应式解耦
-- **图片加载**：Coil三级缓存策略，优化专辑封面加载
-- **网络请求**：Retrofit + OkHttp实现网络音乐搜索
-- **数据持久化**：Room数据库存储播放列表和音乐元数据
-- **Jetpack Compose**：部分UI采用Compose实现
-- **状态栏适配**：沉浸式状态栏，适配各种屏幕尺寸
+## 项目结构
 
-## 🛠 技术栈
+```
+app/src/main/java/com/hfad/mantou/
+├── adapter/          # RecyclerView适配器
+│   ├── ChatAdapter.kt        # 聊天消息适配器（左右对话效果）
+│   └── SessionAdapter.kt     # 会话列表适配器
+├── data/             # 数据模型
+│   ├── ChatMessage.kt        # 消息数据类
+│   └── ChatSession.kt        # 会话数据类
+├── database/         # Room数据库
+│   ├── AppDatabase.kt        # 数据库定义
+│   ├── ChatDao.kt            # 数据访问对象
+│   └── entity/               # 数据库实体
+├── repository/       # 数据仓库
+│   └── ChatRepository.kt     # 封装数据库操作
+├── view/             # UI界面
+│   └── MainFragment.kt       # 主界面
+├── viewmodel/        # 视图模型
+│   └── ChatViewModel.kt      # 聊天业务逻辑
+└── api/              # 网络请求
+    └── StreamingApiService.kt # SSE流式请求
+```
 
-| 技术                | 版本      | 用途     |
-| ----------------- | ------- | ------ |
-| Kotlin            | 1.8.0+  | 主要开发语言 |
-| Android SDK       | API 21+ | 应用开发框架 |
-| MVVM              | -       | 架构模式   |
-| Room              | 2.5.0+  | 本地数据库  |
-| Retrofit          | 2.9.0+  | 网络请求   |
-| Coil              | 2.3.0+  | 图片加载   |
-| Kotlin Coroutines | 1.6.0+  | 异步处理   |
-| Jetpack Compose   | 1.2.0+  | UI组件   |
-| MediaSession      | -       | 媒体控制   |
+## 核心亮点
 
-## 📦 安装指南
+### 1. 流式输出实现
 
-### 环境要求
+使用SSE（Server-Sent Events）技术实现AI回复的实时显示：
 
-- Android Studio Arctic Fox 2020.3.1+
-- Android SDK 21+ (Android 5.0+)
-- JDK 11+
+```kotlin
+// 通过Kotlin Flow实现流式数据传递
+fun streamChatCompletion(messages: List<Message>): Flow<StreamEvent> = flow {
+    // 建立SSE连接，实时接收数据片段
+    // 每个数据片段通过Flow发射，UI实时更新
+}
+```
 
-### 安装步骤
+### 2. 左右对话效果
 
-1. **克隆仓库**
+使用RecyclerView的多类型ViewHolder实现：
+
+```kotlin
+override fun getItemViewType(position: Int): Int {
+    return when {
+        message.isStreaming -> VIEW_TYPE_LOADING
+        message.role == ROLE_USER -> VIEW_TYPE_USER      // 右边
+        message.role == ROLE_ASSISTANT -> VIEW_TYPE_ASSISTANT  // 左边
+    }
+}
+```
+
+### 3. 本地数据持久化
+
+使用Room数据库实现聊天记录的本地存储：
+
+```kotlin
+@Entity(tableName = "chat_messages")
+data class ChatMessageEntity(
+    val sessionId: Long,    // 关联会话ID
+    val role: String,       // user/assistant
+    val content: String,
+    val timestamp: Long
+)
+```
+
+### 4. 响应式数据流
+
+使用Kotlin Flow实现数据库变化的实时监听：
+
+```kotlin
+// DAO返回Flow类型
+@Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId")
+fun getMessagesBySessionId(sessionId: Long): Flow<List<ChatMessageEntity>>
+
+// ViewModel收集Flow，自动更新UI
+repository.getMessagesBySessionId(sessionId).collect { messages ->
+    _messages.value = messages
+}
+```
+
+## 架构设计
+
+```
+UI层 (View)
+    ↓ 观察
+ViewModel层
+    ↓ 调用
+Repository层
+    ↓ 调用
+数据层 (Room/Network)
+```
+
+- **单一职责**：每层只负责自己的功能
+- **解耦合**：通过接口和抽象降低依赖
+- **可测试**：每层可以独立测试
+- **易维护**：清晰的职责边界
+
+## 开发环境
+
+- **语言**：Kotlin
+- **最低SDK**：24 (Android 7.0)
+- **目标SDK**：34 (Android 14)
+- **构建工具**：Gradle 8.0+
+
+## 依赖库
+
+```kotlin
+// Android核心
+implementation("androidx.core:core-ktx:1.12.0")
+implementation("androidx.appcompat:appcompat:1.6.1")
+implementation("com.google.android.material:material:1.11.0")
+
+// 架构组件
+implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
+implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.7.0")
+
+// Room数据库
+implementation("androidx.room:room-runtime:2.6.1")
+implementation("androidx.room:room-ktx:2.6.1")
+kapt("androidx.room:room-compiler:2.6.1")
+
+// 网络请求
+implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+// 图片加载
+implementation("com.github.bumptech.glide:glide:4.16.0")
+```
+
+## 快速开始
+
+1. **克隆项目**
    ```bash
-   git clone https://github.com/yourusername/BanaMusic.git
-   cd BanaMusic
+   git clone https://github.com/yourusername/ManTou.git
    ```
-2. **打开项目**
-   - 在Android Studio中选择"Open an existing project"
-   - 选择项目目录
-3. **同步依赖**
-   - 等待Gradle自动同步完成
-   - 或手动点击"Sync Project with Gradle Files"
-4. **运行项目**
-   - 连接Android设备或启动模拟器
-   - 点击"Run"按钮运行应用
 
-## 🎮 使用说明
+2. **配置API**
+   在`local.properties`中添加你的API密钥：
+   ```properties
+   API_KEY=your_api_key_here
+   ```
 
-### 基本操作
+3. **构建运行**
+   使用Android Studio打开项目，点击运行按钮即可。
 
-1. **主界面**：显示音乐列表，支持滑动浏览
-2. **播放控制**：点击歌曲进入全屏播放界面
-3. **歌词显示**：在播放界面点击唱片切换到歌词视图
-4. **播放模式**：点击模式按钮切换播放模式
-5. **收藏歌曲**：点击爱心图标收藏/取消收藏
+## 项目截图
 
-### 高级功能
+| 聊天界面 | 侧边栏 | 图片对话 |
+|---------|--------|---------|
+| ![Chat](screenshots/chat.png) | ![Sidebar](screenshots/sidebar.png) | ![Image](screenshots/image.png) |
 
-- **歌词定位**：点击歌词任意行跳转到对应播放位置
-- **进度拖动**：通过进度条调整播放进度
-- **后台播放**：应用退到后台时音乐继续播放
-- **锁屏控制**：在锁屏界面控制音乐播放
+## 技术博客
 
-## 📁 项目结构
+- [流式输出实现详解](docs/streaming.md)
+- [Room数据库设计](docs/database.md)
+- [MVVM架构实践](docs/architecture.md)
+
+## 贡献
+
+欢迎提交Issue和Pull Request！
+
+## 许可证
 
 ```
-BanaMusic/
-├── app/
-│   ├── src/main/
-│   │   ├── java/com/guet/stu/banamusic/
-│   │   │   ├── adapter/         # 适配器
-│   │   │   ├── model/            # 数据模型
-│   │   │   ├── network/          # 网络请求
-│   │   │   ├── service/          # 服务
-│   │   │   ├── util/             # 工具类
-│   │   │   ├── view/             # 视图
-│   │   │   ├── viewmodel/        # 视图模型
-│   │   │   └── MainApplication.kt
-│   │   ├── res/                  # 资源文件
-│   │   └── AndroidManifest.xml   # 应用配置
-│   └── build.gradle              # 模块配置
-├── build.gradle                  # 项目配置
-└── README.md                     # 项目说明
+Copyright 2024 ManTou AI
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 ```
 
-## 🔧 核心模块
+## 致谢
 
-### 1. 音乐播放管理 (`MusicPlay`)
+- [Kotlin](https://kotlinlang.org/)
+- [Android Jetpack](https://developer.android.com/jetpack)
+- [OkHttp](https://square.github.io/okhttp/)
+- [Glide](https://github.com/bumptech/glide)
 
-- 统一管理MediaPlayer生命周期
-- 处理播放状态、进度更新
-- 支持播放列表管理
-- 集成前台服务
+---
 
-### 2. 前台服务 (`MusicPlaybackService`)
-
-- 确保后台音乐持续播放
-- 显示媒体通知
-- 与系统MediaSession集成
-- 支持耳机线控和锁屏控制
-
-### 3. 歌词处理
-
-- 异步加载歌词
-- 实时高亮当前歌词
-- 平滑滚动效果
-- 点击定位功能
-
-### 4. 网络音乐搜索
-
-- 基于Retrofit的网络请求
-- 音乐数据解析
-- 异步加载专辑封面
-
-## 🎨 设计特点
-
-### 视觉设计
-
-- **现代UI**：简洁美观的界面设计
-- **动态效果**：平滑的过渡动画
-- **响应式布局**：适配各种屏幕尺寸
-- **深色模式**：支持系统深色模式
-
-### 用户体验
-
-- **流畅播放**：无卡顿的音乐播放体验
-- **智能缓存**：减少网络请求，提升加载速度
-- **直观操作**：简单易用的控制界面
-- **系统集成**：与Android系统深度集成
-
-## 🔍 常见问题
-
-### Q: 为什么音乐无法后台播放？
-
-A: 请确保应用具有后台运行权限，MIUI等定制系统可能需要额外设置。
-
-### Q: 为什么某些歌曲没有歌词？
-
-A: 歌词由网络API提供，部分歌曲可能没有歌词数据。
-
-### Q: 如何添加本地音乐？
-
-A: 应用会自动扫描设备中的音乐文件，确保音乐文件位于设备存储中。
-
-### Q: 为什么专辑封面无法显示？
-
-A: 可能是网络连接问题或API限制，应用会使用默认封面作为 fallback。
-
-## 🤝 贡献指南
-
-欢迎贡献代码、报告问题或提出建议！
-
-### 贡献流程
-
-1. Fork 项目
-2. 创建功能分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 打开 Pull Request
-
-### 代码规范
-
-- 遵循Kotlin官方代码风格
-- 提交前运行代码检查
-- 编写清晰的注释
-- 确保代码测试覆盖
-
-## 📄 许可证
-
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
-
-## 🙏 致谢
-
-- [Coil](https://coil-kt.github.io/coil/) - 图片加载库
-- [Retrofit](https://square.github.io/retrofit/) - 网络请求库
-- [Room](https://developer.android.com/training/data-storage/room) - 本地数据库
-- [Jetpack Compose](https://developer.android.com/jetpack/compose) - UI工具包
-
-## 📞 联系方式
-
-- 作者：Your Name
-- GitHub：[yourusername](https://github.com/yourusername)
-- Email：<your.email@example.com>
-
-***
-
-**享受音乐，享受生活！🎵**
+<p align="center">
+  Made with ❤️ by ManTou Team
+</p>
