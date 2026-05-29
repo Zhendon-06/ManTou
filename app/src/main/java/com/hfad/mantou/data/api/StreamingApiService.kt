@@ -73,7 +73,6 @@ object StreamingApiService {
                 close()
             }
         })
-
         awaitClose { call.cancel() }
     }.flowOn(Dispatchers.IO)
 
@@ -94,6 +93,7 @@ object StreamingApiService {
 
     /** 流式事件 */
     sealed class StreamEvent {
+        //这个里面没有用start作为collect的起点标识来启动flow
         object Start : StreamEvent()
         data class Content(val text: String) : StreamEvent()
         object Done : StreamEvent()

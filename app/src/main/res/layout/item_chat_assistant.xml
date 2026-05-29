@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- AI 助手消息布局（左侧气泡） -->
 <androidx.constraintlayout.widget.ConstraintLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
@@ -8,7 +7,7 @@
     android:layout_height="wrap_content"
     android:padding="8dp">
 
-    <!-- AI 头像 -->
+    <!-- AI头像 -->
     <ImageView
         android:id="@+id/ivAvatar"
         android:layout_width="36dp"
@@ -18,43 +17,67 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- AI 消息气泡容器 -->
+    <!-- 消息气泡 -->
     <LinearLayout
         android:id="@+id/messageContainer"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:layout_marginStart="8dp"
         android:layout_marginEnd="60dp"
-        android:orientation="vertical"
         android:background="@drawable/bg_chat_assistant"
+        android:orientation="vertical"
         android:padding="12dp"
         app:layout_constraintStart_toEndOf="@id/ivAvatar"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintHorizontal_bias="0.0">
+        app:layout_constraintTop_toTopOf="parent">
 
-        <!-- 图片（如果有） -->
+        <!-- 图片 -->
         <ImageView
             android:id="@+id/ivImage"
             android:layout_width="match_parent"
             android:layout_height="200dp"
             android:layout_marginBottom="8dp"
+            android:contentDescription="@string/app_name"
             android:scaleType="centerCrop"
             android:visibility="gone"
-            android:contentDescription="@string/app_name"
             tools:visibility="gone" />
 
-        <!-- 文本内容 -->
+        <!-- 文本 -->
         <TextView
             android:id="@+id/tvMessage"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:lineSpacingExtra="2dp"
             android:textColor="#333333"
             android:textSize="15sp"
-            android:lineSpacingExtra="2dp"
             tools:text="这是 AI 助手回复的消息内容，可以很长很长..." />
+
+        <!-- WebView容器 -->
+        <FrameLayout
+            android:id="@+id/webViewContainer"
+            android:layout_width="match_parent"
+            android:layout_height="300dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_chat_assistant"
+            android:visibility="gone">
+
+            <WebView
+                android:id="@+id/app_webView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <ImageButton
+                android:id="@+id/btnFullscreen"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:layout_gravity="end|top"
+                android:layout_margin="8dp"
+                android:background="@drawable/tobig"
+                android:elevation="4dp"
+                android:scaleType="centerInside" />
+
+        </FrameLayout>
 
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
-

@@ -24,14 +24,24 @@ data class ChatMessageEntity(
     @PrimaryKey(autoGenerate = true)
     val messageId: Long = 0,
     
-    val sessionId: Long,  // 外键，关联到 ChatSessionEntity
+    val sessionId: Long,
     
-    val role: String,  // "user" 或 "assistant"
+    val role: String,
     
-    val content: String,  // 文本内容
+    val content: String,
     
-    val imagePath: String? = null,  // 可为空，本地图片路径
+    val imagePath: String? = null,
     
-    val timestamp: Long  // 消息时间戳
+    val timestamp: Long,
+    
+    val appHtmlPath: String? = null
 )
+
+
+
+
+
+
+
+
 

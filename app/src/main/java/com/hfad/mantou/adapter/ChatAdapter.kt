@@ -1,8 +1,14 @@
 package com.hfad.mantou.adapter
 
+import android.animation.AnimatorInflater
+import android.animation.AnimatorSet
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
@@ -10,26 +16,26 @@ import com.bumptech.glide.Glide
 import com.hfad.mantou.R
 import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.databinding.ItemChatAssistantBinding
+import com.hfad.mantou.databinding.ItemChatLoadingBinding
 import com.hfad.mantou.databinding.ItemChatUserBinding
 
-/**
- * 聊天消息适配器
- * 使用 ListAdapter + DiffUtil 实现高效更新
- * 支持流式输出的实时更新
- */
 class ChatAdapter(
-    private val onDataChanged: ((itemCount: Int) -> Unit)? = null
+    private val onDataChanged: ((itemCount: Int) -> Unit)? = null,
+    private val onFullscreenClick: ((htmlPath: String) -> Unit)? = null
 ) : ListAdapter<ChatMessage, RecyclerView.ViewHolder>(ChatMessageDiffCallback()) {
 
     companion object {
         private const val VIEW_TYPE_USER = 1
         private const val VIEW_TYPE_ASSISTANT = 2
+        private const val VIEW_TYPE_LOADING = 3
     }
 
     override fun getItemViewType(position: Int): Int {
-        return when (getItem(position).role) {
-            ChatMessage.ROLE_USER -> VIEW_TYPE_USER
-            ChatMessage.ROLE_ASSISTANT -> VIEW_TYPE_ASSISTANT
+        val message = getItem(position)
+        return when {
+            message.isStreaming -> VIEW_TYPE_LOADING
+            message.role == ChatMessage.ROLE_USER -> VIEW_TYPE_USER
+            message.role == ChatMessage.ROLE_ASSISTANT -> VIEW_TYPE_ASSISTANT
             else -> VIEW_TYPE_ASSISTANT
         }
     }
@@ -52,7 +58,15 @@ class ChatAdapter(
                 )
                 AssistantMessageViewHolder(binding)
             }
-            else -> throw IllegalArgumentException("Unknown view type: $viewType")
+            VIEW_TYPE_LOADING -> {
+                val binding = ItemChatLoadingBinding.inflate(
+                    LayoutInflater.from(parent.context),
+                    parent,
+                    false
+                )
+                LoadingViewHolder(binding)
+            }
+            else -> throw IllegalArgumentException("未知的视图类型: $viewType")
         }
     }
 
@@ -61,21 +75,22 @@ class ChatAdapter(
         when (holder) {
             is UserMessageViewHolder -> holder.bind(message)
             is AssistantMessageViewHolder -> holder.bind(message)
+            is LoadingViewHolder -> holder.bind(message)
         }
     }
 
-    /**
-     * 支持局部更新（用于流式输出）
-     */
     override fun onBindViewHolder(
         holder: RecyclerView.ViewHolder,
         position: Int,
         payloads: MutableList<Any>
     ) {
-        if (payloads.isNotEmpty() && holder is AssistantMessageViewHolder) {
-            // 只更新文本内容，不重新绑定整个 ViewHolder
+        if (payloads.isNotEmpty()) {
             val message = getItem(position)
-            holder.updateContent(message.content)
+            when (holder) {
+                is AssistantMessageViewHolder -> holder.updateContent(message.content)
+                is LoadingViewHolder -> holder.updateThinking(message.thinking)
+                else -> super.onBindViewHolder(holder, position, payloads)
+            }
         } else {
             super.onBindViewHolder(holder, position, payloads)
         }
@@ -89,9 +104,13 @@ class ChatAdapter(
         onDataChanged?.invoke(currentList.size)
     }
 
-    /**
-     * 用户消息 ViewHolder（右侧气泡）
-     */
+    override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+        super.onViewRecycled(holder)
+        if (holder is LoadingViewHolder) {
+            holder.unbind()
+        }
+    }
+
     inner class UserMessageViewHolder(
         private val binding: ItemChatUserBinding
     ) : RecyclerView.ViewHolder(binding.root) {
@@ -112,10 +131,6 @@ class ChatAdapter(
         }
     }
 
-    /**
-     * AI 助手消息 ViewHolder（左侧气泡）
-     * 支持流式输出的实时更新
-     */
     inner class AssistantMessageViewHolder(
         private val binding: ItemChatAssistantBinding
     ) : RecyclerView.ViewHolder(binding.root) {
@@ -133,22 +148,77 @@ class ChatAdapter(
             } else {
                 binding.ivImage.visibility = View.GONE
             }
+
+            if (!message.appHtmlPath.isNullOrEmpty()) {
+                binding.webViewContainer.visibility = View.VISIBLE
+                setupWebView(message.appHtmlPath)
+            } else {
+                binding.webViewContainer.visibility = View.GONE
+                binding.appWebView.loadUrl("about:blank")
+            }
         }
 
-        /**
-         * 只更新文本内容（用于流式输出）
-         */
+        private fun setupWebView(htmlPath: String) {
+            binding.appWebView.apply {
+                webViewClient = WebViewClient()
+                webChromeClient = WebChromeClient()
+                settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    allowFileAccess = true
+                    allowContentAccess = true
+                    cacheMode = WebSettings.LOAD_DEFAULT
+                    useWideViewPort = true
+                    loadWithOverviewMode = true
+                }
+                loadUrl("file://$htmlPath")
+            }
+
+            binding.btnFullscreen.setOnClickListener {
+                onFullscreenClick?.invoke(htmlPath)
+            }
+        }
+
         fun updateContent(content: String) {
             binding.tvMessage.text = content
         }
     }
+
+    inner class LoadingViewHolder(
+        private val binding: ItemChatLoadingBinding
+    ) : RecyclerView.ViewHolder(binding.root) {
+
+        private var animatorSet: AnimatorSet? = null
+
+        fun bind(message: ChatMessage) {
+            updateThinking(message.thinking)
+            val context = binding.root.context
+            val animator = AnimatorInflater.loadAnimator(context, R.animator.loading_animation)
+            if (animator is AnimatorSet) {
+                animatorSet = animator
+                animatorSet?.setTarget(binding.loadingContainer)
+                animatorSet?.start()
+            }
+        }
+
+        fun updateThinking(thinking: String?) {
+            if (thinking.isNullOrEmpty()) {
+                binding.tvThinking.visibility = View.GONE
+            } else {
+                binding.tvThinking.visibility = View.VISIBLE
+                binding.tvThinking.text = thinking
+            }
+        }
+
+        fun unbind() {
+            animatorSet?.cancel()
+            animatorSet = null
+        }
+    }
 }
 
-/**
- * DiffUtil 回调
- * 优化流式输出时的更新效率
- */
 class ChatMessageDiffCallback : DiffUtil.ItemCallback<ChatMessage>() {
+
     override fun areItemsTheSame(oldItem: ChatMessage, newItem: ChatMessage): Boolean {
         return oldItem.messageId == newItem.messageId
     }
@@ -157,17 +227,24 @@ class ChatMessageDiffCallback : DiffUtil.ItemCallback<ChatMessage>() {
         return oldItem == newItem
     }
 
-    /**
-     * 返回变化的内容，用于局部更新
-     */
     override fun getChangePayload(oldItem: ChatMessage, newItem: ChatMessage): Any? {
-        // 如果只是内容变化（流式输出），返回 payload 触发局部更新
-        if (oldItem.messageId == newItem.messageId && 
+        if (oldItem.messageId == newItem.messageId &&
             oldItem.content != newItem.content &&
-            oldItem.role == newItem.role) {
+            oldItem.role == newItem.role &&
+            !oldItem.isStreaming && !newItem.isStreaming) {
             return "content_changed"
         }
+
+        if (oldItem.messageId == newItem.messageId &&
+            oldItem.isStreaming && newItem.isStreaming &&
+            oldItem.thinking != newItem.thinking) {
+            return "thinking_changed"
+        }
+
+        if (oldItem.isStreaming != newItem.isStreaming) {
+            return null
+        }
+
         return null
     }
 }
-

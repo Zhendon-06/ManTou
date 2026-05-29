@@ -112,3 +112,11 @@ interface ChatDao {
     suspend fun getLastMessage(sessionId: Long): ChatMessageEntity?
 }
 
+
+
+
+
+
+
+
+
