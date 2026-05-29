@@ -38,6 +38,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".view.VirtualAppActivity"
+            android:theme="@style/Theme.ManTou"
+            android:exported="false" />
+
         <!-- FileProvider 用于相机拍照保存图片 -->
         <provider
             android:name="androidx.core.content.FileProvider"

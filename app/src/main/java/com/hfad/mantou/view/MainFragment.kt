@@ -281,14 +281,21 @@ class MainFragment : Fragment() {
      * 初始化聊天 RecyclerView
      */
     private fun setupChatRecyclerView() {
-        chatAdapter = ChatAdapter { itemCount ->
-            // 当有消息时，隐藏欢迎界面
-            if (itemCount > 0) {
-                binding.flGreeting.visibility = View.GONE
-            } else {
-                binding.flGreeting.visibility = View.VISIBLE
+        chatAdapter = ChatAdapter(
+            onDataChanged = { itemCount ->
+                if (itemCount > 0) {
+                    binding.flGreeting.visibility = View.GONE
+                } else {
+                    binding.flGreeting.visibility = View.VISIBLE
+                }
+            },
+            onFullscreenClick = { htmlPath ->
+                val intent = Intent(requireContext(), VirtualAppActivity::class.java).apply {
+                    putExtra(VirtualAppActivity.EXTRA_HTML_PATH, htmlPath)
+                }
+                startActivity(intent)
             }
-        }
+        )
 
         binding.rvChat.apply {
             layoutManager = LinearLayoutManager(requireContext())

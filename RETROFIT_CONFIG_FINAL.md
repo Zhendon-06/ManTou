@@ -218,3 +218,11 @@ suspend fun chatCompletion(
 
 运行应用，查看 Logcat 中的调试日志，确认所有配置正确！
 
+
+
+
+
+
+
+
+

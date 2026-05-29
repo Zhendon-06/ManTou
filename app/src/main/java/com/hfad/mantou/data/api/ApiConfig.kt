@@ -15,7 +15,7 @@ import com.hfad.mantou.BuildConfig
  */
 object ApiConfig {
     
-    // 从 BuildConfig 读取 API Key（由 local.properties 注入）
+    // 从 BuildConfig 读取 API Key（由 local.properties 注入）DeepSeek
     val API_KEY: String = BuildConfig.SILICONFLOW_API_KEY
     
     // ========== API 选择 ==========
@@ -26,13 +26,20 @@ object ApiConfig {
     // ========== DeepSeek 配置 ==========
     const val DEEPSEEK_BASE_URL = "https://api.deepseek.com/"
     const val DEEPSEEK_MODEL = "deepseek-chat"
-    
+
     // ========== SiliconFlow 配置（支持视觉）==========
     const val SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/"
-    // 视觉模型（支持图片识别）
     const val SILICONFLOW_VISION_MODEL = "Qwen/Qwen2-VL-72B-Instruct"
-    // 文本模型
     const val SILICONFLOW_TEXT_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+
+    // ========== 意图检测模型（快速轻量）==========
+    // 注意：API_KEY 实际是 DeepSeek 的 key，所以所有调用必须指向 DEEPSEEK_BASE_URL
+    const val INTENT_BASE_URL = DEEPSEEK_BASE_URL
+    const val INTENT_MODEL = DEEPSEEK_MODEL
+
+    // ========== App 生成模型 ==========
+    const val APP_GEN_BASE_URL = DEEPSEEK_BASE_URL
+    const val APP_GEN_MODEL = DEEPSEEK_MODEL
     
     // ========== 当前使用的配置 ==========
     val BASE_URL: String
