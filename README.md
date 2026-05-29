@@ -1,155 +1,171 @@
 # 馒头AI (ManTou AI)
 
-一个基于Kotlin开发的Android智能聊天应用，支持多轮对话、流式输出、本地持久化存储等功能。
+一个基于 Kotlin 开发的 Android 智能体应用，不仅能聊天，还能根据一句话自动生成可运行的网页 App。
 
 ## 功能特性
 
-- **智能对话**：支持多轮上下文对话，自动维护对话历史
-- **流式输出**：AI回复实时显示，提升交互体验
-- **本地存储**：使用Room数据库存储聊天记录，支持历史会话恢复
-- **图片对话**：支持发送图片进行多模态对话
-- **会话管理**：支持创建、切换、删除会话，自动使用首条消息作为会话标题
-- **响应式设计**：使用Kotlin Flow实现数据变化的实时监听
+### 智能对话
+- **多轮上下文对话**：自动维护对话历史，AI 基于完整上下文回复
+- **流式输出**：AI 回复实时逐字显示，提升交互体验
+- **多模态**：支持发送图片进行视觉对话（SiliconFlow 视觉模型）
 
-## 技术栈
+### 一句话生成网页 App
+- **意图自动识别**：系统自动判断用户是想聊天还是要生成 App，无需手动切换
+- **LLM 生成代码**：调用 DeepSeek 生成完整的、自包含的 HTML/CSS/JS 代码
+- **文件写入执行**：将生成的代码写入内部存储，通过 WebView 渲染运行
+- **聊天内预览**：生成的 App 在聊天气泡中以 WebView 预览
+- **全屏体验**：点击全屏按钮进入沉浸式全屏模式，点击缩小按钮返回聊天
 
-| 层级 | 技术 |
-|------|------|
-| **UI层** | ViewBinding、RecyclerView、ConstraintLayout |
-| **架构层** | MVVM、ViewModel、LiveData |
-| **数据层** | Room、Flow、Repository模式 |
-| **网络层** | OkHttp、SSE（Server-Sent Events） |
-| **图片加载** | Glide |
-| **异步处理** | Kotlin Coroutines |
+### 会话管理
+- **本地持久化**：Room 数据库存储所有聊天记录，支持历史会话恢复
+- **侧边栏**：查看、切换、删除历史会话
+- **自动标题**：使用首条用户消息作为会话标题
+
+## 技术架构
+
+```
+┌─────────────────────────────────────────────────┐
+│                   UI 层                          │
+│  MainFragment / VirtualAppActivity / ChatAdapter │
+└──────────────────────┬──────────────────────────┘
+                       │ 观察
+┌──────────────────────▼──────────────────────────┐
+│                 ViewModel 层                     │
+│  ChatViewModel（意图分流 / 流式输出 / App生成）    │
+└──────────────────────┬──────────────────────────┘
+                       │ 调用
+┌──────────────────────▼──────────────────────────┐
+│                  工具层                          │
+│  AppIntentDetector / AppGenerator / StreamingApi │
+└──────────────────────┬──────────────────────────┘
+                       │ 调用
+┌──────────────────────▼──────────────────────────┐
+│                 数据层                           │
+│  ChatRepository / Room / OkHttp                  │
+└─────────────────────────────────────────────────┘
+```
+
+## 一句话生成 App 流程
+
+```
+用户输入 "帮我做一个计算器"
+         │
+         ▼
+  AppIntentDetector（Qwen2.5-7B 快速判断）
+     ┌───┴───┐
+     │       │
+  普通聊天  生成App
+     │       │
+     ▼       ▼
+  流式对话  AppGenerator（DeepSeek 生成 HTML）
+              │
+              ▼
+         写入文件系统
+     filesDir/generated_apps/app_xxx.html
+              │
+              ▼
+         WebView 加载渲染
+     ┌────────┴────────┐
+     │                 │
+  聊天气泡预览      全屏模式
+  (app_webView)   (VirtualAppActivity)
+  btnFullscreen→  ←btnSmallscreen
+```
 
 ## 项目结构
 
 ```
 app/src/main/java/com/hfad/mantou/
-├── adapter/          # RecyclerView适配器
-│   ├── ChatAdapter.kt        # 聊天消息适配器（左右对话效果）
-│   └── SessionAdapter.kt     # 会话列表适配器
-├── data/             # 数据模型
-│   ├── ChatMessage.kt        # 消息数据类
-│   └── ChatSession.kt        # 会话数据类
-├── database/         # Room数据库
-│   ├── AppDatabase.kt        # 数据库定义
-│   ├── ChatDao.kt            # 数据访问对象
-│   └── entity/               # 数据库实体
-├── repository/       # 数据仓库
-│   └── ChatRepository.kt     # 封装数据库操作
-├── view/             # UI界面
-│   └── MainFragment.kt       # 主界面
-├── viewmodel/        # 视图模型
-│   └── ChatViewModel.kt      # 聊天业务逻辑
-└── api/              # 网络请求
-    └── StreamingApiService.kt # SSE流式请求
+├── adapter/
+│   ├── ChatAdapter.kt           # 聊天消息适配器（含 WebView 预览）
+│   ├── ImageSelectAdapter.kt    # 图片选择适配器
+│   └── SessionAdapter.kt        # 会话列表适配器
+├── data/
+│   ├── api/
+│   │   ├── ApiConfig.kt         # API 配置（DeepSeek / SiliconFlow / 意图检测 / App生成）
+│   │   ├── ApiMessage.kt        # API 消息格式（支持多模态）
+│   │   ├── ChatRequest.kt       # API 请求体
+│   │   ├── ChatResponse.kt      # API 响应体（含流式 StreamChunk）
+│   │   └── StreamingApiService.kt  # SSE 流式调用服务
+│   ├── database/
+│   │   ├── AppDatabase.kt       # Room 数据库
+│   │   ├── ChatDao.kt           # DAO 接口
+│   │   ├── ChatMessageEntity.kt # 消息实体（含 appHtmlPath）
+│   │   └── ChatSessionEntity.kt # 会话实体
+│   ├── repository/
+│   │   └── ChatRepository.kt    # 数据仓库
+│   ├── ChatMessage.kt           # UI 消息数据类
+│   └── ImageItem.kt             # 图片选择项数据类
+├── utils/
+│   ├── AppIntentDetector.kt     # 意图识别（快速模型判断是否生成App）
+│   ├── AppGenerator.kt          # App 生成器（LLM生成HTML + 写入文件）
+│   └── ImageUtils.kt            # 图片处理工具
+├── view/
+│   ├── MainActivity.kt          # 主 Activity（DrawerLayout）
+│   ├── MainFragment.kt          # 主 Fragment（聊天界面）
+│   └── VirtualAppActivity.kt    # 全屏 WebView Activity
+└── viewmodel/
+    └── ChatViewModel.kt         # 聊天 ViewModel（意图分流 + App生成流程）
 ```
 
-## 核心亮点
+## 技术栈
 
-### 1. 流式输出实现
+| 层级 | 技术 |
+|------|------|
+| **UI 层** | ViewBinding、RecyclerView、WebView、ConstraintLayout |
+| **架构层** | MVVM、ViewModel、LiveData、Navigation |
+| **数据层** | Room、Kotlin Flow、Repository 模式 |
+| **网络层** | OkHttp、SSE（Server-Sent Events）、Gson |
+| **AI 模型** | DeepSeek（对话 + App生成）、SiliconFlow Qwen2.5-7B（意图检测） |
+| **图片加载** | Glide |
+| **异步处理** | Kotlin Coroutines |
 
-使用SSE（Server-Sent Events）技术实现AI回复的实时显示：
+## API 配置
 
-```kotlin
-// 通过Kotlin Flow实现流式数据传递
-fun streamChatCompletion(messages: List<Message>): Flow<StreamEvent> = flow {
-    // 建立SSE连接，实时接收数据片段
-    // 每个数据片段通过Flow发射，UI实时更新
-}
+项目支持多个 LLM API 端点，按用途分工：
+
+| 用途 | API | 模型 | 说明 |
+|------|-----|------|------|
+| 日常对话 | DeepSeek | deepseek-chat | 流式输出，高质量对话 |
+| 意图检测 | SiliconFlow | Qwen2.5-7B-Instruct | 快速轻量，判断用户意图 |
+| App 生成 | DeepSeek | deepseek-chat | 生成完整 HTML 代码 |
+| 视觉对话 | SiliconFlow | Qwen2-VL-72B-Instruct | 图片理解（需开启） |
+
+在 `local.properties` 中配置 API Key：
+
+```properties
+SILICONFLOW_API_KEY=sk-your-api-key-here
 ```
 
-### 2. 左右对话效果
+## 数据库结构
 
-使用RecyclerView的多类型ViewHolder实现：
+### chat_sessions（会话表）
 
-```kotlin
-override fun getItemViewType(position: Int): Int {
-    return when {
-        message.isStreaming -> VIEW_TYPE_LOADING
-        message.role == ROLE_USER -> VIEW_TYPE_USER      // 右边
-        message.role == ROLE_ASSISTANT -> VIEW_TYPE_ASSISTANT  // 左边
-    }
-}
-```
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| sessionId | Long | 主键，自增 |
+| title | String | 会话标题 |
+| createTime | Long | 创建时间戳 |
 
-### 3. 本地数据持久化
+### chat_messages（消息表）
 
-使用Room数据库实现聊天记录的本地存储：
-
-```kotlin
-@Entity(tableName = "chat_messages")
-data class ChatMessageEntity(
-    val sessionId: Long,    // 关联会话ID
-    val role: String,       // user/assistant
-    val content: String,
-    val timestamp: Long
-)
-```
-
-### 4. 响应式数据流
-
-使用Kotlin Flow实现数据库变化的实时监听：
-
-```kotlin
-// DAO返回Flow类型
-@Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId")
-fun getMessagesBySessionId(sessionId: Long): Flow<List<ChatMessageEntity>>
-
-// ViewModel收集Flow，自动更新UI
-repository.getMessagesBySessionId(sessionId).collect { messages ->
-    _messages.value = messages
-}
-```
-
-## 架构设计
-
-```
-UI层 (View)
-    ↓ 观察
-ViewModel层
-    ↓ 调用
-Repository层
-    ↓ 调用
-数据层 (Room/Network)
-```
-
-- **单一职责**：每层只负责自己的功能
-- **解耦合**：通过接口和抽象降低依赖
-- **可测试**：每层可以独立测试
-- **易维护**：清晰的职责边界
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| messageId | Long | 主键，自增 |
+| sessionId | Long | 外键，关联会话（级联删除） |
+| role | String | "user" 或 "assistant" |
+| content | String | 消息内容 |
+| imagePath | String? | 图片路径 |
+| timestamp | Long | 消息时间戳 |
+| appHtmlPath | String? | 生成的 App HTML 文件路径 |
 
 ## 开发环境
 
-- **语言**：Kotlin
-- **最低SDK**：24 (Android 7.0)
-- **目标SDK**：34 (Android 14)
-- **构建工具**：Gradle 8.0+
-
-## 依赖库
-
-```kotlin
-// Android核心
-implementation("androidx.core:core-ktx:1.12.0")
-implementation("androidx.appcompat:appcompat:1.6.1")
-implementation("com.google.android.material:material:1.11.0")
-
-// 架构组件
-implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
-implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.7.0")
-
-// Room数据库
-implementation("androidx.room:room-runtime:2.6.1")
-implementation("androidx.room:room-ktx:2.6.1")
-kapt("androidx.room:room-compiler:2.6.1")
-
-// 网络请求
-implementation("com.squareup.okhttp3:okhttp:4.12.0")
-
-// 图片加载
-implementation("com.github.bumptech.glide:glide:4.16.0")
-```
+- **语言**：Kotlin 2.0.21
+- **最低 SDK**：26 (Android 8.0)
+- **目标 SDK**：36
+- **JVM Target**：11
+- **构建工具**：AGP 8.13.2 + KSP
 
 ## 快速开始
 
@@ -158,58 +174,30 @@ implementation("com.github.bumptech.glide:glide:4.16.0")
    git clone https://github.com/yourusername/ManTou.git
    ```
 
-2. **配置API**
-   在`local.properties`中添加你的API密钥：
+2. **配置 API Key**
+
+   在 `local.properties` 中添加：
    ```properties
-   API_KEY=your_api_key_here
+   SILICONFLOW_API_KEY=sk-your-api-key-here
    ```
 
 3. **构建运行**
-   使用Android Studio打开项目，点击运行按钮即可。
 
-## 项目截图
+   使用 Android Studio 打开项目，Sync Gradle 后点击运行即可。
 
-| 聊天界面 | 侧边栏 | 图片对话 |
-|---------|--------|---------|
-| ![Chat](screenshots/chat.png) | ![Sidebar](screenshots/sidebar.png) | ![Image](screenshots/image.png) |
+## 功能清单
 
-## 技术博客
-
-- [流式输出实现详解](docs/streaming.md)
-- [Room数据库设计](docs/database.md)
-- [MVVM架构实践](docs/architecture.md)
-
-## 贡献
-
-欢迎提交Issue和Pull Request！
-
-## 许可证
-
-```
-Copyright 2024 ManTou AI
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-```
-
-## 致谢
-
-- [Kotlin](https://kotlinlang.org/)
-- [Android Jetpack](https://developer.android.com/jetpack)
-- [OkHttp](https://square.github.io/okhttp/)
-- [Glide](https://github.com/bumptech/glide)
-
----
-
-<p align="center">
-  Made with ❤️ by ManTou Team
-</p>
+- [x] DeepSeek / SiliconFlow 双 API 支持
+- [x] SSE 流式输出
+- [x] 多轮上下文对话
+- [x] 图片对话（多模态）
+- [x] Room 数据库本地持久化
+- [x] 会话管理（创建/切换/删除）
+- [x] 侧边栏历史会话
+- [x] 一句话生成网页 App
+- [x] 意图自动识别（聊天 vs 生成App）
+- [x] 聊天气泡内 WebView 预览
+- [x] 全屏 WebView 体验
+- [x] 相机拍照
+- [x] 图片选择（相册）
+- [x] 自动滚动到最新消息
