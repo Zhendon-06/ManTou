@@ -5,6 +5,7 @@ import android.animation.AnimatorSet
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -21,7 +22,8 @@ import com.hfad.mantou.databinding.ItemChatUserBinding
 
 class ChatAdapter(
     private val onDataChanged: ((itemCount: Int) -> Unit)? = null,
-    private val onFullscreenClick: ((htmlPath: String) -> Unit)? = null
+    private val onFullscreenClick: ((htmlPath: String) -> Unit)? = null,
+    private val onMessageLongClick: ((ChatMessage) -> Unit)? = null
 ) : ListAdapter<ChatMessage, RecyclerView.ViewHolder>(ChatMessageDiffCallback()) {
 
     companion object {
@@ -115,6 +117,16 @@ class ChatAdapter(
         private val binding: ItemChatUserBinding
     ) : RecyclerView.ViewHolder(binding.root) {
 
+        init {
+            binding.root.setOnLongClickListener {
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    onMessageLongClick?.invoke(getItem(pos))
+                    true
+                } else false
+            }
+        }
+
         fun bind(message: ChatMessage) {
             binding.tvMessage.text = message.content
 
@@ -134,6 +146,16 @@ class ChatAdapter(
     inner class AssistantMessageViewHolder(
         private val binding: ItemChatAssistantBinding
     ) : RecyclerView.ViewHolder(binding.root) {
+
+        init {
+            binding.root.setOnLongClickListener {
+                val pos = bindingAdapterPosition
+                if (pos != RecyclerView.NO_POSITION) {
+                    onMessageLongClick?.invoke(getItem(pos))
+                    true
+                } else false
+            }
+        }
 
         fun bind(message: ChatMessage) {
             binding.tvMessage.text = message.content
@@ -203,11 +225,21 @@ class ChatAdapter(
 
         fun updateThinking(thinking: String?) {
             if (thinking.isNullOrEmpty()) {
-                binding.tvThinking.visibility = View.GONE
-            } else {
-                binding.tvThinking.visibility = View.VISIBLE
-                binding.tvThinking.text = thinking
+                binding.svThinking.visibility = View.GONE
+                return
             }
+            binding.svThinking.visibility = View.VISIBLE
+            binding.tvThinking.text = thinking
+            // 用 OnPreDrawListener 保证 layout 完成、ScrollView 已知最新内容高度后再滚动
+            val sv = binding.svThinking
+            sv.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    sv.viewTreeObserver.removeOnPreDrawListener(this)
+                    val child = sv.getChildAt(0) ?: return true
+                    sv.scrollTo(0, (child.bottom - sv.height).coerceAtLeast(0))
+                    return true
+                }
+            })
         }
 
         fun unbind() {

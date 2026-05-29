@@ -269,4 +269,7 @@ class ChatRepository(private val chatDao: ChatDao) {
     suspend fun getMessageCount(sessionId: Long): Int {
         return chatDao.getMessageCountBySessionId(sessionId)
     }
+
+    /** 删除单条消息（长按菜单调用）。 */
+    suspend fun deleteMessage(messageId: Long) = chatDao.deleteMessage(messageId)
 }

@@ -27,7 +27,10 @@ data class Delta(
     val role: String? = null,
 
     @SerializedName("content")
-    val content: String? = null
+    val content: String? = null,
+
+    @SerializedName("reasoning_content")
+    val reasoningContent: String? = null
 )
 
 /**

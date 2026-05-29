@@ -52,13 +52,16 @@
             android:textSize="15sp"
             tools:text="这是 AI 助手回复的消息内容，可以很长很长..." />
 
-        <!-- WebView容器 -->
-        <FrameLayout
+        <!-- WebView 容器（CardView 实现圆角裁剪，与外层气泡风格一致） -->
+        <com.google.android.material.card.MaterialCardView
             android:id="@+id/webViewContainer"
             android:layout_width="match_parent"
             android:layout_height="300dp"
             android:layout_marginTop="8dp"
-            android:background="@drawable/bg_chat_assistant"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:cardBackgroundColor="#F0F0F0"
+            app:strokeWidth="0dp"
             android:visibility="gone">
 
             <WebView
@@ -76,7 +79,7 @@
                 android:elevation="4dp"
                 android:scaleType="centerInside" />
 
-        </FrameLayout>
+        </com.google.android.material.card.MaterialCardView>
 
     </LinearLayout>
 

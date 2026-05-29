@@ -20,13 +20,15 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = ChatRepository(AppDatabase.getDatabase(application).chatDao())
+    private val providerRepository = com.hfad.mantou.data.repository.ProviderRepository(
+        AppDatabase.getDatabase(application).providerDao()
+    )
 
     private val _currentSessionId = MutableLiveData<Long?>()
     val currentSessionId: LiveData<Long?> = _currentSessionId
@@ -45,29 +47,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _appGenerated = MutableLiveData<String?>()
     val appGenerated: LiveData<String?> = _appGenerated
 
+    private val _activeModelName = MutableLiveData<String?>(null)
+    val activeModelName: LiveData<String?> = _activeModelName
+
+    private val _noModelConfigured = MutableLiveData(false)
+    val noModelConfigured: LiveData<Boolean> = _noModelConfigured
+
     private var streamingJob: Job? = null
     private var messagesJob: Job? = null
-    private var thinkingCycleJob: Job? = null
     private var streamingContent = StringBuilder()
+    private var thinkingContent = StringBuilder()
     private val STREAMING_MESSAGE_ID = -1L
 
-    private val chatThinkingTexts = listOf(
-        "正在理解你的问题...",
-        "正在组织答案...",
-        "正在斟酌措辞...",
-        "马上就好..."
-    )
+    init {
+        refreshActiveModel()
+    }
 
-    private val appGenThinkingTexts = listOf(
-        "正在分析你的需求...",
-        "正在设计页面结构...",
-        "正在编写 HTML 代码...",
-        "正在添加 CSS 样式...",
-        "正在实现交互逻辑...",
-        "正在优化界面细节...",
-        "正在保存生成的文件...",
-        "马上就好..."
-    )
+    fun refreshActiveModel() {
+        viewModelScope.launch {
+            val config = resolveActiveChatConfig()
+            _activeModelName.value = config?.model
+        }
+    }
 
     fun createEmptySession() {
         cancelStreaming()
@@ -119,6 +120,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _errorMessage.value = null
             streamingContent.clear()
 
+            val config = resolveActiveChatConfig()
+            if (config == null) {
+                _noModelConfigured.value = true
+                _isLoading.value = false
+                return@launch
+            }
+
+            _activeModelName.value = config.model
+
             val imageBase64List = mutableListOf<String>()
             val finalImagePath = imagePath ?: imageUris?.firstOrNull()?.toString()
 
@@ -138,58 +148,58 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             val isAppIntent = withContext(Dispatchers.IO) {
-                AppIntentDetector.isAppGenerationIntent(content)
+                AppIntentDetector.isAppGenerationIntent(config, content)
             }
 
             if (isAppIntent) {
-                generateAppFlow(sessionId, content)
+                generateAppFlow(sessionId, config, content)
             } else {
-                normalChatFlow(sessionId, imageBase64List)
+                normalChatFlow(sessionId, config, imageBase64List)
             }
 
             _isLoading.value = false
         }
     }
 
-    private suspend fun normalChatFlow(sessionId: Long, imageBase64List: List<String>) {
+    private suspend fun normalChatFlow(sessionId: Long, config: ChatCallConfig, imageBase64List: List<String>) {
         val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
         val apiMessages = buildApiMessages(historyMessages, imageBase64List)
+
         val request = ChatRequest(
-            model = ApiConfig.getModelForRequest(imageBase64List.isNotEmpty()),
+            model = config.model,
             messages = apiMessages,
             stream = true
         )
 
-        addStreamingPlaceholder(chatThinkingTexts.first())
-        startThinkingCycle(chatThinkingTexts, intervalMs = 1500L)
+        thinkingContent.clear()
+        addStreamingPlaceholder()
 
-        StreamingApiService.streamChatCompletion(request)
+        StreamingApiService.streamChatCompletion(config, request)
             .catch { e ->
-                stopThinkingCycle()
                 _errorMessage.value = "请求失败: ${e.message}"
                 removeStreamingPlaceholder()
             }
             .collect { event ->
                 when (event) {
-                    is StreamingApiService.StreamEvent.Start -> {
-                        // 保持 LoadingViewHolder + 思考文案，等到首个 Content 再切换
+                    is StreamingApiService.StreamEvent.Start -> {}
+                    is StreamingApiService.StreamEvent.Thinking -> {
+                        thinkingContent.append(event.text)
+                        updateStreamingThinking(thinkingContent.toString())
                     }
                     is StreamingApiService.StreamEvent.Content -> {
-                        stopThinkingCycle()
                         streamingContent.append(event.text)
                         updateStreamingMessage(streamingContent.toString())
                     }
                     is StreamingApiService.StreamEvent.Done -> {
-                        stopThinkingCycle()
                         val finalContent = streamingContent.toString()
                         removeStreamingPlaceholder()
                         if (finalContent.isNotEmpty()) {
                             repository.addAssistantMessage(sessionId, finalContent)
                         }
                         streamingContent.clear()
+                        thinkingContent.clear()
                     }
                     is StreamingApiService.StreamEvent.Error -> {
-                        stopThinkingCycle()
                         _errorMessage.value = event.message
                         val partialContent = streamingContent.toString()
                         removeStreamingPlaceholder()
@@ -197,47 +207,88 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             repository.addAssistantMessage(sessionId, partialContent)
                         }
                         streamingContent.clear()
+                        thinkingContent.clear()
+                    }
+                }
+            }
+    }
+
+    private suspend fun generateAppFlow(sessionId: Long, config: ChatCallConfig, userMessage: String) {
+        thinkingContent.clear()
+        addStreamingPlaceholder()
+
+        val apiMessages = listOf(
+            ApiMessage(role = "system", content = AppGenerator.SYSTEM_PROMPT),
+            ApiMessage(role = "user", content = userMessage)
+        )
+        val request = ChatRequest(
+            model = config.model,
+            messages = apiMessages,
+            stream = true,
+            maxTokens = AppGenerator.APP_GEN_MAX_TOKENS
+        )
+
+        val htmlBuffer = StringBuilder()
+
+        StreamingApiService.streamChatCompletion(config, request)
+            .catch { e ->
+                removeStreamingPlaceholder()
+                thinkingContent.clear()
+                repository.addAssistantMessage(sessionId, "生成失败: ${e.message}，请重试")
+                _errorMessage.value = e.message
+            }
+            .collect { event ->
+                when (event) {
+                    is StreamingApiService.StreamEvent.Thinking -> {
+                        thinkingContent.append(event.text)
+                        updateStreamingThinking(thinkingContent.toString())
+                    }
+                    is StreamingApiService.StreamEvent.Content -> {
+                        htmlBuffer.append(event.text)
+                    }
+                    is StreamingApiService.StreamEvent.Done -> {
+                        removeStreamingPlaceholder()
+                        thinkingContent.clear()
+                        val htmlContent = withContext(Dispatchers.IO) {
+                            AppGenerator.extractHtml(htmlBuffer.toString())
+                        }
+                        if (htmlContent != null) {
+                            val file = withContext(Dispatchers.IO) {
+                                AppGenerator.saveHtmlFile(getApplication(), htmlContent)
+                            }
+                            repository.addAssistantMessage(
+                                sessionId,
+                                "已为你生成网页应用，点击下方预览或全屏查看 👇",
+                                appHtmlPath = file.absolutePath
+                            )
+                            _appGenerated.value = file.absolutePath
+                        } else {
+                            repository.addAssistantMessage(
+                                sessionId,
+                                "生成失败: 无法提取 HTML 内容，请重试"
+                            )
+                            _errorMessage.value = "无法提取 HTML 内容"
+                        }
+                    }
+                    is StreamingApiService.StreamEvent.Error -> {
+                        removeStreamingPlaceholder()
+                        thinkingContent.clear()
+                        repository.addAssistantMessage(sessionId, "生成失败: ${event.message}，请重试")
+                        _errorMessage.value = event.message
                     }
                     else -> {}
                 }
             }
     }
 
-    private suspend fun generateAppFlow(sessionId: Long, userMessage: String) {
-        addStreamingPlaceholder(appGenThinkingTexts.first())
-        startThinkingCycle(appGenThinkingTexts, intervalMs = 2000L)
-
-        val result = withContext(Dispatchers.IO) {
-            AppGenerator.generateApp(getApplication(), userMessage)
-        }
-
-        stopThinkingCycle()
-        removeStreamingPlaceholder()
-
-        if (result.success && result.htmlPath != null) {
-            repository.addAssistantMessage(
-                sessionId,
-                "已为你生成网页应用，点击下方预览或全屏查看 👇",
-                appHtmlPath = result.htmlPath
-            )
-            _appGenerated.value = result.htmlPath
-        } else {
-            repository.addAssistantMessage(
-                sessionId,
-                "生成失败: ${result.error ?: "未知错误"}，请重试"
-            )
-            _errorMessage.value = result.error
-        }
-    }
-
-    private fun addStreamingPlaceholder(initialThinking: String? = null) {
+    private fun addStreamingPlaceholder() {
         val currentList = _messages.value?.toMutableList() ?: mutableListOf()
         currentList.add(ChatMessage(
             messageId = STREAMING_MESSAGE_ID,
             role = ChatMessage.ROLE_ASSISTANT,
             content = "",
             isStreaming = true,
-            thinking = initialThinking
+            thinking = null
         ))
         _messages.value = currentList
     }
@@ -249,23 +300,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             currentList[index] = currentList[index].copy(thinking = thinking)
             _messages.value = currentList
         }
-    }
-
-    private fun startThinkingCycle(texts: List<String>, intervalMs: Long) {
-        thinkingCycleJob?.cancel()
-        thinkingCycleJob = viewModelScope.launch {
-            var i = 0
-            while (isActive) {
-                updateStreamingThinking(texts[i % texts.size])
-                delay(intervalMs)
-                i++
-            }
-        }
-    }
-
-    private fun stopThinkingCycle() {
-        thinkingCycleJob?.cancel()
-        thinkingCycleJob = null
     }
 
     private fun updateStreamingMessage(content: String) {
@@ -287,10 +321,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun cancelStreaming() {
-        stopThinkingCycle()
         streamingJob?.cancel()
         streamingJob = null
         streamingContent.clear()
+        thinkingContent.clear()
         removeStreamingPlaceholder()
     }
 
@@ -304,6 +338,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             kotlinx.coroutines.delay(100)
             sendMessage(content, imagePath, imageUris)
         }
+    }
+
+    private suspend fun resolveActiveChatConfig(): ChatCallConfig? {
+        val ctx = getApplication<Application>()
+        val providerId = com.hfad.mantou.data.preferences.ActiveModelStore
+            .getActiveProviderId(ctx) ?: return null
+        val modelName = com.hfad.mantou.data.preferences.ActiveModelStore
+            .getActiveModelName(ctx)?.takeIf { it.isNotBlank() } ?: return null
+        val provider = withContext(Dispatchers.IO) {
+            providerRepository.getProviderById(providerId)
+        } ?: return null
+        if (provider.baseUrl.isBlank() || provider.apiKey.isBlank()) return null
+        return ChatCallConfig(
+            baseUrl = provider.baseUrl,
+            apiKey = provider.apiKey,
+            model = modelName,
+            apiFormat = provider.apiFormat
+        )
     }
 
     private fun buildApiMessages(
@@ -347,6 +399,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** 删除单条消息（仅对持久化到 DB 的消息生效，流式占位 id=-1 会被忽略）。 */
+    fun deleteMessage(messageId: Long) {
+        if (messageId <= 0) return
+        viewModelScope.launch {
+            repository.deleteMessage(messageId)
+        }
+    }
+
     fun deleteAllSessions() {
         viewModelScope.launch {
             repository.deleteAllSessions()
@@ -367,6 +427,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearAppGenerated() {
         _appGenerated.value = null
+    }
+
+    fun clearNoModelConfigured() {
+        _noModelConfigured.value = false
     }
 
     override fun onCleared() {

@@ -41,10 +41,11 @@
                     android:textStyle="bold" />
 
                 <TextView
+                    android:id="@+id/cur_model"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="内容由 AI 生成"
-                    android:textSize="11sp"
+                    android:text="请配置你的模型"
+                    android:textSize="12sp"
                     android:textColor="#999999" />
             </LinearLayout>
 

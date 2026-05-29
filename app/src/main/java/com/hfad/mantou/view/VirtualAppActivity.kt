@@ -20,6 +20,9 @@ class VirtualAppActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        binding = VirtualappBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
         val decorView = window.decorView
         val flags = (View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                 or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
@@ -28,9 +31,6 @@ class VirtualAppActivity : AppCompatActivity() {
                 or View.SYSTEM_UI_FLAG_FULLSCREEN
                 or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
         decorView.systemUiVisibility = flags
-
-        binding = VirtualappBinding.inflate(layoutInflater)
-        setContentView(binding.root)
 
         val htmlPath = intent.getStringExtra(EXTRA_HTML_PATH)
 

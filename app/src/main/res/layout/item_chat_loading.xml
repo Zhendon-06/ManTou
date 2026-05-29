@@ -32,18 +32,28 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent">
 
-        <!-- 思考过程文本（灰色斜体） -->
-        <TextView
-            android:id="@+id/tvThinking"
-            android:layout_width="wrap_content"
+        <!-- 思考过程文本（灰色斜体，最高 200dp 可滚动） -->
+        <ScrollView
+            android:id="@+id/svThinking"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:maxHeight="200dp"
             android:layout_marginBottom="6dp"
-            android:textColor="#999999"
-            android:textSize="13sp"
-            android:textStyle="italic"
+            android:scrollbars="none"
+            android:overScrollMode="never"
             android:visibility="gone"
-            tools:visibility="visible"
-            tools:text="正在思考..." />
+            tools:visibility="visible">
+
+            <TextView
+                android:id="@+id/tvThinking"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="#999999"
+                android:textSize="13sp"
+                android:textStyle="italic"
+                tools:text="正在思考..." />
+
+        </ScrollView>
 
         <!-- 等待动画点 -->
         <LinearLayout

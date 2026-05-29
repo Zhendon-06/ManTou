@@ -16,6 +16,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.widget.ImageButton
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -126,6 +127,9 @@ class MainFragment : Fragment() {
         // 观察 ViewModel 数据
         observeViewModel()
 
+        // 初始化模型名称显示
+        viewModel.refreshActiveModel()
+
         // 输入框失去焦点时：切换回搜索态
         binding.etInput.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus && isInputActive) {
@@ -198,6 +202,10 @@ class MainFragment : Fragment() {
         val drawerMenu = (activity as? MainActivity)?.findViewById<View>(com.hfad.mantou.R.id.drawerMenu)
         drawerMenu?.findViewById<android.widget.TextView>(com.hfad.mantou.R.id.tvClearHistory)?.setOnClickListener {
             showClearHistoryDialog()
+        }
+        drawerMenu?.findViewById<ImageButton>(com.hfad.mantou.R.id.btn_setting)?.setOnClickListener {
+            (activity as? MainActivity)?.closeDrawer()
+            startActivity(Intent(requireContext(), ModelSettingActivity::class.java))
         }
     }
 
@@ -278,6 +286,48 @@ class MainFragment : Fragment() {
     }
 
     /**
+     * 长按消息：弹出"复制 / 删除"菜单
+     */
+    private fun showMessageActions(message: ChatMessage) {
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setItems(arrayOf("复制", "删除")) { _, which ->
+                when (which) {
+                    0 -> copyMessageToClipboard(message)
+                    1 -> confirmDeleteMessage(message)
+                }
+            }
+            .show()
+    }
+
+    private fun copyMessageToClipboard(message: ChatMessage) {
+        val text = message.content
+        if (text.isEmpty()) {
+            Toast.makeText(requireContext(), "没有可复制的文本", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = requireContext()
+            .getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("chat_message", text))
+        Toast.makeText(requireContext(), "已复制", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun confirmDeleteMessage(message: ChatMessage) {
+        if (message.messageId <= 0) {
+            Toast.makeText(requireContext(), "该消息无法删除", Toast.LENGTH_SHORT).show()
+            return
+        }
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("删除消息")
+            .setMessage("确定要删除这条消息吗？")
+            .setPositiveButton("删除") { _, _ ->
+                viewModel.deleteMessage(message.messageId)
+                Toast.makeText(requireContext(), "已删除", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /**
      * 初始化聊天 RecyclerView
      */
     private fun setupChatRecyclerView() {
@@ -294,6 +344,9 @@ class MainFragment : Fragment() {
                     putExtra(VirtualAppActivity.EXTRA_HTML_PATH, htmlPath)
                 }
                 startActivity(intent)
+            },
+            onMessageLongClick = { message ->
+                showMessageActions(message)
             }
         )
 
@@ -345,6 +398,19 @@ class MainFragment : Fragment() {
         // 观察当前会话 ID
         viewModel.currentSessionId.observe(viewLifecycleOwner) { sessionId ->
             // 可以在这里更新 UI，显示当前会话信息
+        }
+
+        // 观察当前活跃模型名称
+        viewModel.activeModelName.observe(viewLifecycleOwner) { modelName ->
+            binding.curModel.text = modelName ?: "请配置你的模型"
+        }
+
+        // 观察未配置模型事件
+        viewModel.noModelConfigured.observe(viewLifecycleOwner) { noModel ->
+            if (noModel) {
+                Toast.makeText(requireContext(), "请先配置模型后再使用", Toast.LENGTH_LONG).show()
+                viewModel.clearNoModelConfigured()
+            }
         }
     }
 
@@ -759,6 +825,11 @@ class MainFragment : Fragment() {
             imagePath = firstImagePath,
             imageUris = imageUris
         )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshActiveModel()
     }
 
     override fun onDestroyView() {

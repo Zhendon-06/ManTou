@@ -4,12 +4,14 @@ import com.google.gson.annotations.SerializedName
 
 /**
  * Chat API 请求
- * 兼容 DeepSeek 和 SiliconFlow API
+ *
+ * model 必须由调用方显式提供（来源：用户在 ModelSettingActivity 选中的 Provider + 模型）。
+ * 项目不再内置任何默认模型 —— 未配置时上层会直接拦截并提示用户去配置。
  */
 data class ChatRequest(
     @SerializedName("model")
-    val model: String = ApiConfig.DEFAULT_MODEL,  // 动态默认模型
-    
+    val model: String,
+
     @SerializedName("messages")
     val messages: List<ApiMessage>,
     
