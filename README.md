@@ -7,14 +7,20 @@
 ### 智能对话
 - **多轮上下文对话**：自动维护对话历史，AI 基于完整上下文回复
 - **流式输出**：AI 回复实时逐字显示，提升交互体验
-- **多模态**：支持发送图片进行视觉对话（SiliconFlow 视觉模型）
+- **多模态**：支持发送图片进行视觉对话
 
 ### 一句话生成网页 App
 - **意图自动识别**：系统自动判断用户是想聊天还是要生成 App，无需手动切换
-- **LLM 生成代码**：调用 DeepSeek 生成完整的、自包含的 HTML/CSS/JS 代码
+- **LLM 生成代码**：调用当前配置的模型生成完整的、自包含的 HTML/CSS/JS 代码
 - **文件写入执行**：将生成的代码写入内部存储，通过 WebView 渲染运行
 - **聊天内预览**：生成的 App 在聊天气泡中以 WebView 预览
 - **全屏体验**：点击全屏按钮进入沉浸式全屏模式，点击缩小按钮返回聊天
+
+### 多模型管理
+- **用户自定义模型**：不内置任何默认模型，用户必须自行配置 Provider 和模型后才能使用
+- **多 Provider 支持**：支持 OpenAI 兼容格式和 Anthropic 格式的 API 端点
+- **动态切换**：在设置页面随时切换 Provider 和模型，顶部栏实时显示当前模型
+- **模型列表拉取**：自动从 Provider API 拉取可用模型列表，无需手动输入模型名
 
 ### 会话管理
 - **本地持久化**：Room 数据库存储所有聊天记录，支持历史会话恢复
@@ -24,25 +30,25 @@
 ## 技术架构
 
 ```
-┌─────────────────────────────────────────────────┐
-│                   UI 层                          │
-│  MainFragment / VirtualAppActivity / ChatAdapter │
-└──────────────────────┬──────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                      UI 层                            │
+│  MainFragment / VirtualAppActivity / ModelSettingAct  │
+└──────────────────────┬───────────────────────────────┘
                        │ 观察
-┌──────────────────────▼──────────────────────────┐
-│                 ViewModel 层                     │
-│  ChatViewModel（意图分流 / 流式输出 / App生成）    │
-└──────────────────────┬──────────────────────────┘
-                       │ 调用
-┌──────────────────────▼──────────────────────────┐
-│                  工具层                          │
-│  AppIntentDetector / AppGenerator / StreamingApi │
-└──────────────────────┬──────────────────────────┘
-                       │ 调用
-┌──────────────────────▼──────────────────────────┐
-│                 数据层                           │
-│  ChatRepository / Room / OkHttp                  │
-└─────────────────────────────────────────────────┘
+┌──────────────────────▼───────────────────────────────┐
+│                   ViewModel 层                        │
+│  ChatViewModel（意图分流 / 流式输出 / App生成）         │
+└──────────────────────┬───────────────────────────────┘
+                       │ ChatCallConfig
+┌──────────────────────▼───────────────────────────────┐
+│                    工具层                              │
+│  AppIntentDetector / AppGenerator / StreamingApi      │
+└──────────────────────┬───────────────────────────────┘
+                       │
+┌──────────────────────▼───────────────────────────────┐
+│                   数据层                              │
+│  ChatRepository / ProviderRepository / Room / OkHttp  │
+└──────────────────────────────────────────────────────┘
 ```
 
 ## 一句话生成 App 流程
@@ -51,13 +57,18 @@
 用户输入 "帮我做一个计算器"
          │
          ▼
-  AppIntentDetector（Qwen2.5-7B 快速判断）
+  resolveActiveChatConfig() → ChatCallConfig
+         │
+         │  未配置模型 → Toast: "请先配置模型后再使用"
+         │
+         ▼  已配置模型
+  AppIntentDetector（当前模型快速判断）
      ┌───┴───┐
      │       │
   普通聊天  生成App
      │       │
      ▼       ▼
-  流式对话  AppGenerator（DeepSeek 生成 HTML）
+  流式对话  AppGenerator（当前模型生成 HTML）
               │
               ▼
          写入文件系统
@@ -77,35 +88,44 @@
 ```
 app/src/main/java/com/hfad/mantou/
 ├── adapter/
-│   ├── ChatAdapter.kt           # 聊天消息适配器（含 WebView 预览）
-│   ├── ImageSelectAdapter.kt    # 图片选择适配器
-│   └── SessionAdapter.kt        # 会话列表适配器
+│   ├── ChatAdapter.kt              # 聊天消息适配器（含 WebView 预览）
+│   ├── ImageSelectAdapter.kt       # 图片选择适配器
+│   ├── ProviderModelAdapter.kt     # 模型列表适配器（单选高亮）
+│   └── SessionAdapter.kt           # 会话列表适配器
 ├── data/
 │   ├── api/
-│   │   ├── ApiConfig.kt         # API 配置（DeepSeek / SiliconFlow / 意图检测 / App生成）
-│   │   ├── ApiMessage.kt        # API 消息格式（支持多模态）
-│   │   ├── ChatRequest.kt       # API 请求体
-│   │   ├── ChatResponse.kt      # API 响应体（含流式 StreamChunk）
-│   │   └── StreamingApiService.kt  # SSE 流式调用服务
+│   │   ├── ApiConfig.kt            # API 通用参数（超时、Token上限等）
+│   │   ├── ApiMessage.kt           # API 消息格式（支持多模态）
+│   │   ├── ChatCallConfig.kt       # 动态聊天调用配置（baseUrl/apiKey/model/format）
+│   │   ├── ChatRequest.kt          # API 请求体
+│   │   ├── ChatResponse.kt         # API 响应体（含流式 StreamChunk）
+│   │   ├── ModelListApiService.kt  # 模型列表拉取服务
+│   │   └── StreamingApiService.kt  # SSE 流式调用（OpenAI/Anthropic 双协议）
 │   ├── database/
-│   │   ├── AppDatabase.kt       # Room 数据库
-│   │   ├── ChatDao.kt           # DAO 接口
-│   │   ├── ChatMessageEntity.kt # 消息实体（含 appHtmlPath）
-│   │   └── ChatSessionEntity.kt # 会话实体
+│   │   ├── AppDatabase.kt          # Room 数据库
+│   │   ├── ChatDao.kt              # 聊天 DAO 接口
+│   │   ├── ChatMessageEntity.kt    # 消息实体（含 appHtmlPath）
+│   │   ├── ChatSessionEntity.kt    # 会话实体
+│   │   ├── ProviderDao.kt          # Provider + Model DAO 接口
+│   │   └── ProviderEntity.kt       # Provider 实体（OpenAI/Anthropic 格式）
+│   ├── preferences/
+│   │   └── ActiveModelStore.kt     # 活跃模型持久化（SharedPreferences）
 │   ├── repository/
-│   │   └── ChatRepository.kt    # 数据仓库
-│   ├── ChatMessage.kt           # UI 消息数据类
-│   └── ImageItem.kt             # 图片选择项数据类
+│   │   ├── ChatRepository.kt       # 聊天数据仓库
+│   │   └── ProviderRepository.kt   # Provider 数据仓库
+│   ├── ChatMessage.kt              # UI 消息数据类
+│   └── ImageItem.kt                # 图片选择项数据类
 ├── utils/
-│   ├── AppIntentDetector.kt     # 意图识别（快速模型判断是否生成App）
-│   ├── AppGenerator.kt          # App 生成器（LLM生成HTML + 写入文件）
-│   └── ImageUtils.kt            # 图片处理工具
+│   ├── AppIntentDetector.kt        # 意图识别（关键词 + LLM 判断）
+│   ├── AppGenerator.kt             # App 生成器（LLM生成HTML + 写入文件）
+│   └── ImageUtils.kt               # 图片处理工具
 ├── view/
-│   ├── MainActivity.kt          # 主 Activity（DrawerLayout）
-│   ├── MainFragment.kt          # 主 Fragment（聊天界面）
-│   └── VirtualAppActivity.kt    # 全屏 WebView Activity
+│   ├── MainActivity.kt             # 主 Activity（DrawerLayout）
+│   ├── MainFragment.kt             # 主 Fragment（聊天界面 + cur_model 显示）
+│   ├── ModelSettingActivity.kt     # 模型配置页面（Provider/Model 管理）
+│   └── VirtualAppActivity.kt       # 全屏 WebView Activity
 └── viewmodel/
-    └── ChatViewModel.kt         # 聊天 ViewModel（意图分流 + App生成流程）
+    └── ChatViewModel.kt            # 聊天 ViewModel（意图分流 + 动态模型解析）
 ```
 
 ## 技术栈
@@ -114,30 +134,68 @@ app/src/main/java/com/hfad/mantou/
 |------|------|
 | **UI 层** | ViewBinding、RecyclerView、WebView、ConstraintLayout |
 | **架构层** | MVVM、ViewModel、LiveData、Navigation |
-| **数据层** | Room、Kotlin Flow、Repository 模式 |
+| **数据层** | Room、Kotlin Flow、SharedPreferences、Repository 模式 |
 | **网络层** | OkHttp、SSE（Server-Sent Events）、Gson |
-| **AI 模型** | DeepSeek（对话 + App生成）、SiliconFlow Qwen2.5-7B（意图检测） |
+| **AI 接入** | OpenAI 兼容格式、Anthropic 格式、用户自定义 Provider |
 | **图片加载** | Glide |
 | **异步处理** | Kotlin Coroutines |
 
-## API 配置
+## 模型配置
 
-项目支持多个 LLM API 端点，按用途分工：
+项目**不内置任何默认模型**，用户必须自行配置后才能使用。
 
-| 用途 | API | 模型 | 说明 |
-|------|-----|------|------|
-| 日常对话 | DeepSeek | deepseek-chat | 流式输出，高质量对话 |
-| 意图检测 | SiliconFlow | Qwen2.5-7B-Instruct | 快速轻量，判断用户意图 |
-| App 生成 | DeepSeek | deepseek-chat | 生成完整 HTML 代码 |
-| 视觉对话 | SiliconFlow | Qwen2-VL-72B-Instruct | 图片理解（需开启） |
+### 配置流程
 
-在 `local.properties` 中配置 API Key：
+1. 打开侧边栏，点击设置按钮进入模型配置页面
+2. 添加 Provider（填写名称、Base URL、API Key、API 格式）
+3. 拉取模型列表，选择要使用的模型
+4. 返回聊天界面，顶部栏显示当前选中的模型名称
 
-```properties
-SILICONFLOW_API_KEY=sk-your-api-key-here
+### 支持的 API 格式
+
+| 格式 | 认证方式 | 端点 | 兼容服务商 |
+|------|----------|------|------------|
+| OpenAI | `Authorization: Bearer {key}` | `POST {baseUrl}v1/chat/completions` | DeepSeek、SiliconFlow、OpenAI、Groq 等 |
+| Anthropic | `x-api-key: {key}` + `anthropic-version` | `POST {baseUrl}v1/messages` | Claude、Anthropic 兼容端点 |
+
+### 动态模型解析
+
+所有功能（聊天、意图检测、App 生成）统一使用用户配置的模型：
+
+```
+ActiveModelStore (SharedPreferences)
+    │  providerId + modelName
+    ▼
+ChatViewModel.resolveActiveChatConfig()
+    │  查询 ProviderEntity → ChatCallConfig
+    ▼
+StreamingApiService.streamChatCompletion(config, request)
+    │  config.isAnthropic ? streamAnthropic() : streamOpenAi()
+    ▼
+AppIntentDetector / AppGenerator 同样使用 ChatCallConfig
 ```
 
 ## 数据库结构
+
+### providers（服务商表）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| providerId | Long | 主键，自增 |
+| name | String | Provider 名称 |
+| baseUrl | String | API 基础地址 |
+| apiKey | String | API 密钥 |
+| apiFormat | String | "openai" 或 "anthropic" |
+| createTime | Long | 创建时间戳 |
+
+### provider_models（模型表）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| modelId | Long | 主键，自增 |
+| providerId | Long | 外键，关联 Provider |
+| modelName | String | 模型名称 |
+| createTime | Long | 创建时间戳 |
 
 ### chat_sessions（会话表）
 
@@ -174,20 +232,20 @@ SILICONFLOW_API_KEY=sk-your-api-key-here
    git clone https://github.com/yourusername/ManTou.git
    ```
 
-2. **配置 API Key**
+2. **构建运行**
 
-   在 `local.properties` 中添加：
-   ```properties
-   SILICONFLOW_API_KEY=sk-your-api-key-here
-   ```
+   使用 Android Studio 打开项目，Sync Gradle 后点击运行。
 
-3. **构建运行**
+3. **配置模型**
 
-   使用 Android Studio 打开项目，Sync Gradle 后点击运行即可。
+   首次启动后，打开侧边栏 → 点击设置按钮 → 添加你的 API Provider 和模型。
 
 ## 功能清单
 
-- [x] DeepSeek / SiliconFlow 双 API 支持
+- [x] 用户自定义 Provider / 模型配置
+- [x] OpenAI / Anthropic 双协议支持
+- [x] 模型列表自动拉取
+- [x] 动态模型切换（顶部栏实时显示）
 - [x] SSE 流式输出
 - [x] 多轮上下文对话
 - [x] 图片对话（多模态）
@@ -201,3 +259,21 @@ SILICONFLOW_API_KEY=sk-your-api-key-here
 - [x] 相机拍照
 - [x] 图片选择（相册）
 - [x] 自动滚动到最新消息
+
+## 许可证
+
+```
+Copyright 2024-2026 ManTou AI
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
