@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="10dp"
+    android:background="@drawable/bg_model_item"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="14dp">
+
+    <TextView
+        android:id="@+id/tvModelName"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="middle"
+        android:singleLine="true"
+        android:textColor="#1F2937"
+        android:textSize="15sp"
+        tools:text="claude-sonnet-4-5" />
+
+    <ImageView
+        android:id="@+id/ivSelectedTick"
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:contentDescription="@null"
+        android:src="@drawable/ic_check_blue"
+        android:visibility="gone" />
+</LinearLayout>
