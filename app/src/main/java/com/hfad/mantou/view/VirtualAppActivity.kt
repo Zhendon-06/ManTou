@@ -15,6 +15,7 @@ import androidx.core.content.FileProvider
 import com.hfad.mantou.databinding.VirtualappBinding
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.AppGenerator
+import com.hfad.mantou.utils.MantouWebViewRuntime
 import java.io.File
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -59,9 +60,12 @@ class VirtualAppActivity : AppCompatActivity() {
                 useWideViewPort = true
                 loadWithOverviewMode = true
             }
+            MantouWebViewRuntime.install(this)
         }
 
-        currentHtmlPath = htmlPath ?: resolveSharedHtmlPath(intent)
+        currentHtmlPath = (htmlPath ?: resolveSharedHtmlPath(intent))?.let { path ->
+            ensureStoredWebAppIdentity(File(path), "打开准备失败")?.absolutePath
+        }
         if (!currentHtmlPath.isNullOrEmpty()) {
             binding.webView.loadUrl("file://$currentHtmlPath")
         } else {
@@ -136,7 +140,7 @@ class VirtualAppActivity : AppCompatActivity() {
             return
         }
 
-        val shareFile = ensureStoredWebAppIdentity(htmlFile) ?: return
+        val shareFile = ensureStoredWebAppIdentity(htmlFile, "分享准备失败") ?: return
         val htmlUri = FileProvider.getUriForFile(
             this,
             "$packageName.fileprovider",
@@ -144,7 +148,7 @@ class VirtualAppActivity : AppCompatActivity() {
         )
 
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/octet-stream"
+            type = "text/html"
             putExtra(Intent.EXTRA_STREAM, htmlUri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
@@ -152,7 +156,7 @@ class VirtualAppActivity : AppCompatActivity() {
         startActivity(Intent.createChooser(shareIntent, "分享网页应用"))
     }
 
-    private fun ensureStoredWebAppIdentity(file: File): File? {
+    private fun ensureStoredWebAppIdentity(file: File, failurePrefix: String): File? {
         return runCatching {
             val htmlContent = file.readText()
             val identifiedContent = AppGenerator.ensureWebAppIdentity(htmlContent)
@@ -161,7 +165,7 @@ class VirtualAppActivity : AppCompatActivity() {
             }
             file
         }.getOrElse {
-            Toast.makeText(this, "分享准备失败: ${it.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "$failurePrefix: ${it.message}", Toast.LENGTH_SHORT).show()
             null
         }
     }

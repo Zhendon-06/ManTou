@@ -18,6 +18,7 @@ import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.databinding.ItemChatAssistantBinding
 import com.hfad.mantou.databinding.ItemChatLoadingBinding
 import com.hfad.mantou.databinding.ItemChatUserBinding
+import com.hfad.mantou.utils.MantouWebViewRuntime
 
 class ChatAdapter(
     private val onDataChanged: ((itemCount: Int) -> Unit)? = null,
@@ -192,6 +193,7 @@ class ChatAdapter(
                     useWideViewPort = true
                     loadWithOverviewMode = true
                 }
+                MantouWebViewRuntime.install(this)
                 loadUrl("file://$htmlPath")
             }
 

@@ -80,7 +80,7 @@
                     android:id="@+id/tvWorkspaceSubtitle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="agent / memory / web"
+                    android:text="agent | memory | webapp"
                     android:textColor="#7A8496"
                     android:textSize="12sp" />
             </LinearLayout>
