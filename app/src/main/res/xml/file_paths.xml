@@ -4,9 +4,10 @@
     <external-files-path
         name="pictures"
         path="Pictures/" />
+    <files-path
+        name="generated_apps"
+        path="generated_apps/" />
 </paths>
-
-
 
 
 

@@ -16,15 +16,32 @@
             android:layout_height="match_parent" />
 
         <!-- 右上角全屏按钮 -->
+<LinearLayout
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_gravity="end"
+    android:gravity="end"
+    android:orientation="horizontal"
+    >
+    <ImageButton
+        android:id="@+id/btnSmallscreen"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:layout_gravity="end|top"
+        android:layout_margin="8dp"
+        android:background="@drawable/tosmall"
+        android:elevation="4dp"
+        android:scaleType="centerInside" />
+    <ImageButton
+        android:id="@+id/btnShare"
+        android:layout_width="36dp"
+        android:layout_height="36dp"
+        android:layout_gravity="end|top"
+        android:layout_margin="8dp"
+        android:background="@drawable/share"
+        android:elevation="4dp"
+        android:scaleType="centerInside" />
+</LinearLayout>
 
-        <ImageButton
-            android:id="@+id/btnSmallscreen"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
-            android:layout_gravity="end|top"
-            android:layout_margin="8dp"
-            android:background="@drawable/tosmall"
-            android:elevation="4dp"
-            android:scaleType="centerInside" />
     </FrameLayout>
 </androidx.constraintlayout.widget.ConstraintLayout>

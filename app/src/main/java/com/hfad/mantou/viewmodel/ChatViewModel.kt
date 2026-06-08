@@ -42,6 +42,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLoading = MutableLiveData(false)
     val isLoading: LiveData<Boolean> = _isLoading
 
+    private val _isGeneratingApp = MutableLiveData(false)
+    val isGeneratingApp: LiveData<Boolean> = _isGeneratingApp
+
     private val _errorMessage = MutableLiveData<String?>()
     val errorMessage: LiveData<String?> = _errorMessage
 
@@ -223,71 +226,76 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun generateAppFlow(sessionId: Long, config: ChatCallConfig, userMessage: String) {
-        thinkingContent.clear()
-        addStreamingPlaceholder("正在生成应用")
+        _isGeneratingApp.value = true
+        try {
+            thinkingContent.clear()
+            addStreamingPlaceholder("正在生成应用")
 
-        val apiMessages = listOf(
-            ApiMessage(role = "system", content = AppGenerator.SYSTEM_PROMPT),
-            ApiMessage(role = "user", content = userMessage)
-        )
-        val request = ChatRequest(
-            model = config.model,
-            messages = apiMessages,
-            stream = true,
-            maxTokens = AppGenerator.APP_GEN_MAX_TOKENS
-        )
+            val apiMessages = listOf(
+                ApiMessage(role = "system", content = AppGenerator.buildSystemPrompt(getApplication())),
+                ApiMessage(role = "user", content = userMessage)
+            )
+            val request = ChatRequest(
+                model = config.model,
+                messages = apiMessages,
+                stream = true,
+                maxTokens = AppGenerator.APP_GEN_MAX_TOKENS
+            )
 
-        val htmlBuffer = StringBuilder()
+            val htmlBuffer = StringBuilder()
 
-        StreamingApiService.streamChatCompletion(config, request)
-            .catch { e ->
-                removeStreamingPlaceholder()
-                thinkingContent.clear()
-                repository.addAssistantMessage(sessionId, "生成失败: ${e.message}，请重试")
-                _errorMessage.value = e.message
-            }
-            .collect { event ->
-                when (event) {
-                    is StreamingApiService.StreamEvent.Thinking -> {
-                        thinkingContent.append(event.text)
-                        updateStreamingThinking(thinkingContent.toString())
-                    }
-                    is StreamingApiService.StreamEvent.Content -> {
-                        htmlBuffer.append(event.text)
-                    }
-                    is StreamingApiService.StreamEvent.Done -> {
-                        removeStreamingPlaceholder()
-                        thinkingContent.clear()
-                        val htmlContent = withContext(Dispatchers.IO) {
-                            AppGenerator.extractHtml(htmlBuffer.toString())
-                        }
-                        if (htmlContent != null) {
-                            val file = withContext(Dispatchers.IO) {
-                                AppGenerator.saveHtmlFile(getApplication(), htmlContent, userMessage)
-                            }
-                            repository.addAssistantMessage(
-                                sessionId,
-                                "已为你生成网页应用，点击下方预览或全屏查看 👇",
-                                appHtmlPath = file.absolutePath
-                            )
-                            _appGenerated.value = file.absolutePath
-                        } else {
-                            repository.addAssistantMessage(
-                                sessionId,
-                                "生成失败: 无法提取 HTML 内容，请重试"
-                            )
-                            _errorMessage.value = "无法提取 HTML 内容"
-                        }
-                    }
-                    is StreamingApiService.StreamEvent.Error -> {
-                        removeStreamingPlaceholder()
-                        thinkingContent.clear()
-                        repository.addAssistantMessage(sessionId, "生成失败: ${event.message}，请重试")
-                        _errorMessage.value = event.message
-                    }
-                    else -> {}
+            StreamingApiService.streamChatCompletion(config, request)
+                .catch { e ->
+                    removeStreamingPlaceholder()
+                    thinkingContent.clear()
+                    repository.addAssistantMessage(sessionId, "生成失败: ${e.message}，请重试")
+                    _errorMessage.value = e.message
                 }
-            }
+                .collect { event ->
+                    when (event) {
+                        is StreamingApiService.StreamEvent.Thinking -> {
+                            thinkingContent.append(event.text)
+                            updateStreamingThinking(thinkingContent.toString())
+                        }
+                        is StreamingApiService.StreamEvent.Content -> {
+                            htmlBuffer.append(event.text)
+                        }
+                        is StreamingApiService.StreamEvent.Done -> {
+                            removeStreamingPlaceholder()
+                            thinkingContent.clear()
+                            val htmlContent = withContext(Dispatchers.IO) {
+                                AppGenerator.extractHtml(htmlBuffer.toString())
+                            }
+                            if (htmlContent != null) {
+                                val file = withContext(Dispatchers.IO) {
+                                    AppGenerator.saveHtmlFile(getApplication(), htmlContent, userMessage)
+                                }
+                                repository.addAssistantMessage(
+                                    sessionId,
+                                    "已为你生成网页应用，点击下方预览或全屏查看 👇",
+                                    appHtmlPath = file.absolutePath
+                                )
+                                _appGenerated.value = file.absolutePath
+                            } else {
+                                repository.addAssistantMessage(
+                                    sessionId,
+                                    "生成失败: 无法提取 HTML 内容，请重试"
+                                )
+                                _errorMessage.value = "无法提取 HTML 内容"
+                            }
+                        }
+                        is StreamingApiService.StreamEvent.Error -> {
+                            removeStreamingPlaceholder()
+                            thinkingContent.clear()
+                            repository.addAssistantMessage(sessionId, "生成失败: ${event.message}，请重试")
+                            _errorMessage.value = event.message
+                        }
+                        else -> {}
+                    }
+                }
+        } finally {
+            _isGeneratingApp.value = false
+        }
     }
 
     private fun addStreamingPlaceholder(status: String) {
@@ -332,6 +340,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun cancelStreaming() {
         streamingJob?.cancel()
         streamingJob = null
+        _isGeneratingApp.value = false
         streamingContent.clear()
         thinkingContent.clear()
         removeStreamingPlaceholder()

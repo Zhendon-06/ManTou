@@ -21,6 +21,7 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -800,6 +801,10 @@ class MainFragment : Fragment() {
             // 例如：binding.progressBar.visibility = if (isLoading) View.VISIBLE else View.GONE
         }
 
+        viewModel.isGeneratingApp.observe(viewLifecycleOwner) { isGeneratingApp ->
+            setKeepScreenOn(isGeneratingApp)
+        }
+
         // 观察错误消息
         viewModel.errorMessage.observe(viewLifecycleOwner) { error ->
             error?.let {
@@ -1255,12 +1260,22 @@ class MainFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        setKeepScreenOn(false)
         pagerCallback?.let { binding.mainPager.unregisterOnPageChangeCallback(it) }
         pagerCallback = null
         binding.mainPager.adapter = null
         _workspaceBinding = null
         _chatBinding = null
         _binding = null
+    }
+
+    private fun setKeepScreenOn(keepScreenOn: Boolean) {
+        val window = activity?.window ?: return
+        if (keepScreenOn) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
     }
 
     private class StaticPagerAdapter(
