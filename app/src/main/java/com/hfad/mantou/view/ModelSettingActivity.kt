@@ -119,6 +119,8 @@ class ModelSettingActivity : AppCompatActivity() {
             Toast.makeText(this, "已选择模型：$modelName", Toast.LENGTH_SHORT).show()
         }
         rvModelList.layoutManager = LinearLayoutManager(this)
+        rvModelList.setHasFixedSize(true)
+        rvModelList.itemAnimator = null
         rvModelList.adapter = modelAdapter
     }
 
@@ -248,7 +250,9 @@ class ModelSettingActivity : AppCompatActivity() {
         modelsJob = lifecycleScope.launch {
             providerRepository.getModelsForProvider(providerId).collectLatest { models ->
                 val names = models.map { it.modelName }
-                modelAdapter.submitList(names)
+                modelAdapter.submitList(names) {
+                    rvModelList.requestLayout()
+                }
                 updateModelCount(names.size)
                 emptyModelState.visibility = if (names.isEmpty()) View.VISIBLE else View.GONE
 

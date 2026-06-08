@@ -18,9 +18,11 @@ import com.hfad.mantou.utils.ImageUtils
 import com.hfad.mantou.utils.AppIntentDetector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -59,9 +61,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private var streamingJob: Job? = null
     private var messagesJob: Job? = null
+    private var appGenerationProgressJob: Job? = null
     private var streamingContent = StringBuilder()
     private var thinkingContent = StringBuilder()
     private val STREAMING_MESSAGE_ID = -1L
+    private val APP_GENERATION_PROGRESS_INTERVAL_MS = 1_500L
 
     init {
         AgentWorkspace.ensureWorkspace(application)
@@ -230,6 +234,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         try {
             thinkingContent.clear()
             addStreamingPlaceholder("正在生成应用")
+            updateStreamingThinking(buildAppGenerationProgressText(elapsedSeconds = 0, receivedChars = 0))
 
             val apiMessages = listOf(
                 ApiMessage(role = "system", content = AppGenerator.buildSystemPrompt(getApplication())),
@@ -243,9 +248,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             val htmlBuffer = StringBuilder()
+            startAppGenerationProgressHeartbeat(htmlBuffer)
 
             StreamingApiService.streamChatCompletion(config, request)
                 .catch { e ->
+                    stopAppGenerationProgressHeartbeat()
                     removeStreamingPlaceholder()
                     thinkingContent.clear()
                     repository.addAssistantMessage(sessionId, "生成失败: ${e.message}，请重试")
@@ -259,32 +266,57 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         is StreamingApiService.StreamEvent.Content -> {
                             htmlBuffer.append(event.text)
+                            if (thinkingContent.isBlank()) {
+                                updateStreamingThinking(
+                                    buildAppGenerationProgressText(
+                                        elapsedSeconds = null,
+                                        receivedChars = htmlBuffer.length
+                                    )
+                                )
+                            }
                         }
                         is StreamingApiService.StreamEvent.Done -> {
-                            removeStreamingPlaceholder()
-                            thinkingContent.clear()
-                            val htmlContent = withContext(Dispatchers.IO) {
-                                AppGenerator.extractHtml(htmlBuffer.toString())
+                            stopAppGenerationProgressHeartbeat()
+                            if (thinkingContent.isBlank()) {
+                                updateStreamingThinking(
+                                    "模型已返回代码内容\n正在整理 HTML 并写入本地文件..."
+                                )
                             }
-                            if (htmlContent != null) {
-                                val file = withContext(Dispatchers.IO) {
-                                    AppGenerator.saveHtmlFile(getApplication(), htmlContent, userMessage)
+                            try {
+                                val htmlContent = withContext(Dispatchers.IO) {
+                                    AppGenerator.extractHtml(htmlBuffer.toString())
                                 }
-                                repository.addAssistantMessage(
-                                    sessionId,
-                                    "已为你生成网页应用，点击下方预览或全屏查看 👇",
-                                    appHtmlPath = file.absolutePath
-                                )
-                                _appGenerated.value = file.absolutePath
-                            } else {
-                                repository.addAssistantMessage(
-                                    sessionId,
-                                    "生成失败: 无法提取 HTML 内容，请重试"
-                                )
-                                _errorMessage.value = "无法提取 HTML 内容"
+                                if (htmlContent != null) {
+                                    val file = withContext(Dispatchers.IO) {
+                                        AppGenerator.saveHtmlFile(getApplication(), htmlContent, userMessage)
+                                    }
+                                    removeStreamingPlaceholder()
+                                    thinkingContent.clear()
+                                    repository.addAssistantMessage(
+                                        sessionId,
+                                        "已为你生成网页应用，点击下方预览或全屏查看 👇",
+                                        appHtmlPath = file.absolutePath
+                                    )
+                                    _appGenerated.value = file.absolutePath
+                                } else {
+                                    removeStreamingPlaceholder()
+                                    thinkingContent.clear()
+                                    repository.addAssistantMessage(
+                                        sessionId,
+                                        "生成失败: 无法提取 HTML 内容，请重试"
+                                    )
+                                    _errorMessage.value = "无法提取 HTML 内容"
+                                }
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                removeStreamingPlaceholder()
+                                thinkingContent.clear()
+                                repository.addAssistantMessage(sessionId, "生成失败: ${e.message}，请重试")
+                                _errorMessage.value = e.message
                             }
                         }
                         is StreamingApiService.StreamEvent.Error -> {
+                            stopAppGenerationProgressHeartbeat()
                             removeStreamingPlaceholder()
                             thinkingContent.clear()
                             repository.addAssistantMessage(sessionId, "生成失败: ${event.message}，请重试")
@@ -294,8 +326,52 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
         } finally {
+            stopAppGenerationProgressHeartbeat()
             _isGeneratingApp.value = false
         }
+    }
+
+    private fun startAppGenerationProgressHeartbeat(htmlBuffer: StringBuilder) {
+        stopAppGenerationProgressHeartbeat()
+        appGenerationProgressJob = viewModelScope.launch {
+            val startedAt = System.currentTimeMillis()
+            while (isActive) {
+                if (thinkingContent.isBlank()) {
+                    val elapsedSeconds = ((System.currentTimeMillis() - startedAt) / 1000).toInt()
+                    updateStreamingThinking(
+                        buildAppGenerationProgressText(
+                            elapsedSeconds = elapsedSeconds,
+                            receivedChars = htmlBuffer.length
+                        )
+                    )
+                }
+                delay(APP_GENERATION_PROGRESS_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopAppGenerationProgressHeartbeat() {
+        appGenerationProgressJob?.cancel()
+        appGenerationProgressJob = null
+    }
+
+    private fun buildAppGenerationProgressText(
+        elapsedSeconds: Int?,
+        receivedChars: Int
+    ): String {
+        val elapsedLine = elapsedSeconds?.let { "已等待 ${it}s" } ?: "正在接收模型返回"
+        val stageLine = when {
+            receivedChars <= 0 -> "已提交生成请求，正在等待模型开始返回内容..."
+            receivedChars < 2_000 -> "模型已开始返回内容，正在接收 HTML 代码..."
+            receivedChars < 12_000 -> "正在持续接收页面结构、样式和交互代码..."
+            else -> "已收到较多代码内容，正在等待模型完成收尾..."
+        }
+        val receivedLine = if (receivedChars > 0) {
+            "已接收约 $receivedChars 个字符"
+        } else {
+            "如果模型没有思考过程，这里会持续显示生成状态"
+        }
+        return listOf(elapsedLine, stageLine, receivedLine).joinToString("\n")
     }
 
     private fun addStreamingPlaceholder(status: String) {
@@ -340,6 +416,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun cancelStreaming() {
         streamingJob?.cancel()
         streamingJob = null
+        stopAppGenerationProgressHeartbeat()
         _isGeneratingApp.value = false
         streamingContent.clear()
         thinkingContent.clear()
