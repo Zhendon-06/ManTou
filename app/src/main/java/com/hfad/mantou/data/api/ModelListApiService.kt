@@ -11,10 +11,10 @@ import java.util.concurrent.TimeUnit
 /**
  * 拉取 Provider 模型列表。
  *
- * - OpenAI 兼容: GET {baseUrl}v1/models  + Authorization: Bearer {key}
- * - Anthropic   : GET {baseUrl}v1/models  + x-api-key: {key} + anthropic-version
+ * - OpenAI 兼容: GET {resolvedModelListUrl} + Authorization: Bearer {key}
+ * - Anthropic   : GET {resolvedModelListUrl} + x-api-key: {key} + anthropic-version
  *
- * 两者响应都返回 { "data": [ { "id": "...", ... }, ... ] }，统一抽取 id。
+ * 常见响应形态包括 { "data": [...] }、{ "models": [...] } 或顶层数组，统一抽取 id/name/model。
  */
 object ModelListApiService {
 
@@ -32,11 +32,13 @@ object ModelListApiService {
         apiFormat: String
     ): Result<List<String>> = withContext(Dispatchers.IO) {
         runCatching {
-            val url = buildModelsUrl(baseUrl)
+            val url = ApiEndpointResolver.modelListUrl(baseUrl)
             val builder = Request.Builder().url(url).get()
             when (apiFormat) {
                 ProviderEntity.API_FORMAT_ANTHROPIC -> {
-                    builder.addHeader("x-api-key", apiKey)
+                    if (apiKey.isNotEmpty()) {
+                        builder.addHeader("x-api-key", apiKey)
+                    }
                     builder.addHeader("anthropic-version", ANTHROPIC_VERSION)
                 }
                 else -> {
@@ -50,25 +52,48 @@ object ModelListApiService {
             client.newCall(builder.build()).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    throw RuntimeException("HTTP ${response.code}: ${body.take(200)}")
+                    throw RuntimeException("GET $url -> HTTP ${response.code}: ${body.take(200)}")
                 }
                 parseModelIds(body)
             }
         }
     }
 
-    private fun buildModelsUrl(baseUrl: String): String {
-        val trimmed = baseUrl.trim().trimEnd('/')
-        return "$trimmed/v1/models"
-    }
-
     private fun parseModelIds(body: String): List<String> {
         val root = JsonParser.parseString(body)
-        if (!root.isJsonObject) return emptyList()
-        val data = root.asJsonObject.get("data") ?: return emptyList()
-        if (!data.isJsonArray) return emptyList()
-        return data.asJsonArray.mapNotNull { el ->
-            if (el.isJsonObject) el.asJsonObject.get("id")?.asString else null
-        }.filter { it.isNotBlank() }
+        val modelArray = when {
+            root.isJsonArray -> root.asJsonArray
+            root.isJsonObject -> {
+                val obj = root.asJsonObject
+                listOf("data", "models")
+                    .firstNotNullOfOrNull { key ->
+                        obj.get(key)?.takeIf { it.isJsonArray }?.asJsonArray
+                    }
+            }
+            else -> null
+        } ?: return emptyList()
+
+        return modelArray.mapNotNull { el ->
+            when {
+                el.isJsonPrimitive -> el.asString
+                el.isJsonObject -> {
+                    val obj = el.asJsonObject
+                    firstStringValue(obj, "id", "name", "model")
+                }
+                else -> null
+            }
+        }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+
+    private fun firstStringValue(
+        obj: com.google.gson.JsonObject,
+        vararg keys: String
+    ): String? {
+        return keys.firstNotNullOfOrNull { key ->
+            obj.get(key)?.takeIf { it.isJsonPrimitive }?.asString
+        }
     }
 }

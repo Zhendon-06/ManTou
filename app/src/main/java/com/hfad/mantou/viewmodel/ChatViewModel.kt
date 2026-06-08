@@ -367,7 +367,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val provider = withContext(Dispatchers.IO) {
             providerRepository.getProviderById(providerId)
         } ?: return null
-        if (provider.baseUrl.isBlank() || provider.apiKey.isBlank()) return null
+        if (provider.baseUrl.isBlank()) return null
         return ChatCallConfig(
             baseUrl = provider.baseUrl,
             apiKey = provider.apiKey,

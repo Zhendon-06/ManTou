@@ -220,6 +220,15 @@
                     android:textSize="16sp" />
             </com.google.android.material.textfield.TextInputLayout>
 
+            <!-- Base URL 辅助文字 -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="可填写根地址、/v1，或完整 /v1/models、/v1/chat/completions、/v1/messages；请求时会自动补齐或替换路径。"
+                android:textColor="#9CA3AF"
+                android:textSize="13sp" />
+
             <!-- API Key -->
             <com.google.android.material.textfield.TextInputLayout
                 style="@style/Widget.Material3.TextInputLayout.OutlinedBox"

@@ -24,6 +24,7 @@ import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.textfield.TextInputEditText
 import com.hfad.mantou.R
 import com.hfad.mantou.adapter.ProviderModelAdapter
+import com.hfad.mantou.data.api.ApiEndpointResolver
 import com.hfad.mantou.data.api.ModelListApiService
 import com.hfad.mantou.data.database.AppDatabase
 import com.hfad.mantou.data.database.ProviderEntity
@@ -323,12 +324,19 @@ class ModelSettingActivity : AppCompatActivity() {
 
     private fun refreshModelsFromApi() {
         val name = etProviderName.text?.toString()?.trim().orEmpty()
-        val baseUrl = etBaseUrl.text?.toString()?.trim().orEmpty()
+        val rawBaseUrl = etBaseUrl.text?.toString()?.trim().orEmpty()
         val apiKey = etApiKey.text?.toString()?.trim().orEmpty()
-        if (name.isEmpty() || baseUrl.isEmpty()) {
+        if (name.isEmpty() || rawBaseUrl.isEmpty()) {
             Toast.makeText(this, "请填写 Provider 名称和 Base URL", Toast.LENGTH_SHORT).show()
             return
         }
+        val baseUrl = runCatching {
+            ApiEndpointResolver.normalizeBaseUrl(rawBaseUrl)
+        }.getOrElse { e ->
+            Toast.makeText(this, e.message ?: "Base URL 无效", Toast.LENGTH_LONG).show()
+            return
+        }
+        etBaseUrl.setText(baseUrl)
         val apiFormat = labelToApiFormat(actvProvider2.text?.toString())
 
         Toast.makeText(this, "拉取中…", Toast.LENGTH_SHORT).show()

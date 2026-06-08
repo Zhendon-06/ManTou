@@ -47,12 +47,19 @@ object StreamingApiService {
         config: ChatCallConfig,
         request: ChatRequest
     ): Flow<StreamEvent> = callbackFlow {
+        val url = runCatching {
+            ApiEndpointResolver.openAiChatCompletionsUrl(config.baseUrl)
+        }.getOrElse {
+            trySend(StreamEvent.Error(it.message ?: "Base URL 无效"))
+            close()
+            return@callbackFlow
+        }
         val streamRequest = request.copy(model = config.model, stream = true)
         val jsonBody = gson.toJson(streamRequest)
         val requestBody = jsonBody.toRequestBody(JSON_MEDIA_TYPE.toMediaType())
 
         val builder = Request.Builder()
-            .url("${normalizeBaseUrl(config.baseUrl)}v1/chat/completions")
+            .url(url)
             .addHeader("Content-Type", "application/json")
             .addHeader("Accept", "text/event-stream")
             .post(requestBody)
@@ -94,17 +101,26 @@ object StreamingApiService {
         config: ChatCallConfig,
         request: ChatRequest
     ): Flow<StreamEvent> = callbackFlow {
+        val url = runCatching {
+            ApiEndpointResolver.anthropicMessagesUrl(config.baseUrl)
+        }.getOrElse {
+            trySend(StreamEvent.Error(it.message ?: "Base URL 无效"))
+            close()
+            return@callbackFlow
+        }
         val bodyJson = buildAnthropicBody(config.model, request)
         val requestBody = bodyJson.toString()
             .toRequestBody(JSON_MEDIA_TYPE.toMediaType())
 
         val builder = Request.Builder()
-            .url("${normalizeBaseUrl(config.baseUrl)}v1/messages")
-            .addHeader("x-api-key", config.apiKey)
+            .url(url)
             .addHeader("anthropic-version", ANTHROPIC_VERSION)
             .addHeader("Content-Type", "application/json")
             .addHeader("Accept", "text/event-stream")
             .post(requestBody)
+        if (config.apiKey.isNotEmpty()) {
+            builder.addHeader("x-api-key", config.apiKey)
+        }
 
         val call = client.newCall(builder.build())
         call.enqueue(object : Callback {
@@ -276,11 +292,6 @@ object StreamingApiService {
         } catch (e: Exception) {
             null
         }
-    }
-
-    private fun normalizeBaseUrl(baseUrl: String): String {
-        val trimmed = baseUrl.trim()
-        return if (trimmed.endsWith('/')) trimmed else "$trimmed/"
     }
 
     /** 流式事件 */

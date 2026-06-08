@@ -7,8 +7,8 @@ import androidx.room.PrimaryKey
  * 模型服务 Provider 实体
  *
  * apiFormat: "openai" 或 "anthropic"
- *   - openai     -> POST {baseUrl}v1/chat/completions, Authorization: Bearer
- *   - anthropic  -> POST {baseUrl}v1/messages, x-api-key + anthropic-version
+ *   - openai     -> POST resolved chat/completions endpoint, Authorization: Bearer
+ *   - anthropic  -> POST resolved messages endpoint, x-api-key + anthropic-version
  */
 @Entity(tableName = "providers")
 data class ProviderEntity(
