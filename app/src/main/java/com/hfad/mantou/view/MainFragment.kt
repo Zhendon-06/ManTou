@@ -33,6 +33,10 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsAnimationCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
@@ -60,6 +64,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.compareTo
 import kotlin.math.abs
 
 class MainFragment : Fragment() {
@@ -73,6 +78,11 @@ class MainFragment : Fragment() {
     private var isInputActive = false
     private var currentPagerPage = 0
     private var pagerCallback: ViewPager2.OnPageChangeCallback? = null
+    private var inputContainerBasePaddingBottom = 0
+    private var functionPanelBaseHeight = 0
+    private var deferFunctionPanelHideForIme = false
+    private var lastImeVisible = false
+    private var lastAppliedBottomInset = Int.MIN_VALUE
 
     // ViewModel
     private val viewModel: ChatViewModel by viewModels()
@@ -160,6 +170,8 @@ class MainFragment : Fragment() {
         
         // 初始化手势检测器
         setupGestureDetector()
+
+        initInsets()
         
         // 观察 ViewModel 数据
         observeViewModel()
@@ -172,7 +184,7 @@ class MainFragment : Fragment() {
             if (!hasFocus && isInputActive) {
                 // 延迟检查，避免点击其他按钮时误触发
                 view.postDelayed({
-                    if (!chatBinding.etInput.hasFocus() && chatBinding.functionPanel.visibility != View.VISIBLE) {
+                    if (!chatBinding.etInput.hasFocus() && !isFunctionPanelVisible()) {
                         switchToIdleState()
                     }
                 }, 100)
@@ -180,22 +192,33 @@ class MainFragment : Fragment() {
         }
 
         // 添加按钮点击：显示/隐藏功能面板
+        chatBinding.etInput.setOnFocusChangeListener { _, hasFocus ->
+            if (hasFocus) {
+                enterInputActiveState()
+            } else if (isInputActive) {
+                view.postDelayed({
+                    if (!chatBinding.etInput.hasFocus() && !isFunctionPanelVisible()) {
+                        switchToIdleState()
+                    }
+                }, 100)
+            }
+        }
+
         chatBinding.ivAdd.setOnClickListener {
             toggleFunctionPanel()
         }
 
         // 点击聊天列表：隐藏功能面板
         chatBinding.rvChat.setOnClickListener {
-            hideFunctionPanel()
+            if (isFunctionPanelVisible()) {
+                hideFunctionPanel()
+            }
             chatBinding.etInput.clearFocus()
         }
 
         // 输入框点击：显示输入态
         chatBinding.etInput.setOnClickListener {
-            if (!isInputActive) {
-                switchToActiveState()
-            }
-            hideFunctionPanel()
+            switchToActiveState()
         }
 
         // 相机按钮点击：打开相机
@@ -220,6 +243,90 @@ class MainFragment : Fragment() {
 
         // 侧边栏清空历史按钮
         setupDrawerMenu()
+
+
+    }
+    private fun initInsets() {
+        inputContainerBasePaddingBottom = chatBinding.inputContainer.paddingBottom
+        functionPanelBaseHeight = resolveFunctionPanelHeight()
+
+        ViewCompat.setWindowInsetsAnimationCallback(
+            binding.root,
+            object : WindowInsetsAnimationCompat.Callback(
+                WindowInsetsAnimationCompat.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE
+            ) {
+                override fun onProgress(
+                    insets: WindowInsetsCompat,
+                    runningAnimations: MutableList<WindowInsetsAnimationCompat>
+                ): WindowInsetsCompat {
+                    applyChatInsets(insets)
+                    return insets
+                }
+            }
+        )
+        ViewCompat.requestApplyInsets(binding.root)
+    }
+
+    private fun applyChatInsets(insets: WindowInsetsCompat) {
+        val systemBarsInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+        val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+        val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+        val imeHeight = if (imeVisible) {
+            (imeInsets.bottom - systemBarsInsets.bottom).coerceAtLeast(0)
+        } else {
+            0
+        }
+        val functionPanelHeight = resolveFunctionPanelHeight()
+        var functionPanelVisible = isFunctionPanelVisible()
+        val shouldKeepFunctionPanel = deferFunctionPanelHideForIme &&
+                functionPanelVisible &&
+                imeHeight in 1 until functionPanelHeight
+
+        if (deferFunctionPanelHideForIme && functionPanelVisible && imeHeight >= functionPanelHeight) {
+            hideFunctionPanel()
+            functionPanelVisible = false
+        }
+
+        val bottomInset = if (functionPanelVisible || shouldKeepFunctionPanel) 0 else imeHeight
+        val targetPaddingBottom = inputContainerBasePaddingBottom + bottomInset
+
+        if (chatBinding.inputContainer.paddingBottom != targetPaddingBottom) {
+            chatBinding.inputContainer.updatePadding(bottom = targetPaddingBottom)
+        }
+
+        if (imeVisible && (!lastImeVisible || lastAppliedBottomInset != bottomInset)) {
+            scrollChatToBottom()
+        }
+
+        lastImeVisible = imeVisible
+        lastAppliedBottomInset = bottomInset
+    }
+
+    private fun scrollChatToBottom() {
+        if (!::chatAdapter.isInitialized) return
+        val messageCount = chatAdapter.itemCount
+        if (messageCount <= 0) return
+        chatBinding.rvChat.post {
+            chatBinding.rvChat.scrollToPosition(messageCount - 1)
+        }
+    }
+
+    private fun isFunctionPanelVisible(): Boolean {
+        val isVisibility =chatBinding.functionPanel.visibility == View.VISIBLE
+        if (isVisibility){
+            chatBinding.etInput.requestFocus()
+        }
+        return isVisibility
+    }
+
+    private fun resolveFunctionPanelHeight(): Int {
+        val measuredHeight = chatBinding.functionPanel.height
+        if (measuredHeight > 0) return measuredHeight
+
+        val layoutHeight = chatBinding.functionPanel.layoutParams?.height ?: 0
+        if (layoutHeight > 0) return layoutHeight
+
+        return functionPanelBaseHeight
     }
 
     private fun setupAppBar() {
@@ -1209,9 +1316,14 @@ class MainFragment : Fragment() {
      * 切换到输入态
      */
     private fun switchToActiveState() {
-        if (isInputActive) return
+        deferFunctionPanelHideForIme = isFunctionPanelVisible()
         
         isInputActive = true
+        if (!chatBinding.etInput.hasFocus()) {
+            chatBinding.etInput.requestFocus()
+        }
+        showKeyboard()
+        return
         
         // 延迟获取焦点，确保布局已更新
         chatBinding.etInput.postDelayed({
@@ -1223,6 +1335,10 @@ class MainFragment : Fragment() {
     /**
      * 切换到搜索态
      */
+    private fun enterInputActiveState() {
+        isInputActive = true
+    }
+
     private fun switchToIdleState() {
         if (!isInputActive) return
         
@@ -1255,6 +1371,8 @@ class MainFragment : Fragment() {
      * 显示功能面板
      */
     private fun showFunctionPanel() {
+        deferFunctionPanelHideForIme = false
+        resetInputContainerForFunctionPanel()
         chatBinding.functionPanel.visibility = View.VISIBLE
         // 隐藏键盘
         hideKeyboard()
@@ -1268,7 +1386,16 @@ class MainFragment : Fragment() {
      * 隐藏功能面板
      */
     private fun hideFunctionPanel() {
+        deferFunctionPanelHideForIme = false
         chatBinding.functionPanel.visibility = View.GONE
+    }
+
+    private fun resetInputContainerForFunctionPanel() {
+        if (chatBinding.inputContainer.paddingBottom != inputContainerBasePaddingBottom) {
+            chatBinding.inputContainer.updatePadding(bottom = inputContainerBasePaddingBottom)
+        }
+        lastImeVisible = false
+        lastAppliedBottomInset = 0
     }
 
     /**
