@@ -23,15 +23,15 @@
         app:navigationIconTint="#1F2937" />
 
     <!-- 主要内容 -->
-    <ScrollView
+    <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:fillViewport="true"
-        android:scrollbars="none">
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
 
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
+            android:layout_height="match_parent"
             android:orientation="vertical"
             android:paddingHorizontal="20dp"
             android:paddingBottom="24dp">
@@ -51,7 +51,7 @@
                     android:layout_height="wrap_content"
                     android:text="Provider 配置"
                     android:textColor="#9CA3AF"
-                    android:textSize="14sp"
+                    android:textSize="12sp"
                     android:textStyle="bold" />
 
                 <View
@@ -69,7 +69,7 @@
                 android:layout_marginTop="10dp"
                 android:text="新增、切换并维护模型服务提供商的名称、地址与密钥。"
                 android:textColor="#374151"
-                android:textSize="14sp" />
+                android:textSize="10sp" />
 
             <!-- Provider Tab 行 -->
             <LinearLayout
@@ -191,7 +191,7 @@
                     android:layout_height="wrap_content"
                     android:inputType="text"
                     android:textColor="#1F2937"
-                    android:textSize="16sp" />
+                    android:textSize="12sp" />
             </com.google.android.material.textfield.TextInputLayout>
 
             <!-- Base URL -->
@@ -217,7 +217,7 @@
                     android:inputType="textUri"
                     android:textColor="#1F2937"
                     android:textColorHint="#9CA3AF"
-                    android:textSize="16sp" />
+                    android:textSize="12sp" />
             </com.google.android.material.textfield.TextInputLayout>
 
             <!-- Base URL 辅助文字 -->
@@ -227,7 +227,7 @@
                 android:layout_marginTop="8dp"
                 android:text="可填写根地址、/v1，或完整 /v1/models、/v1/chat/completions、/v1/messages；请求时会自动补齐或替换路径。"
                 android:textColor="#9CA3AF"
-                android:textSize="13sp" />
+                android:textSize="10sp" />
 
             <!-- API Key -->
             <com.google.android.material.textfield.TextInputLayout
@@ -254,7 +254,7 @@
                     android:inputType="textPassword"
                     android:textColor="#1F2937"
                     android:textColorHint="#9CA3AF"
-                    android:textSize="16sp" />
+                    android:textSize="12sp" />
             </com.google.android.material.textfield.TextInputLayout>
 
             <!-- API Key 辅助文字 -->
@@ -264,7 +264,7 @@
                 android:layout_marginTop="8dp"
                 android:text="未填写 API Key 时，会以无鉴权方式请求 Provider。"
                 android:textColor="#9CA3AF"
-                android:textSize="13sp" />
+                android:textSize="10sp" />
 
             <!-- ============ 模型列表区域 ============ -->
 
@@ -281,7 +281,7 @@
                     android:layout_height="wrap_content"
                     android:text="模型列表"
                     android:textColor="#9CA3AF"
-                    android:textSize="14sp"
+                    android:textSize="12sp"
                     android:textStyle="bold" />
 
                 <View
@@ -299,7 +299,7 @@
                 android:layout_marginTop="10dp"
                 android:text="支持手动补充模型，也可从当前 Provider 拉取远端模型清单。"
                 android:textColor="#374151"
-                android:textSize="14sp" />
+                android:textSize="10sp" />
 
             <!-- 操作行：计数 + 添加 + 下载 + 排序 -->
             <LinearLayout
@@ -356,39 +356,46 @@
                     android:src="@drawable/ic_sort_list" />
             </LinearLayout>
 
-            <!-- 模型列表 RecyclerView -->
-            <androidx.recyclerview.widget.RecyclerView
-                android:id="@+id/rvModelList"
+            <!-- 模型列表区域 -->
+            <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="wrap_content"
+                android:layout_height="0dp"
                 android:layout_marginTop="8dp"
-                android:nestedScrollingEnabled="false" />
+                android:layout_weight="1">
+                <androidx.recyclerview.widget.RecyclerView
+                    android:id="@+id/rvModelList"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:nestedScrollingEnabled="true"
+                    android:overScrollMode="ifContentScrolls"
+                    android:paddingBottom="8dp"
+                    android:scrollbars="vertical" />
+                <!-- 空状态 -->
+                <LinearLayout
+                    android:id="@+id/emptyModelState"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:orientation="vertical">
 
-            <!-- 空状态 -->
-            <LinearLayout
-                android:id="@+id/emptyModelState"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="64dp"
-                android:gravity="center"
-                android:orientation="vertical">
+                    <ImageView
+                        android:layout_width="72dp"
+                        android:layout_height="72dp"
+                        android:contentDescription="@null"
+                        android:src="@drawable/ic_package_empty" />
 
-                <ImageView
-                    android:layout_width="72dp"
-                    android:layout_height="72dp"
-                    android:contentDescription="@null"
-                    android:src="@drawable/ic_package_empty" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="14dp"
-                    android:text="请添加模型！"
-                    android:textColor="#6B7280"
-                    android:textSize="15sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:text="请添加模型！"
+                        android:textColor="#6B7280"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+            </FrameLayout>
 
         </LinearLayout>
-    </ScrollView>
+    </LinearLayout>
 </LinearLayout>
