@@ -90,6 +90,12 @@ interface ChatDao {
      */
     @Query("DELETE FROM chat_messages WHERE messageId = :messageId")
     suspend fun deleteMessage(messageId: Long)
+
+    /**
+     * 更新某条消息内容
+     */
+    @Query("UPDATE chat_messages SET content = :content WHERE messageId = :messageId")
+    suspend fun updateMessageContent(messageId: Long, content: String)
     
     /**
      * 删除某个会话的所有消息
@@ -111,7 +117,6 @@ interface ChatDao {
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY timestamp DESC LIMIT 1")
     suspend fun getLastMessage(sessionId: Long): ChatMessageEntity?
 }
-
 
 
 

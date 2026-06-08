@@ -272,4 +272,9 @@ class ChatRepository(private val chatDao: ChatDao) {
 
     /** 删除单条消息（长按菜单调用）。 */
     suspend fun deleteMessage(messageId: Long) = chatDao.deleteMessage(messageId)
+
+    /** 更新单条消息内容（长按菜单调用）。 */
+    suspend fun updateMessageContent(messageId: Long, content: String) {
+        chatDao.updateMessageContent(messageId, content)
+    }
 }

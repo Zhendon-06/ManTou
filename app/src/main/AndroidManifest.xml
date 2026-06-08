@@ -23,9 +23,6 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ManTou">
         <activity
-            android:name=".view.MainActivity2"
-            android:exported="false" />
-        <activity
             android:name=".view.ModelSettingActivity"
             android:exported="false" />
         <activity

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="58dp"
+    android:background="?attr/selectableItemBackground"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="14dp"
+    android:paddingEnd="14dp">
+
+    <View
+        android:id="@+id/indentSpace"
+        android:layout_width="0dp"
+        android:layout_height="1dp" />
+
+    <ImageView
+        android:id="@+id/ivNodeIcon"
+        android:layout_width="30dp"
+        android:layout_height="30dp"
+        android:contentDescription="@null" />
+
+    <TextView
+        android:id="@+id/tvNodeName"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="14dp"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="#303647"
+        android:textSize="18sp" />
+
+    <TextView
+        android:id="@+id/tvNodeBadge"
+        android:layout_width="wrap_content"
+        android:layout_height="24dp"
+        android:background="@drawable/bg_workspace_badge"
+        android:gravity="center"
+        android:minWidth="34dp"
+        android:paddingHorizontal="8dp"
+        android:text="FILE"
+        android:textColor="#2D65E8"
+        android:textSize="11sp"
+        android:textStyle="bold" />
+
+    <ImageView
+        android:id="@+id/ivNodeChevron"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_marginStart="10dp"
+        android:contentDescription="@null" />
+</LinearLayout>

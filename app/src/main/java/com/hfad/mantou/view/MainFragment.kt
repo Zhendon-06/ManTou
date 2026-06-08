@@ -1,22 +1,33 @@
 package com.hfad.mantou.view
 
 import android.Manifest
+import android.app.Dialog
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.text.InputType
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.GestureDetector
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
@@ -26,14 +37,24 @@ import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import androidx.viewpager2.widget.ViewPager2
+import com.hfad.mantou.R
 import com.hfad.mantou.adapter.ChatAdapter
 import com.hfad.mantou.adapter.ImageSelectAdapter
 import com.hfad.mantou.adapter.SessionAdapter
+import com.hfad.mantou.adapter.WorkspaceFileAdapter
 import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.data.ImageItem
 import com.hfad.mantou.databinding.FragmentMainBinding
+import com.hfad.mantou.databinding.LayoutChatPageBinding
+import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
+import com.hfad.mantou.utils.AgentWorkspace
+import com.hfad.mantou.utils.WorkspaceNode
 import com.hfad.mantou.viewmodel.ChatViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -44,7 +65,13 @@ class MainFragment : Fragment() {
 
     private var _binding: FragmentMainBinding? = null
     private val binding get() = _binding!!
+    private var _chatBinding: LayoutChatPageBinding? = null
+    private val chatBinding get() = _chatBinding!!
+    private var _workspaceBinding: LayoutWorkspacePageBinding? = null
+    private val workspaceBinding get() = _workspaceBinding!!
     private var isInputActive = false
+    private var currentPagerPage = 0
+    private var pagerCallback: ViewPager2.OnPageChangeCallback? = null
 
     // ViewModel
     private val viewModel: ChatViewModel by viewModels()
@@ -57,6 +84,9 @@ class MainFragment : Fragment() {
 
     // 图片选择适配器
     private lateinit var imageSelectAdapter: ImageSelectAdapter
+
+    // workspace 文件树适配器
+    private lateinit var workspaceFileAdapter: WorkspaceFileAdapter
 
     // 手势检测器（用于上滑检测）
     private lateinit var gestureDetector: GestureDetector
@@ -106,11 +136,17 @@ class MainFragment : Fragment() {
         savedInstanceState: Bundle?
     ): View {
         _binding = FragmentMainBinding.inflate(inflater, container, false)
+        _chatBinding = LayoutChatPageBinding.inflate(inflater)
+        _workspaceBinding = LayoutWorkspacePageBinding.inflate(inflater)
         return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        setupAppBar()
+        setupMainPager()
+        setupWorkspacePage()
         
         // 初始化聊天 RecyclerView
         setupChatRecyclerView()
@@ -131,11 +167,11 @@ class MainFragment : Fragment() {
         viewModel.refreshActiveModel()
 
         // 输入框失去焦点时：切换回搜索态
-        binding.etInput.setOnFocusChangeListener { _, hasFocus ->
+        chatBinding.etInput.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus && isInputActive) {
                 // 延迟检查，避免点击其他按钮时误触发
                 view.postDelayed({
-                    if (!binding.etInput.hasFocus() && binding.functionPanel.visibility != View.VISIBLE) {
+                    if (!chatBinding.etInput.hasFocus() && chatBinding.functionPanel.visibility != View.VISIBLE) {
                         switchToIdleState()
                     }
                 }, 100)
@@ -143,41 +179,36 @@ class MainFragment : Fragment() {
         }
 
         // 添加按钮点击：显示/隐藏功能面板
-        binding.ivAdd.setOnClickListener {
+        chatBinding.ivAdd.setOnClickListener {
             toggleFunctionPanel()
         }
 
         // 点击聊天列表：隐藏功能面板
-        binding.rvChat.setOnClickListener {
+        chatBinding.rvChat.setOnClickListener {
             hideFunctionPanel()
-            binding.etInput.clearFocus()
+            chatBinding.etInput.clearFocus()
         }
 
         // 输入框点击：显示输入态
-        binding.etInput.setOnClickListener {
+        chatBinding.etInput.setOnClickListener {
             if (!isInputActive) {
                 switchToActiveState()
             }
             hideFunctionPanel()
         }
 
-        // 菜单按钮点击：打开侧边菜单
-        binding.ivMenu.setOnClickListener {
-            (activity as? MainActivity)?.openDrawer()
-        }
-
         // 相机按钮点击：打开相机
-        binding.ivCamera.setOnClickListener {
+        chatBinding.ivCamera.setOnClickListener {
             checkCameraPermissionAndOpen()
         }
 
         // 发送按钮点击：发送消息
-        binding.ivSend.setOnClickListener {
+        chatBinding.ivSend.setOnClickListener {
             sendMessage()
         }
 
         // 输入框回车键监听：发送消息
-        binding.etInput.setOnEditorActionListener { _, actionId, _ ->
+        chatBinding.etInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
                 sendMessage()
                 true
@@ -186,13 +217,219 @@ class MainFragment : Fragment() {
             }
         }
 
-        // 新建会话按钮点击
-        binding.newChat.setOnClickListener {
-            createNewSession()
-        }
-
         // 侧边栏清空历史按钮
         setupDrawerMenu()
+    }
+
+    private fun setupAppBar() {
+        binding.ivMenu.setOnClickListener {
+            (activity as? MainActivity)?.openDrawer()
+        }
+        binding.newChat.setOnClickListener {
+            if (currentPagerPage == 0) {
+                createNewSession()
+            } else {
+                binding.mainPager.setCurrentItem(0, true)
+            }
+        }
+        updateAppBarAction(0)
+    }
+
+    private fun setupMainPager() {
+        binding.mainPager.adapter = StaticPagerAdapter(
+            listOf(chatBinding.root, workspaceBinding.root)
+        )
+        binding.mainPager.offscreenPageLimit = 2
+
+        pagerCallback = object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageScrolled(
+                position: Int,
+                positionOffset: Float,
+                positionOffsetPixels: Int
+            ) {
+                updateAppBarTitleSlide(position, positionOffset)
+            }
+
+            override fun onPageSelected(position: Int) {
+                currentPagerPage = position
+                updateAppBarAction(position)
+            }
+        }
+        binding.mainPager.registerOnPageChangeCallback(pagerCallback!!)
+        binding.titleSwitcher.post {
+            currentPagerPage = binding.mainPager.currentItem
+            updateAppBarAction(currentPagerPage)
+            updateAppBarTitleSlide(currentPagerPage, 0f)
+        }
+    }
+
+    private fun setupWorkspacePage() {
+        AgentWorkspace.ensureWorkspace(requireContext())
+        workspaceFileAdapter = WorkspaceFileAdapter(
+            onFileClick = { node -> handleWorkspaceFileClick(node) },
+            onFileLongClick = { node -> handleWorkspaceFileLongClick(node) }
+        )
+        workspaceBinding.rvWorkspaceTree.apply {
+            layoutManager = LinearLayoutManager(requireContext())
+            adapter = workspaceFileAdapter
+            itemAnimator = null
+        }
+        refreshWorkspaceTree()
+    }
+
+    private fun handleWorkspaceFileClick(node: WorkspaceNode) {
+        val file = node.absolutePath?.let(::File) ?: return
+        if (!file.exists()) {
+            Toast.makeText(requireContext(), "文件不存在", Toast.LENGTH_SHORT).show()
+            refreshWorkspaceTree()
+            return
+        }
+
+        when (file.extension.lowercase(Locale.getDefault())) {
+            "html", "htm" -> {
+                val intent = Intent(requireContext(), VirtualAppActivity::class.java).apply {
+                    putExtra(VirtualAppActivity.EXTRA_HTML_PATH, file.absolutePath)
+                }
+                startActivity(intent)
+            }
+            "md", "txt" -> openTextFileEditor(file)
+            else -> {
+                val typeName = file.extension.ifBlank { "该" }
+                Toast.makeText(requireContext(), "暂不支持打开 $typeName 类型文件", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun openTextFileEditor(file: File) {
+        lifecycleScope.launch {
+            val contentResult = withContext(Dispatchers.IO) {
+                runCatching { file.readText() }
+            }
+            val content = contentResult.getOrElse {
+                Toast.makeText(requireContext(), "读取失败: ${it.message}", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            val editor = EditText(requireContext()).apply {
+                setText(content)
+                setSelection(text?.length ?: 0)
+                minLines = 12
+                maxLines = 18
+                inputType = InputType.TYPE_CLASS_TEXT or
+                        InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                setHorizontallyScrolling(false)
+                textSize = 14f
+            }
+
+            val paddingHorizontal = (16 * resources.displayMetrics.density).toInt()
+            val paddingTop = (8 * resources.displayMetrics.density).toInt()
+            val editorContainer = FrameLayout(requireContext()).apply {
+                setPadding(paddingHorizontal, paddingTop, paddingHorizontal, 0)
+                addView(
+                    editor,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+
+            val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                .setTitle(file.name)
+                .setView(editorContainer)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("保存", null)
+                .create()
+
+            dialog.setOnShowListener {
+                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+                    .setOnClickListener {
+                        lifecycleScope.launch {
+                            val saveResult = withContext(Dispatchers.IO) {
+                                runCatching { file.writeText(editor.text.toString()) }
+                            }
+                            saveResult
+                                .onSuccess {
+                                    Toast.makeText(requireContext(), "已保存", Toast.LENGTH_SHORT).show()
+                                    refreshWorkspaceTree()
+                                    dialog.dismiss()
+                                }
+                                .onFailure { error ->
+                                    Toast.makeText(requireContext(), "保存失败: ${error.message}", Toast.LENGTH_SHORT).show()
+                                }
+                        }
+                    }
+            }
+            dialog.show()
+        }
+    }
+
+    private fun handleWorkspaceFileLongClick(node: WorkspaceNode): Boolean {
+        if (!node.displayPath.startsWith("/workspace/${AgentWorkspace.WEB_DIR}/")) {
+            return false
+        }
+        val file = node.absolutePath?.let(::File) ?: return false
+        if (!file.exists()) {
+            Toast.makeText(requireContext(), "文件不存在", Toast.LENGTH_SHORT).show()
+            refreshWorkspaceTree()
+            return true
+        }
+
+        showActionMenu(
+            listOf(
+                ActionMenuItem("删除", R.drawable.ic_delete_outline) {
+                    confirmDeleteWorkspaceFile(file)
+                }
+            )
+        )
+        return true
+    }
+
+    private fun confirmDeleteWorkspaceFile(file: File) {
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("删除文件")
+            .setMessage("确定要删除「${file.name}」吗？")
+            .setPositiveButton("删除") { _, _ ->
+                val deleted = file.delete()
+                if (deleted) {
+                    Toast.makeText(requireContext(), "已删除", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(requireContext(), "删除失败", Toast.LENGTH_SHORT).show()
+                }
+                refreshWorkspaceTree()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun updateAppBarTitleSlide(position: Int, positionOffset: Float) {
+        val width = binding.titleSwitcher.width
+        if (width == 0) return
+
+        val progress = when {
+            position <= 0 -> positionOffset
+            else -> 1f
+        }.coerceIn(0f, 1f)
+
+        binding.chatTitleGroup.translationX = -progress * width
+        binding.chatTitleGroup.alpha = 1f - progress
+        binding.workspaceTitleGroup.translationX = (1f - progress) * width
+        binding.workspaceTitleGroup.alpha = progress
+    }
+
+    private fun updateAppBarAction(position: Int) {
+        binding.newChat.contentDescription = if (position == 0) {
+            "新建会话"
+        } else {
+            "返回聊天"
+        }
+    }
+
+    private fun refreshWorkspaceTree() {
+        if (::workspaceFileAdapter.isInitialized) {
+            workspaceFileAdapter.submitNodes(AgentWorkspace.loadWorkspaceTree(requireContext()))
+        }
     }
 
     /**
@@ -233,7 +470,7 @@ class MainFragment : Fragment() {
         viewModel.createEmptySession()
         
         // 清空输入框
-        binding.etInput.text?.clear()
+        chatBinding.etInput.text?.clear()
         
         // 清空图片选择
         clearImageSelection()
@@ -285,30 +522,54 @@ class MainFragment : Fragment() {
             .show()
     }
 
-    /**
-     * 长按消息：弹出"复制 / 删除"菜单
-     */
     private fun showMessageActions(message: ChatMessage) {
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setItems(arrayOf("复制", "删除")) { _, which ->
-                when (which) {
-                    0 -> copyMessageToClipboard(message)
-                    1 -> confirmDeleteMessage(message)
+        showActionMenu(
+            listOf(
+                ActionMenuItem("选字复制", R.drawable.ic_select_text) {
+                    showSelectableMessageText(message)
+                },
+                ActionMenuItem("删除", R.drawable.ic_delete_outline) {
+                    confirmDeleteMessage(message)
+                },
+                ActionMenuItem("修改", R.drawable.ic_edit_outline) {
+                    showEditMessageDialog(message)
                 }
-            }
-            .show()
+            )
+        )
     }
 
-    private fun copyMessageToClipboard(message: ChatMessage) {
+    private fun showSelectableMessageText(message: ChatMessage) {
         val text = message.content
         if (text.isEmpty()) {
             Toast.makeText(requireContext(), "没有可复制的文本", Toast.LENGTH_SHORT).show()
             return
         }
-        val clipboard = requireContext()
-            .getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("chat_message", text))
-        Toast.makeText(requireContext(), "已复制", Toast.LENGTH_SHORT).show()
+
+        val textView = TextView(requireContext()).apply {
+            this.text = text
+            setTextIsSelectable(true)
+            textSize = 15f
+            setTextColor(Color.rgb(31, 41, 55))
+            setLineSpacing(2f * resources.displayMetrics.density, 1f)
+        }
+        val paddingHorizontal = (18 * resources.displayMetrics.density).toInt()
+        val paddingVertical = (10 * resources.displayMetrics.density).toInt()
+        val container = FrameLayout(requireContext()).apply {
+            setPadding(paddingHorizontal, paddingVertical, paddingHorizontal, 0)
+            addView(
+                textView,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("选字复制")
+            .setView(container)
+            .setPositiveButton("关闭", null)
+            .show()
     }
 
     private fun confirmDeleteMessage(message: ChatMessage) {
@@ -327,6 +588,158 @@ class MainFragment : Fragment() {
             .show()
     }
 
+    private fun showEditMessageDialog(message: ChatMessage) {
+        if (message.messageId <= 0) {
+            Toast.makeText(requireContext(), "该消息无法修改", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val editor = EditText(requireContext()).apply {
+            setText(message.content)
+            setSelection(text?.length ?: 0)
+            minLines = 4
+            maxLines = 12
+            inputType = InputType.TYPE_CLASS_TEXT or
+                    InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                    InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setHorizontallyScrolling(false)
+            textSize = 15f
+        }
+
+        val paddingHorizontal = (16 * resources.displayMetrics.density).toInt()
+        val paddingTop = (8 * resources.displayMetrics.density).toInt()
+        val editorContainer = FrameLayout(requireContext()).apply {
+            setPadding(paddingHorizontal, paddingTop, paddingHorizontal, 0)
+            addView(
+                editor,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("修改消息")
+            .setView(editorContainer)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存", null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener {
+                    val newContent = editor.text.toString().trim()
+                    if (newContent.isBlank()) {
+                        Toast.makeText(requireContext(), "消息不能为空", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    viewModel.updateMessageContent(message.messageId, newContent)
+                    Toast.makeText(requireContext(), "已修改", Toast.LENGTH_SHORT).show()
+                    dialog.dismiss()
+                }
+        }
+        dialog.show()
+    }
+
+    private fun showActionMenu(items: List<ActionMenuItem>) {
+        if (items.isEmpty()) return
+
+        val dialog = Dialog(requireContext())
+        val density = resources.displayMetrics.density
+        val menu = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_action_menu)
+        }
+
+        items.forEachIndexed { index, item ->
+            val row = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(24), 0, dp(24), 0)
+                minimumHeight = dp(72)
+                foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
+                setOnClickListener {
+                    dialog.dismiss()
+                    item.onClick()
+                }
+            }
+
+            val icon = ImageView(requireContext()).apply {
+                setImageResource(item.iconRes)
+                colorFilter = android.graphics.PorterDuffColorFilter(
+                    Color.rgb(17, 24, 39),
+                    android.graphics.PorterDuff.Mode.SRC_IN
+                )
+            }
+            row.addView(
+                icon,
+                LinearLayout.LayoutParams(dp(30), dp(30))
+            )
+
+            val label = TextView(requireContext()).apply {
+                text = item.label
+                textSize = 22f
+                setTextColor(Color.rgb(17, 24, 39))
+                includeFontPadding = false
+            }
+            row.addView(
+                label,
+                LinearLayout.LayoutParams(
+                    0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    1f
+                ).apply {
+                    marginStart = dp(24)
+                }
+            )
+
+            menu.addView(
+                row,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(72)
+                )
+            )
+
+            if (index != items.lastIndex) {
+                menu.addView(
+                    View(requireContext()).apply {
+                        background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_action_menu_divider)
+                    },
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        (1 * density).toInt().coerceAtLeast(1)
+                    )
+                )
+            }
+        }
+
+        dialog.setContentView(menu)
+        dialog.setOnShowListener {
+            dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            dialog.window?.setLayout(
+                (resources.displayMetrics.widthPixels * 0.72f).toInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+        dialog.show()
+    }
+
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
+    }
+
+    private fun selectableItemBackgroundRes(): Int {
+        val typedValue = TypedValue()
+        requireContext().theme.resolveAttribute(
+            android.R.attr.selectableItemBackground,
+            typedValue,
+            true
+        )
+        return typedValue.resourceId
+    }
+
     /**
      * 初始化聊天 RecyclerView
      */
@@ -334,9 +747,9 @@ class MainFragment : Fragment() {
         chatAdapter = ChatAdapter(
             onDataChanged = { itemCount ->
                 if (itemCount > 0) {
-                    binding.flGreeting.visibility = View.GONE
+                    chatBinding.flGreeting.visibility = View.GONE
                 } else {
-                    binding.flGreeting.visibility = View.VISIBLE
+                    chatBinding.flGreeting.visibility = View.VISIBLE
                 }
             },
             onFullscreenClick = { htmlPath ->
@@ -350,7 +763,7 @@ class MainFragment : Fragment() {
             }
         )
 
-        binding.rvChat.apply {
+        chatBinding.rvChat.apply {
             layoutManager = LinearLayoutManager(requireContext())
             adapter = chatAdapter
             // 设置 item 动画（可选）
@@ -368,8 +781,8 @@ class MainFragment : Fragment() {
             
             // 滚动到最新消息
             if (messages.isNotEmpty()) {
-                binding.rvChat.post {
-                    binding.rvChat.scrollToPosition(messages.size - 1)
+                chatBinding.rvChat.post {
+                    chatBinding.rvChat.scrollToPosition(messages.size - 1)
                 }
             }
         }
@@ -402,7 +815,7 @@ class MainFragment : Fragment() {
 
         // 观察当前活跃模型名称
         viewModel.activeModelName.observe(viewLifecycleOwner) { modelName ->
-            binding.curModel.text = modelName ?: "请配置你的模型"
+            binding.tvChatSubtitle.text = modelName ?: "请配置你的模型"
         }
 
         // 观察未配置模型事件
@@ -410,6 +823,13 @@ class MainFragment : Fragment() {
             if (noModel) {
                 Toast.makeText(requireContext(), "请先配置模型后再使用", Toast.LENGTH_LONG).show()
                 viewModel.clearNoModelConfigured()
+            }
+        }
+
+        viewModel.appGenerated.observe(viewLifecycleOwner) { htmlPath ->
+            if (htmlPath != null) {
+                refreshWorkspaceTree()
+                viewModel.clearAppGenerated()
             }
         }
     }
@@ -446,14 +866,14 @@ class MainFragment : Fragment() {
         })
 
         // 在功能面板上设置触摸监听
-        binding.functionPanel.setOnTouchListener { _, event ->
+        chatBinding.functionPanel.setOnTouchListener { _, event ->
             gestureDetector.onTouchEvent(event)
             false // 返回 false 让 RecyclerView 继续处理滚动
         }
 
         // 在输入区域设置触摸监听（用于上滑打开图片选择器）
-        binding.inputCard.setOnTouchListener { _, event ->
-            if (binding.functionPanel.visibility == View.VISIBLE) {
+        chatBinding.inputCard.setOnTouchListener { _, event ->
+            if (chatBinding.functionPanel.visibility == View.VISIBLE) {
                 gestureDetector.onTouchEvent(event)
             }
             false
@@ -581,7 +1001,7 @@ class MainFragment : Fragment() {
         Toast.makeText(requireContext(), "拍照成功", Toast.LENGTH_SHORT).show()
         // 可以在这里处理拍摄的照片，例如显示预览或发送
         // 刷新图片列表以显示新拍摄的照片
-        if (binding.functionPanel.visibility == View.VISIBLE) {
+        if (chatBinding.functionPanel.visibility == View.VISIBLE) {
             loadRecentImages()
         }
     }
@@ -595,7 +1015,7 @@ class MainFragment : Fragment() {
             onImageSelectionChanged(selectedImages)
         }
 
-        binding.functionPanel.apply {
+        chatBinding.functionPanel.apply {
             layoutManager = GridLayoutManager(requireContext(), 4) // 4列
             adapter = imageSelectAdapter
             setHasFixedSize(true)
@@ -711,8 +1131,8 @@ class MainFragment : Fragment() {
         isInputActive = true
         
         // 延迟获取焦点，确保布局已更新
-        binding.etInput.postDelayed({
-            binding.etInput.requestFocus()
+        chatBinding.etInput.postDelayed({
+            chatBinding.etInput.requestFocus()
             showKeyboard()
         }, 100)
     }
@@ -724,7 +1144,7 @@ class MainFragment : Fragment() {
         if (!isInputActive) return
         
         // 如果功能面板正在显示，不切换
-        if (binding.functionPanel.visibility == View.VISIBLE) {
+        if (chatBinding.functionPanel.visibility == View.VISIBLE) {
             return
         }
         
@@ -733,15 +1153,15 @@ class MainFragment : Fragment() {
         hideFunctionPanel()
         
         // 清空输入框
-        binding.etInput.clearFocus()
-        binding.etInput.text?.clear()
+        chatBinding.etInput.clearFocus()
+        chatBinding.etInput.text?.clear()
     }
 
     /**
      * 显示/隐藏功能面板
      */
     private fun toggleFunctionPanel() {
-        if (binding.functionPanel.visibility == View.VISIBLE) {
+        if (chatBinding.functionPanel.visibility == View.VISIBLE) {
             hideFunctionPanel()
         } else {
             showFunctionPanel()
@@ -752,10 +1172,10 @@ class MainFragment : Fragment() {
      * 显示功能面板
      */
     private fun showFunctionPanel() {
-        binding.functionPanel.visibility = View.VISIBLE
+        chatBinding.functionPanel.visibility = View.VISIBLE
         // 隐藏键盘
         hideKeyboard()
-        binding.etInput.clearFocus()
+        chatBinding.etInput.clearFocus()
         
         // 检查权限并加载图片
         checkAndRequestPermission()
@@ -765,14 +1185,14 @@ class MainFragment : Fragment() {
      * 隐藏功能面板
      */
     private fun hideFunctionPanel() {
-        binding.functionPanel.visibility = View.GONE
+        chatBinding.functionPanel.visibility = View.GONE
     }
 
     /**
      * 显示键盘
      */
     private fun showKeyboard() {
-        binding.etInput.let {
+        chatBinding.etInput.let {
             val imm = ContextCompat.getSystemService(
                 requireContext(),
                 InputMethodManager::class.java
@@ -785,7 +1205,7 @@ class MainFragment : Fragment() {
      * 隐藏键盘
      */
     private fun hideKeyboard() {
-        binding.etInput.let {
+        chatBinding.etInput.let {
             val imm = ContextCompat.getSystemService(
                 requireContext(),
                 InputMethodManager::class.java
@@ -798,7 +1218,7 @@ class MainFragment : Fragment() {
      * 发送消息
      */
     private fun sendMessage() {
-        val text = binding.etInput.text?.toString()?.trim() ?: ""
+        val text = chatBinding.etInput.text?.toString()?.trim() ?: ""
         
         // 获取选中的图片
         val selectedImages = getSelectedImages()
@@ -814,7 +1234,7 @@ class MainFragment : Fragment() {
         val firstImagePath = imageUris.firstOrNull()?.toString()
 
         // 清空输入框和图片选择
-        binding.etInput.text?.clear()
+        chatBinding.etInput.text?.clear()
         clearImageSelection()
         hideFunctionPanel()
         hideKeyboard()
@@ -830,10 +1250,54 @@ class MainFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         viewModel.refreshActiveModel()
+        refreshWorkspaceTree()
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
+        pagerCallback?.let { binding.mainPager.unregisterOnPageChangeCallback(it) }
+        pagerCallback = null
+        binding.mainPager.adapter = null
+        _workspaceBinding = null
+        _chatBinding = null
         _binding = null
     }
+
+    private class StaticPagerAdapter(
+        private val pages: List<View>
+    ) : RecyclerView.Adapter<StaticPagerAdapter.PageViewHolder>() {
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageViewHolder {
+            val container = FrameLayout(parent.context).apply {
+                layoutParams = RecyclerView.LayoutParams(
+                    RecyclerView.LayoutParams.MATCH_PARENT,
+                    RecyclerView.LayoutParams.MATCH_PARENT
+                )
+            }
+            return PageViewHolder(container)
+        }
+
+        override fun onBindViewHolder(holder: PageViewHolder, position: Int) {
+            val page = pages[position]
+            (page.parent as? ViewGroup)?.removeView(page)
+            holder.container.removeAllViews()
+            holder.container.addView(
+                page,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+
+        override fun getItemCount(): Int = pages.size
+
+        class PageViewHolder(val container: FrameLayout) : RecyclerView.ViewHolder(container)
+    }
+
+    private data class ActionMenuItem(
+        val label: String,
+        val iconRes: Int,
+        val onClick: () -> Unit
+    )
 }

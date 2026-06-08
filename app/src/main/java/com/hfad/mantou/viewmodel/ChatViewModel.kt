@@ -13,6 +13,7 @@ import com.hfad.mantou.data.database.ChatMessageEntity
 import com.hfad.mantou.data.database.ChatSessionEntity
 import com.hfad.mantou.data.repository.ChatRepository
 import com.hfad.mantou.utils.AppGenerator
+import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.ImageUtils
 import com.hfad.mantou.utils.AppIntentDetector
 import kotlinx.coroutines.Dispatchers
@@ -60,6 +61,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val STREAMING_MESSAGE_ID = -1L
 
     init {
+        AgentWorkspace.ensureWorkspace(application)
         refreshActiveModel()
     }
 
@@ -120,6 +122,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _errorMessage.value = null
             streamingContent.clear()
 
+            withContext(Dispatchers.IO) {
+                AgentWorkspace.appendExplicitMemoryIfNeeded(getApplication(), content)
+            }
+
             val config = resolveActiveChatConfig()
             if (config == null) {
                 _noModelConfigured.value = true
@@ -163,7 +169,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun normalChatFlow(sessionId: Long, config: ChatCallConfig, imageBase64List: List<String>) {
         val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
-        val apiMessages = buildApiMessages(historyMessages, imageBase64List)
+        val systemPrompt = withContext(Dispatchers.IO) {
+            AgentWorkspace.buildSystemPrompt(getApplication())
+        }
+        val apiMessages = buildApiMessages(historyMessages, systemPrompt, imageBase64List)
 
         val request = ChatRequest(
             model = config.model,
@@ -172,7 +181,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         thinkingContent.clear()
-        addStreamingPlaceholder()
+        addStreamingPlaceholder("正在思考")
 
         StreamingApiService.streamChatCompletion(config, request)
             .catch { e ->
@@ -215,7 +224,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun generateAppFlow(sessionId: Long, config: ChatCallConfig, userMessage: String) {
         thinkingContent.clear()
-        addStreamingPlaceholder()
+        addStreamingPlaceholder("正在生成应用")
 
         val apiMessages = listOf(
             ApiMessage(role = "system", content = AppGenerator.SYSTEM_PROMPT),
@@ -254,7 +263,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         if (htmlContent != null) {
                             val file = withContext(Dispatchers.IO) {
-                                AppGenerator.saveHtmlFile(getApplication(), htmlContent)
+                                AppGenerator.saveHtmlFile(getApplication(), htmlContent, userMessage)
                             }
                             repository.addAssistantMessage(
                                 sessionId,
@@ -281,12 +290,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
     }
 
-    private fun addStreamingPlaceholder() {
+    private fun addStreamingPlaceholder(status: String) {
         val currentList = _messages.value?.toMutableList() ?: mutableListOf()
         currentList.add(ChatMessage(
             messageId = STREAMING_MESSAGE_ID,
             role = ChatMessage.ROLE_ASSISTANT,
-            content = "",
+            content = status,
             isStreaming = true,
             thinking = null
         ))
@@ -360,13 +369,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun buildApiMessages(
         historyMessages: List<ChatMessageEntity>,
+        systemPrompt: String,
         currentImageBase64List: List<String> = emptyList()
     ): List<ApiMessage> {
         val messages = mutableListOf<ApiMessage>()
 
         messages.add(ApiMessage(
             role = "system",
-            content = "你是馒头，一个友好、专业的 AI 助手。请用简洁、准确的语言回答用户的问题。"
+            content = systemPrompt
         ))
 
         historyMessages.forEachIndexed { index, entity ->
@@ -404,6 +414,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (messageId <= 0) return
         viewModelScope.launch {
             repository.deleteMessage(messageId)
+        }
+    }
+
+    fun updateMessageContent(messageId: Long, content: String) {
+        if (messageId <= 0 || content.isBlank()) return
+        viewModelScope.launch {
+            repository.updateMessageContent(messageId, content)
         }
     }
 

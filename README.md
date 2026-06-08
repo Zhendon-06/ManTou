@@ -8,13 +8,25 @@
 - **多轮上下文对话**：自动维护对话历史，AI 基于完整上下文回复
 - **流式输出**：AI 回复实时逐字显示，提升交互体验
 - **多模态**：支持发送图片进行视觉对话
+- **消息长按操作**：支持选字复制、删除、修改消息内容
+- **生成思考面板**：生成 App 时以固定高度面板显示思考过程，内部自动滚动
 
 ### 一句话生成网页 App
 - **意图自动识别**：系统自动判断用户是想聊天还是要生成 App，无需手动切换
 - **LLM 生成代码**：调用当前配置的模型生成完整的、自包含的 HTML/CSS/JS 代码
 - **文件写入执行**：将生成的代码写入内部存储，通过 WebView 渲染运行
+- **语义化文件名**：根据用户要生成的 App 类型自动命名 HTML 文件，例如 `天气_20260608_160000.html`
 - **聊天内预览**：生成的 App 在聊天气泡中以 WebView 预览
 - **全屏体验**：点击全屏按钮进入沉浸式全屏模式，点击缩小按钮返回聊天
+
+### 文件架构与 Agent Workspace
+- **左右滑动切换**：聊天页和文件架构页通过 ViewPager2 横向切换，共用同一个 AppBar
+- **文件树映射**：展示 `/workspace/generated_apps`、`/workspace/agent`、`/workspace/memory`
+- **Agent 身份文件**：`SOUL.md` 定义身份、语气、价值观和行为边界
+- **对话规则文件**：`CHAT.md` 定义回复格式、交互规则和工具使用规范
+- **记忆文件**：`MEMORY.md` 记录显式或长期偏好，并进入后续对话 prompt
+- **基本文件操作**：`md` / `txt` 可点击编辑保存，`html` 可点击用 WebView 打开
+- **生成文件管理**：`generated_apps` 下的文件支持长按删除
 
 ### 多模型管理
 - **用户自定义模型**：不内置任何默认模型，用户必须自行配置 Provider 和模型后才能使用
@@ -26,6 +38,7 @@
 - **本地持久化**：Room 数据库存储所有聊天记录，支持历史会话恢复
 - **侧边栏**：查看、切换、删除历史会话
 - **自动标题**：使用首条用户消息作为会话标题
+- **消息编辑**：长按消息可修改已保存消息内容
 
 ## 技术架构
 
@@ -33,6 +46,7 @@
 ┌──────────────────────────────────────────────────────┐
 │                      UI 层                            │
 │  MainFragment / VirtualAppActivity / ModelSettingAct  │
+│  ViewPager2（聊天页 / 文件架构页）                      │
 └──────────────────────┬───────────────────────────────┘
                        │ 观察
 ┌──────────────────────▼───────────────────────────────┐
@@ -42,7 +56,8 @@
                        │ ChatCallConfig
 ┌──────────────────────▼───────────────────────────────┐
 │                    工具层                              │
-│  AppIntentDetector / AppGenerator / StreamingApi      │
+│  AppIntentDetector / AppGenerator / AgentWorkspace    │
+│  StreamingApiService / ImageUtils                     │
 └──────────────────────┬───────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────┐
@@ -72,7 +87,7 @@
               │
               ▼
          写入文件系统
-     filesDir/generated_apps/app_xxx.html
+     filesDir/generated_apps/类型_时间戳.html
               │
               ▼
          WebView 加载渲染
@@ -83,6 +98,23 @@
   btnFullscreen→  ←btnSmallscreen
 ```
 
+## Runtime Workspace
+
+App 启动或首次生成 App 时，会在应用私有目录中维护一个运行时 workspace：
+
+```
+/workspace
+├── generated_apps/
+│   └── 天气_20260608_160000.html       # 生成的网页 App
+├── agent/
+│   ├── SOUL.md                         # 我是谁：人格、语气、价值观、边界
+│   └── CHAT.md                         # 怎么对话：格式、规则、工具规范
+└── memory/
+    └── MEMORY.md                       # 长期记忆与记忆写入规则
+```
+
+其中 `SOUL.md`、`CHAT.md`、`MEMORY.md` 会被合并进普通聊天的 system prompt。用户明确说“记住”“保存到记忆”“以后都...”时，关键信息会追加到 `MEMORY.md`。
+
 ## 项目结构
 
 ```
@@ -91,7 +123,8 @@ app/src/main/java/com/hfad/mantou/
 │   ├── ChatAdapter.kt              # 聊天消息适配器（含 WebView 预览）
 │   ├── ImageSelectAdapter.kt       # 图片选择适配器
 │   ├── ProviderModelAdapter.kt     # 模型列表适配器（单选高亮）
-│   └── SessionAdapter.kt           # 会话列表适配器
+│   ├── SessionAdapter.kt           # 会话列表适配器
+│   └── WorkspaceFileAdapter.kt     # 文件架构页文件树适配器
 ├── data/
 │   ├── api/
 │   │   ├── ApiConfig.kt            # API 通用参数（超时、Token上限等）
@@ -116,12 +149,13 @@ app/src/main/java/com/hfad/mantou/
 │   ├── ChatMessage.kt              # UI 消息数据类
 │   └── ImageItem.kt                # 图片选择项数据类
 ├── utils/
+│   ├── AgentWorkspace.kt           # Runtime workspace / prompt 文件 / 记忆写入
 │   ├── AppIntentDetector.kt        # 意图识别（关键词 + LLM 判断）
-│   ├── AppGenerator.kt             # App 生成器（LLM生成HTML + 写入文件）
+│   ├── AppGenerator.kt             # App 生成器（LLM生成HTML + 语义化命名写入文件）
 │   └── ImageUtils.kt               # 图片处理工具
 ├── view/
 │   ├── MainActivity.kt             # 主 Activity（DrawerLayout）
-│   ├── MainFragment.kt             # 主 Fragment（聊天界面 + cur_model 显示）
+│   ├── MainFragment.kt             # 主 Fragment（共享AppBar + 聊天/文件架构分页）
 │   ├── ModelSettingActivity.kt     # 模型配置页面（Provider/Model 管理）
 │   └── VirtualAppActivity.kt       # 全屏 WebView Activity
 └── viewmodel/
@@ -132,7 +166,7 @@ app/src/main/java/com/hfad/mantou/
 
 | 层级 | 技术 |
 |------|------|
-| **UI 层** | ViewBinding、RecyclerView、WebView、ConstraintLayout |
+| **UI 层** | ViewBinding、RecyclerView、ViewPager2、WebView、ConstraintLayout |
 | **架构层** | MVVM、ViewModel、LiveData、Navigation |
 | **数据层** | Room、Kotlin Flow、SharedPreferences、Repository 模式 |
 | **网络层** | OkHttp、SSE（Server-Sent Events）、Gson |
@@ -249,13 +283,22 @@ AppIntentDetector / AppGenerator 同样使用 ChatCallConfig
 - [x] SSE 流式输出
 - [x] 多轮上下文对话
 - [x] 图片对话（多模态）
+- [x] 消息长按操作（选字复制/删除/修改）
 - [x] Room 数据库本地持久化
 - [x] 会话管理（创建/切换/删除）
 - [x] 侧边栏历史会话
 - [x] 一句话生成网页 App
 - [x] 意图自动识别（聊天 vs 生成App）
+- [x] 生成 App 文件语义化命名
+- [x] 生成 App 思考过程固定面板滚动
 - [x] 聊天气泡内 WebView 预览
 - [x] 全屏 WebView 体验
+- [x] 文件架构页（agent / memory / generated_apps）
+- [x] `SOUL.md` / `CHAT.md` / `MEMORY.md` prompt 注入
+- [x] 显式记忆写入 MEMORY.md
+- [x] 文件点击编辑 / WebView 打开
+- [x] generated_apps 文件长按删除
+- [x] 聊天页与文件架构页共享 AppBar 滑动切换
 - [x] 相机拍照
 - [x] 图片选择（相册）
 - [x] 自动滚动到最新消息

@@ -32,28 +32,59 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent">
 
-        <!-- 思考过程文本（灰色斜体，最高 200dp 可滚动） -->
-        <ScrollView
-            android:id="@+id/svThinking"
+        <!-- 思考过程固定高度面板 -->
+        <LinearLayout
+            android:id="@+id/thinkingPanel"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:maxHeight="200dp"
-            android:layout_marginBottom="6dp"
-            android:scrollbars="none"
-            android:overScrollMode="never"
+            android:layout_height="180dp"
+            android:layout_marginBottom="8dp"
+            android:background="@drawable/bg_thinking_panel"
+            android:orientation="vertical"
+            android:padding="10dp"
             android:visibility="gone"
             tools:visibility="visible">
 
-            <TextView
-                android:id="@+id/tvThinking"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:textColor="#999999"
-                android:textSize="13sp"
-                android:textStyle="italic"
-                tools:text="正在思考..." />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
 
-        </ScrollView>
+                <TextView
+                    android:id="@+id/tvThinkingTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="正在生成应用"
+                    android:textColor="#2F3747"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+            </LinearLayout>
+
+            <ScrollView
+                android:id="@+id/svThinking"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="8dp"
+                android:layout_weight="1"
+                android:fadingEdgeLength="12dp"
+                android:overScrollMode="never"
+                android:requiresFadingEdge="vertical"
+                android:scrollbars="none">
+
+                <TextView
+                    android:id="@+id/tvThinking"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:lineSpacingExtra="3dp"
+                    android:textColor="#8A93A3"
+                    android:textSize="13sp"
+                    tools:text="正在规划页面结构、生成样式和交互逻辑..." />
+
+            </ScrollView>
+
+        </LinearLayout>
 
         <!-- 等待动画点 -->
         <LinearLayout

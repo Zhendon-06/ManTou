@@ -5,7 +5,6 @@ import android.animation.AnimatorSet
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.view.ViewTreeObserver
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -213,6 +212,7 @@ class ChatAdapter(
         private var animatorSet: AnimatorSet? = null
 
         fun bind(message: ChatMessage) {
+            binding.tvThinkingTitle.text = message.content.ifBlank { "正在处理" }
             updateThinking(message.thinking)
             val context = binding.root.context
             val animator = AnimatorInflater.loadAnimator(context, R.animator.loading_animation)
@@ -225,21 +225,15 @@ class ChatAdapter(
 
         fun updateThinking(thinking: String?) {
             if (thinking.isNullOrEmpty()) {
-                binding.svThinking.visibility = View.GONE
+                binding.thinkingPanel.visibility = View.GONE
                 return
             }
-            binding.svThinking.visibility = View.VISIBLE
+            binding.thinkingPanel.visibility = View.VISIBLE
             binding.tvThinking.text = thinking
-            // 用 OnPreDrawListener 保证 layout 完成、ScrollView 已知最新内容高度后再滚动
             val sv = binding.svThinking
-            sv.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
-                override fun onPreDraw(): Boolean {
-                    sv.viewTreeObserver.removeOnPreDrawListener(this)
-                    val child = sv.getChildAt(0) ?: return true
-                    sv.scrollTo(0, (child.bottom - sv.height).coerceAtLeast(0))
-                    return true
-                }
-            })
+            sv.post {
+                sv.fullScroll(View.FOCUS_DOWN)
+            }
         }
 
         fun unbind() {
