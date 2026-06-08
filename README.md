@@ -14,6 +14,7 @@
 ### 一句话生成网页 App
 - **意图自动识别**：系统自动判断用户是想聊天还是要生成 App，无需手动切换
 - **LLM 生成代码**：调用当前配置的模型生成完整的、自包含的 HTML/CSS/JS 代码
+- **设备尺寸感知**：生成 prompt 会拼接当前设备的横竖屏状态和屏幕像素尺寸，引导网页 App 贴合设备尺寸铺满显示
 - **文件写入执行**：将生成的代码写入内部存储，通过 WebView 渲染运行
 - **语义化文件名**：根据用户要生成的 App 类型自动命名 HTML 文件，例如 `天气_20260608_160000.html`
 - **聊天内预览**：生成的 App 在聊天气泡中以 WebView 预览
@@ -83,7 +84,7 @@
   普通聊天  生成App
      │       │
      ▼       ▼
-  流式对话  AppGenerator（当前模型生成 HTML）
+  流式对话  AppGenerator（拼接设备尺寸 → 当前模型生成 HTML）
               │
               ▼
          写入文件系统
@@ -151,7 +152,7 @@ app/src/main/java/com/hfad/mantou/
 ├── utils/
 │   ├── AgentWorkspace.kt           # Runtime workspace / prompt 文件 / 记忆写入
 │   ├── AppIntentDetector.kt        # 意图识别（关键词 + LLM 判断）
-│   ├── AppGenerator.kt             # App 生成器（LLM生成HTML + 语义化命名写入文件）
+│   ├── AppGenerator.kt             # App 生成器（设备尺寸prompt + LLM生成HTML + 语义化命名写入文件）
 │   └── ImageUtils.kt               # 图片处理工具
 ├── view/
 │   ├── MainActivity.kt             # 主 Activity（DrawerLayout）

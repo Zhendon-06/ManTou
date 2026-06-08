@@ -1,6 +1,7 @@
 package com.hfad.mantou.utils
 
 import android.content.Context
+import android.content.res.Configuration
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -8,7 +9,7 @@ import java.util.Locale
 
 object AppGenerator {
 
-    const val SYSTEM_PROMPT = """你是一个专业的网页应用生成器。根据用户的一句话描述，生成一个完整的、可直接运行的HTML文件。
+    private const val BASE_SYSTEM_PROMPT = """你是一个专业的网页应用生成器。根据用户的一句话描述，生成一个完整的、可直接运行的HTML文件。
 
 严格要求：
 1. 必须生成一个完整的、自包含的HTML文件，所有CSS和JavaScript都内联在HTML中
@@ -26,7 +27,35 @@ object AppGenerator {
 6. 只返回HTML代码，不要有任何解释说明文字
 7. 代码必须以<!DOCTYPE html>开头，以</html>结尾"""
 
-    const val APP_GEN_MAX_TOKENS = 8192
+    const val APP_GEN_MAX_TOKENS = 81920
+
+    fun buildSystemPrompt(context: Context): String {
+        val metrics = context.resources.displayMetrics
+        val widthPx = metrics.widthPixels
+        val heightPx = metrics.heightPixels
+        val orientation = when (context.resources.configuration.orientation) {
+            Configuration.ORIENTATION_LANDSCAPE -> "landscape"
+            Configuration.ORIENTATION_PORTRAIT -> "portrait"
+            else -> "unknown"
+        }
+
+        return """
+            $BASE_SYSTEM_PROMPT
+
+            当前设备屏幕信息：
+            - widthPx: $widthPx
+            - heightPx: $heightPx
+            - orientation: $orientation
+
+            屏幕适配要求：
+            1. 生成的网页 App 必须依据上述设备尺寸进行布局，让主界面在当前设备上尽量填满屏幕，看起来像原生移动 App。
+            2. 必须设置 viewport：<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+            3. html、body 和主容器必须使用 min-height: 100vh 或 height: 100vh；主界面宽度应使用 100vw 或 width: 100%。
+            4. 避免页面四周出现无意义的大留白，不要把主要内容压缩成居中的窄卡片。
+            5. 如果需要滚动，只让内容区域滚动，顶部/底部关键操作区域应保持稳定可用。
+            6. 需要考虑安全区和移动端浏览器环境，可使用 padding: env(safe-area-inset-*)。
+        """.trimIndent()
+    }
 
     fun extractHtml(content: String): String? {
         var trimmed = content.trim()
