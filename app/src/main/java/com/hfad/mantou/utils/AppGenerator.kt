@@ -6,6 +6,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 
 object AppGenerator {
 
@@ -28,6 +29,10 @@ object AppGenerator {
 7. 代码必须以<!DOCTYPE html>开头，以</html>结尾"""
 
     const val APP_GEN_MAX_TOKENS = 81920
+    private const val WEB_APP_ID_NAME = "mantou-webapp-id"
+    private val META_TAG_REGEX = Regex("<meta\\b[^>]*>", RegexOption.IGNORE_CASE)
+    private val WEB_APP_ID_NAME_REGEX = Regex("\\bname\\s*=\\s*['\"]$WEB_APP_ID_NAME['\"]", RegexOption.IGNORE_CASE)
+    private val META_CONTENT_REGEX = Regex("\\bcontent\\s*=\\s*['\"]([^'\"]+)['\"]", RegexOption.IGNORE_CASE)
 
     fun buildSystemPrompt(context: Context): String {
         val metrics = context.resources.displayMetrics
@@ -76,12 +81,44 @@ object AppGenerator {
         return null
     }
 
+    fun ensureWebAppIdentity(htmlContent: String): String {
+        if (extractWebAppIdentity(htmlContent) != null) return htmlContent
+
+        val metaTag = """<meta name="$WEB_APP_ID_NAME" content="${UUID.randomUUID()}">"""
+        val headMatch = Regex("<head(\\s[^>]*)?>", RegexOption.IGNORE_CASE).find(htmlContent)
+        if (headMatch != null) {
+            val insertAt = headMatch.range.last + 1
+            return htmlContent.substring(0, insertAt) +
+                    "\n    $metaTag" +
+                    htmlContent.substring(insertAt)
+        }
+
+        val bodyMatch = Regex("<body(\\s[^>]*)?>", RegexOption.IGNORE_CASE).find(htmlContent)
+        if (bodyMatch != null) {
+            val insertAt = bodyMatch.range.first
+            return htmlContent.substring(0, insertAt) +
+                    "<head>\n    $metaTag\n</head>\n" +
+                    htmlContent.substring(insertAt)
+        }
+
+        return "$metaTag\n$htmlContent"
+    }
+
+    fun extractWebAppIdentity(htmlContent: String): String? {
+        return META_TAG_REGEX.findAll(htmlContent)
+            .firstNotNullOfOrNull { match ->
+                val tag = match.value
+                if (!WEB_APP_ID_NAME_REGEX.containsMatchIn(tag)) return@firstNotNullOfOrNull null
+                META_CONTENT_REGEX.find(tag)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() }
+            }
+    }
+
     fun saveHtmlFile(context: Context, htmlContent: String, userMessage: String): File {
         AgentWorkspace.ensureWorkspace(context)
         val appDir = File(context.filesDir, AgentWorkspace.WEB_DIR)
         if (!appDir.exists()) appDir.mkdirs()
         val file = nextAvailableHtmlFile(appDir, userMessage)
-        file.writeText(htmlContent)
+        file.writeText(ensureWebAppIdentity(htmlContent))
         return file
     }
 

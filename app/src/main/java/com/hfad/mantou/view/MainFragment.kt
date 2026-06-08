@@ -379,12 +379,90 @@ class MainFragment : Fragment() {
 
         showActionMenu(
             listOf(
+                ActionMenuItem("改名", R.drawable.ic_edit_outline) {
+                    showRenameWorkspaceFileDialog(file)
+                },
                 ActionMenuItem("删除", R.drawable.ic_delete_outline) {
                     confirmDeleteWorkspaceFile(file)
                 }
             )
         )
         return true
+    }
+
+    private fun showRenameWorkspaceFileDialog(file: File) {
+        val editor = EditText(requireContext()).apply {
+            setText(file.name)
+            setSelection(0, file.nameWithoutExtension.length.coerceAtMost(file.name.length))
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            textSize = 15f
+        }
+
+        val paddingHorizontal = (16 * resources.displayMetrics.density).toInt()
+        val paddingTop = (8 * resources.displayMetrics.density).toInt()
+        val editorContainer = FrameLayout(requireContext()).apply {
+            setPadding(paddingHorizontal, paddingTop, paddingHorizontal, 0)
+            addView(
+                editor,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("改名文件")
+            .setView(editorContainer)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存", null)
+            .create()
+
+        dialog.setOnShowListener {
+            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener {
+                    val newName = normalizeWorkspaceFileName(
+                        editor.text.toString(),
+                        file.extension
+                    )
+                    if (newName == null) {
+                        Toast.makeText(requireContext(), "文件名不能为空", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    if (newName == file.name) {
+                        dialog.dismiss()
+                        return@setOnClickListener
+                    }
+                    val target = File(file.parentFile, newName)
+                    if (target.exists()) {
+                        Toast.makeText(requireContext(), "已存在同名文件", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                    if (file.renameTo(target)) {
+                        Toast.makeText(requireContext(), "已改名", Toast.LENGTH_SHORT).show()
+                        refreshWorkspaceTree()
+                        dialog.dismiss()
+                    } else {
+                        Toast.makeText(requireContext(), "改名失败", Toast.LENGTH_SHORT).show()
+                    }
+                }
+        }
+        dialog.show()
+    }
+
+    private fun normalizeWorkspaceFileName(input: String, originalExtension: String): String? {
+        val sanitized = input
+            .trim()
+            .replace(Regex("[\\\\/:*?\"<>|]+"), "_")
+            .trim('_', '-', '.', ' ')
+
+        if (sanitized.isBlank()) return null
+        if (sanitized.contains('.')) return sanitized
+        return originalExtension
+            .takeIf { it.isNotBlank() }
+            ?.let { "$sanitized.$it" }
+            ?: sanitized
     }
 
     private fun confirmDeleteWorkspaceFile(file: File) {

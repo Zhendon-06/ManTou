@@ -14,6 +14,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import com.hfad.mantou.databinding.VirtualappBinding
 import com.hfad.mantou.utils.AgentWorkspace
+import com.hfad.mantou.utils.AppGenerator
 import java.io.File
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -106,14 +107,15 @@ class VirtualAppActivity : AppCompatActivity() {
             val htmlBytes = contentResolver.openInputStream(uri)?.use { input ->
                 input.readBytes()
             } ?: error("无法读取文件")
+            val htmlText = String(htmlBytes, Charsets.UTF_8)
 
-            findExistingHtmlFile(appDir, htmlBytes)?.let { existingFile ->
+            findExistingHtmlFile(appDir, fileName, htmlText, htmlBytes)?.let { existingFile ->
                 Toast.makeText(this, "已存在相同网页应用，直接打开", Toast.LENGTH_SHORT).show()
                 return@runCatching existingFile.absolutePath
             }
 
             val target = nextAvailableFile(appDir, fileName)
-            target.writeBytes(htmlBytes)
+            target.writeText(AppGenerator.ensureWebAppIdentity(htmlText))
             target.absolutePath
         }.getOrElse {
             Toast.makeText(this, "导入失败: ${it.message}", Toast.LENGTH_SHORT).show()
@@ -134,10 +136,11 @@ class VirtualAppActivity : AppCompatActivity() {
             return
         }
 
+        val shareFile = ensureStoredWebAppIdentity(htmlFile) ?: return
         val htmlUri = FileProvider.getUriForFile(
             this,
             "$packageName.fileprovider",
-            htmlFile
+            shareFile
         )
 
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
@@ -147,6 +150,20 @@ class VirtualAppActivity : AppCompatActivity() {
         }
 
         startActivity(Intent.createChooser(shareIntent, "分享网页应用"))
+    }
+
+    private fun ensureStoredWebAppIdentity(file: File): File? {
+        return runCatching {
+            val htmlContent = file.readText()
+            val identifiedContent = AppGenerator.ensureWebAppIdentity(htmlContent)
+            if (identifiedContent != htmlContent) {
+                file.writeText(identifiedContent)
+            }
+            file
+        }.getOrElse {
+            Toast.makeText(this, "分享准备失败: ${it.message}", Toast.LENGTH_SHORT).show()
+            null
+        }
     }
 
     private fun queryDisplayName(uri: Uri): String? {
@@ -199,19 +216,60 @@ class VirtualAppActivity : AppCompatActivity() {
         return file
     }
 
-    private fun findExistingHtmlFile(dir: File, htmlBytes: ByteArray): File? {
+    private fun findExistingHtmlFile(
+        dir: File,
+        fileName: String,
+        htmlText: String,
+        htmlBytes: ByteArray
+    ): File? {
+        val htmlFiles = listHtmlFiles(dir)
+
+        AppGenerator.extractWebAppIdentity(htmlText)?.let { incomingId ->
+            htmlFiles.firstOrNull { file ->
+                runCatching {
+                    AppGenerator.extractWebAppIdentity(file.readText()) == incomingId
+                }.getOrDefault(false)
+            }?.let { return it }
+        }
+
         val incomingHash = sha256(htmlBytes)
-        return dir.listFiles()
-            ?.filter { file ->
-                file.isFile &&
-                        (file.extension.equals("html", true) || file.extension.equals("htm", true)) &&
-                        file.length() == htmlBytes.size.toLong()
-            }
-            ?.firstOrNull { file ->
+        htmlFiles
+            .filter { file -> file.length() == htmlBytes.size.toLong() }
+            .firstOrNull { file ->
                 runCatching {
                     sha256(file.readBytes()).contentEquals(incomingHash)
                 }.getOrDefault(false)
-            }
+            }?.let { return it }
+
+        val normalizedIncomingHash = sha256(normalizeHtmlForCompare(htmlText).toByteArray(Charsets.UTF_8))
+        htmlFiles.firstOrNull { file ->
+            runCatching {
+                val normalizedFileHash = sha256(normalizeHtmlForCompare(file.readText()).toByteArray(Charsets.UTF_8))
+                normalizedFileHash.contentEquals(normalizedIncomingHash)
+            }.getOrDefault(false)
+        }?.let { return it }
+
+        return File(dir, fileName).takeIf { file ->
+            isHtmlFile(file)
+        }
+    }
+
+    private fun listHtmlFiles(dir: File): List<File> {
+        return dir.listFiles()
+            ?.filter(::isHtmlFile)
+            .orEmpty()
+    }
+
+    private fun isHtmlFile(file: File): Boolean {
+        return file.isFile &&
+                (file.extension.equals("html", true) || file.extension.equals("htm", true))
+    }
+
+    private fun normalizeHtmlForCompare(htmlContent: String): String {
+        return htmlContent
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .trim()
     }
 
     private fun sha256(bytes: ByteArray): ByteArray {
