@@ -2,4 +2,21 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <color name="mt_background">#FAFBFF</color>
+    <color name="mt_surface">#FFFFFF</color>
+    <color name="mt_surface_soft">#F5F8FE</color>
+    <color name="mt_surface_blue">#EAF3FF</color>
+    <color name="mt_primary">#2F80ED</color>
+    <color name="mt_primary_soft">#B9D7FF</color>
+    <color name="mt_primary_dark">#1F5FBF</color>
+    <color name="mt_on_primary">#FFFFFF</color>
+    <color name="mt_text_primary">#202535</color>
+    <color name="mt_text_secondary">#7A8496</color>
+    <color name="mt_text_muted">#9CA6B8</color>
+    <color name="mt_outline">#E2E8F3</color>
+    <color name="mt_error">#E65353</color>
+    <color name="mt_code_bg">#EEF3FA</color>
+    <color name="mt_code_text">#35506E</color>
+    <color name="input_action_blue">#2C83D8</color>
+    <color name="input_send_bg">@color/mt_primary_soft</color>
 </resources>

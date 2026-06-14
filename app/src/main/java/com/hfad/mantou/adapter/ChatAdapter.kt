@@ -9,6 +9,8 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.TextView
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
@@ -19,6 +21,8 @@ import com.hfad.mantou.databinding.ItemChatAssistantBinding
 import com.hfad.mantou.databinding.ItemChatLoadingBinding
 import com.hfad.mantou.databinding.ItemChatUserBinding
 import com.hfad.mantou.utils.MantouWebViewRuntime
+import com.hfad.mantou.utils.RichTextFormatter
+import java.io.File
 
 class ChatAdapter(
     private val onDataChanged: ((itemCount: Int) -> Unit)? = null,
@@ -128,7 +132,7 @@ class ChatAdapter(
         }
 
         fun bind(message: ChatMessage) {
-            binding.tvMessage.text = message.content
+            bindRichText(binding.tvMessage, message.content, RichTextRole.USER)
 
             if (message.imagePath != null) {
                 binding.ivImage.visibility = View.VISIBLE
@@ -158,7 +162,7 @@ class ChatAdapter(
         }
 
         fun bind(message: ChatMessage) {
-            binding.tvMessage.text = message.content
+            bindRichText(binding.tvMessage, message.content, RichTextRole.ASSISTANT)
 
             if (message.imagePath != null) {
                 binding.ivImage.visibility = View.VISIBLE
@@ -193,7 +197,7 @@ class ChatAdapter(
                     useWideViewPort = true
                     loadWithOverviewMode = true
                 }
-                MantouWebViewRuntime.install(this)
+                MantouWebViewRuntime.install(this, File(htmlPath))
                 loadUrl("file://$htmlPath")
             }
 
@@ -203,7 +207,7 @@ class ChatAdapter(
         }
 
         fun updateContent(content: String) {
-            binding.tvMessage.text = content
+            bindRichText(binding.tvMessage, content, RichTextRole.ASSISTANT)
         }
     }
 
@@ -231,7 +235,7 @@ class ChatAdapter(
                 return
             }
             binding.thinkingPanel.visibility = View.VISIBLE
-            binding.tvThinking.text = thinking
+            bindRichText(binding.tvThinking, thinking, RichTextRole.THINKING)
             val sv = binding.svThinking
             sv.post {
                 sv.fullScroll(View.FOCUS_DOWN)
@@ -242,6 +246,42 @@ class ChatAdapter(
             animatorSet?.cancel()
             animatorSet = null
         }
+    }
+
+    private fun bindRichText(textView: TextView, content: String, role: RichTextRole) {
+        val context = textView.context
+        val palette = when (role) {
+            RichTextRole.USER -> RichTextFormatter.Palette(
+                textColor = ContextCompat.getColor(context, R.color.mt_on_primary),
+                secondaryColor = ContextCompat.getColor(context, R.color.mt_surface_blue),
+                accentColor = ContextCompat.getColor(context, R.color.mt_on_primary),
+                codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_primary_dark),
+                codeTextColor = ContextCompat.getColor(context, R.color.mt_on_primary)
+            )
+            RichTextRole.ASSISTANT -> RichTextFormatter.Palette(
+                textColor = ContextCompat.getColor(context, R.color.mt_text_primary),
+                secondaryColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
+                accentColor = ContextCompat.getColor(context, R.color.mt_primary_dark),
+                codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
+                codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
+            )
+            RichTextRole.THINKING -> RichTextFormatter.Palette(
+                textColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
+                secondaryColor = ContextCompat.getColor(context, R.color.mt_text_muted),
+                accentColor = ContextCompat.getColor(context, R.color.mt_primary_dark),
+                codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
+                codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
+            )
+        }
+        textView.setTextColor(palette.textColor)
+        textView.setTextIsSelectable(true)
+        textView.text = RichTextFormatter.format(content, palette)
+    }
+
+    private enum class RichTextRole {
+        USER,
+        ASSISTANT,
+        THINKING
     }
 }
 

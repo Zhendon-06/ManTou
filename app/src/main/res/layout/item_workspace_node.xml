@@ -28,7 +28,7 @@
         android:layout_weight="1"
         android:ellipsize="end"
         android:maxLines="1"
-        android:textColor="#303647"
+        android:textColor="@color/mt_text_primary"
         android:textSize="18sp" />
 
     <TextView
@@ -40,7 +40,7 @@
         android:minWidth="34dp"
         android:paddingHorizontal="8dp"
         android:text="FILE"
-        android:textColor="#2D65E8"
+        android:textColor="@color/mt_primary_dark"
         android:textSize="11sp"
         android:textStyle="bold" />
 

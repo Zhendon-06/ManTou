@@ -2,85 +2,178 @@
 <LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:layout_width="280dp"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="320dp"
     android:layout_height="match_parent"
     android:layout_gravity="start"
+    android:background="@color/mt_background"
     android:orientation="vertical"
-    android:background="#FAFAFA">
+    android:paddingStart="18dp"
+    android:paddingTop="28dp"
+    android:paddingEnd="18dp"
+    android:paddingBottom="18dp">
 
-    <!-- 侧边栏头部 -->
     <LinearLayout
-        android:id="@+id/drawerHeader"
+        android:id="@+id/drawerTopActions"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="16dp"
-        android:background="#FFFFFF"
-        android:elevation="2dp">
-        <RelativeLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+        android:layout_height="36dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
 
-            <TextView
-                android:id="@+id/text_history"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="历史会话"
-                android:textSize="18sp"
-                android:textStyle="bold"
-                android:textColor="#333333"
-                android:layout_centerVertical="true" />
+        <LinearLayout
+            android:id="@+id/searchContainer"
+            android:layout_width="0dp"
+            android:layout_height="32dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_drawer_search"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingEnd="14dp">
 
-            <ImageButton
-                android:id="@+id/btn_setting"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:background="@drawable/setting"
-                android:layout_alignParentRight="true"
-                android:layout_centerVertical="true" />
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:contentDescription="@null"
+                android:src="@drawable/ic_search_outline"
+                app:tint="@color/mt_text_secondary" />
 
-        </RelativeLayout>
+            <EditText
+                android:id="@+id/etSessionSearch"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:background="@null"
+                android:hint="搜索全部对话"
+                android:imeOptions="actionSearch"
+                android:inputType="text"
+                android:maxLines="1"
+                android:padding="0dp"
+                android:singleLine="true"
+                android:textColor="@color/mt_text_primary"
+                android:textColorHint="@color/mt_text_muted"
+                android:textSize="15sp" />
+        </LinearLayout>
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="点击切换会话，长按删除"
-            android:textSize="12sp"
-            android:textColor="#999999" />
-
+        <ImageButton
+            android:id="@+id/btnArchiveToggle"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:layout_marginStart="12dp"
+            android:background="@drawable/bg_drawer_action_circle"
+            android:contentDescription="查看归档"
+            android:padding="6dp"
+            android:src="@drawable/ic_archive_outline"
+            app:tint="@color/mt_text_primary" />
     </LinearLayout>
 
-    <!-- 会话列表 -->
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/rvSessions"
+    <TextView
+        android:id="@+id/tvSessionSectionTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="22dp"
+        android:gravity="center_vertical"
+        android:text="最近对话"
+        android:textColor="@color/mt_text_secondary"
+        android:textSize="15sp"
+        android:textStyle="bold" />
+
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:clipToPadding="false"
-        android:paddingTop="8dp"
-        android:paddingBottom="8dp" />
+        android:layout_marginTop="8dp">
 
-    <!-- 底部操作区 -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="16dp"
-        android:background="#FFFFFF"
-        android:elevation="4dp">
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvSessions"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingTop="4dp"
+            android:paddingBottom="12dp"
+            tools:listitem="@layout/item_session" />
 
         <TextView
-            android:id="@+id/tvClearHistory"
+            android:id="@+id/tvEmptySessions"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="清空所有会话"
-            android:textSize="14sp"
-            android:textColor="#FF5252"
-            android:padding="12dp"
+            android:layout_gravity="top"
+            android:layout_marginTop="38dp"
             android:gravity="center"
-            android:background="?attr/selectableItemBackground" />
+            android:text="暂无会话"
+            android:textColor="@color/mt_text_muted"
+            android:textSize="14sp"
+            android:visibility="gone"
+            tools:visibility="visible" />
+    </FrameLayout>
 
+    <LinearLayout
+        android:id="@+id/drawerBottomActions"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:paddingTop="6dp">
+
+        <LinearLayout
+            android:id="@+id/btn_setting"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:clickable="true"
+            android:focusable="true"
+            android:foreground="?attr/selectableItemBackgroundBorderless"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <ImageView
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:background="@drawable/bg_drawer_action_circle"
+                android:contentDescription="设置"
+                android:elevation="3dp"
+                android:padding="8dp"
+                android:src="@drawable/setting" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="设置"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="8sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/tvClearHistory"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:clickable="true"
+            android:focusable="true"
+            android:foreground="?attr/selectableItemBackgroundBorderless"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <ImageView
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:background="@drawable/bg_drawer_action_circle"
+                android:contentDescription="清空对话"
+                android:elevation="3dp"
+                android:padding="8dp"
+                android:src="@drawable/ic_delete_outline"
+                app:tint="@color/mt_error" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="清空对话"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="8sp" />
+        </LinearLayout>
     </LinearLayout>
 
 </LinearLayout>

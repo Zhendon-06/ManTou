@@ -1,15 +1,22 @@
-*.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
+# Android 构建输出
+.gradle/
+.gradle-cache/
+build/
+app/build/
 local.properties
+*.iml
+.idea/
+*.apk
+*.aab
+*.keystore
+.externalNativeBuild/
+
+# OS 文件
+.DS_Store
+Thumbs.db
+
+# Log
+*.log
+
+# 其他
+.cxx/

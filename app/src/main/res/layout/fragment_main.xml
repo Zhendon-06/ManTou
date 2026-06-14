@@ -4,13 +4,25 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#F5F6FA">
+    android:background="@color/mt_background">
+
+    <ImageView
+        android:id="@+id/wallpaperBackground"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:contentDescription="@null"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
 
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="0dp"
         android:layout_height="56dp"
-        android:background="@color/white"
+        android:background="@color/mt_surface"
         android:elevation="4dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
@@ -46,7 +58,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="馒头"
-                    android:textColor="#202535"
+                    android:textColor="@color/mt_text_primary"
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
@@ -55,7 +67,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="请配置你的模型"
-                    android:textColor="#999999"
+                    android:textColor="@color/mt_text_muted"
                     android:textSize="12sp" />
             </LinearLayout>
 
@@ -72,7 +84,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="文件架构"
-                    android:textColor="#202535"
+                    android:textColor="@color/mt_text_primary"
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
@@ -81,7 +93,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="agent | memory | webapp"
-                    android:textColor="#7A8496"
+                    android:textColor="@color/mt_text_secondary"
                     android:textSize="12sp" />
             </LinearLayout>
         </FrameLayout>
@@ -98,7 +110,7 @@
         android:id="@+id/mainPager"
         android:layout_width="0dp"
         android:layout_height="0dp"
-        android:background="#F5F6FA"
+        android:background="@color/mt_background"
         android:overScrollMode="never"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"

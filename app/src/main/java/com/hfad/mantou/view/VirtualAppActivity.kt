@@ -60,13 +60,13 @@ class VirtualAppActivity : AppCompatActivity() {
                 useWideViewPort = true
                 loadWithOverviewMode = true
             }
-            MantouWebViewRuntime.install(this)
         }
 
         currentHtmlPath = (htmlPath ?: resolveSharedHtmlPath(intent))?.let { path ->
             ensureStoredWebAppIdentity(File(path), "打开准备失败")?.absolutePath
         }
         if (!currentHtmlPath.isNullOrEmpty()) {
+            MantouWebViewRuntime.install(binding.webView, File(currentHtmlPath!!))
             binding.webView.loadUrl("file://$currentHtmlPath")
         } else {
             Toast.makeText(this, "没有可打开的网页应用", Toast.LENGTH_SHORT).show()
@@ -119,7 +119,9 @@ class VirtualAppActivity : AppCompatActivity() {
             }
 
             val target = nextAvailableFile(appDir, fileName)
+            target.parentFile?.mkdirs()
             target.writeText(AppGenerator.ensureWebAppIdentity(htmlText))
+            AppGenerator.ensureWebAppDataFile(target)
             target.absolutePath
         }.getOrElse {
             Toast.makeText(this, "导入失败: ${it.message}", Toast.LENGTH_SHORT).show()
@@ -163,6 +165,7 @@ class VirtualAppActivity : AppCompatActivity() {
             if (identifiedContent != htmlContent) {
                 file.writeText(identifiedContent)
             }
+            AppGenerator.ensureWebAppDataFile(file)
             file
         }.getOrElse {
             Toast.makeText(this, "$failurePrefix: ${it.message}", Toast.LENGTH_SHORT).show()
@@ -211,13 +214,13 @@ class VirtualAppActivity : AppCompatActivity() {
     private fun nextAvailableFile(dir: File, fileName: String): File {
         val stem = fileName.substringBeforeLast('.', fileName)
         val extension = fileName.substringAfterLast('.', "html")
-        var file = File(dir, "$stem.$extension")
+        var projectDir = File(dir, stem)
         var index = 2
-        while (file.exists()) {
-            file = File(dir, "${stem}_$index.$extension")
+        while (projectDir.exists()) {
+            projectDir = File(dir, "${stem}_$index")
             index++
         }
-        return file
+        return File(projectDir, "$stem.$extension")
     }
 
     private fun findExistingHtmlFile(
@@ -259,9 +262,9 @@ class VirtualAppActivity : AppCompatActivity() {
     }
 
     private fun listHtmlFiles(dir: File): List<File> {
-        return dir.listFiles()
-            ?.filter(::isHtmlFile)
-            .orEmpty()
+        return dir.walkTopDown()
+            .filter(::isHtmlFile)
+            .toList()
     }
 
     private fun isHtmlFile(file: File): Boolean {
@@ -288,13 +291,5 @@ class VirtualAppActivity : AppCompatActivity() {
             destroy()
         }
         super.onDestroy()
-    }
-
-    override fun onBackPressed() {
-        if (binding.webView.canGoBack()) {
-            binding.webView.goBack()
-        } else {
-            super.onBackPressed()
-        }
     }
 }

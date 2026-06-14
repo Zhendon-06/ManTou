@@ -56,7 +56,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="正在生成应用"
-                    android:textColor="#2F3747"
+                    android:textColor="@color/mt_text_primary"
                     android:textSize="13sp"
                     android:textStyle="bold" />
 
@@ -78,8 +78,9 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:lineSpacingExtra="3dp"
-                    android:textColor="#8A93A3"
+                    android:textColor="@color/mt_text_secondary"
                     android:textSize="13sp"
+                    android:textIsSelectable="true"
                     tools:text="正在规划页面结构、生成样式和交互逻辑..." />
 
             </ScrollView>

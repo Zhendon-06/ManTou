@@ -99,6 +99,11 @@ class ChatRepository(private val chatDao: ChatDao) {
     fun getAllSessions(): Flow<List<ChatSessionEntity>> = chatDao.getAllSessions()
 
     /**
+     * 获取所有已归档会话（实时更新）
+     */
+    fun getArchivedSessions(): Flow<List<ChatSessionEntity>> = chatDao.getArchivedSessions()
+
+    /**
      * 删除会话
      * 
      * 什么时候调用？
@@ -116,6 +121,13 @@ class ChatRepository(private val chatDao: ChatDao) {
      * - 在Entity中通过@ForeignKey配置
      */
     suspend fun deleteSession(sessionId: Long) = chatDao.deleteSession(sessionId)
+
+    /**
+     * 设置会话归档状态
+     */
+    suspend fun setSessionArchived(sessionId: Long, isArchived: Boolean) {
+        chatDao.setSessionArchived(sessionId, isArchived)
+    }
 
     /**
      * 删除所有会话

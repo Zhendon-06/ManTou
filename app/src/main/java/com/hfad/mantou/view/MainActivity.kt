@@ -30,10 +30,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 处理侧边菜单的状态栏 padding
-        val drawerHeader = findViewById<android.view.View>(R.id.drawerHeader)
-        ViewCompat.setOnApplyWindowInsetsListener(drawerHeader) { v, insets ->
+        val drawerMenu = findViewById<android.view.View>(R.id.drawerMenu)
+        val drawerMenuBasePaddingTop = drawerMenu.paddingTop
+        ViewCompat.setOnApplyWindowInsetsListener(drawerMenu) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(v.paddingLeft, systemBars.top + 16, v.paddingRight, v.paddingBottom)
+            v.setPadding(v.paddingLeft, systemBars.top + drawerMenuBasePaddingTop, v.paddingRight, v.paddingBottom)
             insets
         }
     }

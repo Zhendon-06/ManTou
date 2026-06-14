@@ -31,6 +31,8 @@ object AppGenerator {
     const val APP_GEN_MAX_TOKENS = 81920
     const val WEB_APP_BRIDGE_NAME = "MantouApp"
     const val WEB_APP_USER_AGENT_TOKEN = "MantouApp/1"
+    /** 编译期 generateToolsDoc 任务的输出，运行时从 assets 读出来注入 prompt。 */
+    private const val TOOLS_DOC_ASSET = "mantou_tools.md"
     private const val WEB_APP_ID_NAME = "mantou-webapp-id"
     private const val WEB_APP_RUNTIME_GUARD_START = "<!-- mantou-webapp-runtime-guard:start -->"
     private const val WEB_APP_RUNTIME_GUARD_END = "<!-- mantou-webapp-runtime-guard:end -->"
@@ -53,7 +55,7 @@ object AppGenerator {
             else -> "unknown"
         }
 
-        return """
+        val basePrompt = """
             $BASE_SYSTEM_PROMPT
 
             当前设备屏幕信息：
@@ -68,6 +70,52 @@ object AppGenerator {
             4. 避免页面四周出现无意义的大留白，不要把主要内容压缩成居中的窄卡片。
             5. 如果需要滚动，只让内容区域滚动，顶部/底部关键操作区域应保持稳定可用。
             6. 需要考虑安全区和移动端浏览器环境，可使用 padding: env(safe-area-inset-*)。
+
+            持久化数据要求：
+            1. 每个生成的网页 App 都会伴随一个同名 JSON 数据文件，数据必须写入这个 JSON 文件，不能只存在内存变量里。
+            2. 如果 App 有待办、笔记、记录、设置、历史、分数、进度等需要下次打开仍保留的数据，必须使用 `window.MantouApp.storage`。
+            3. 读取：`var r = JSON.parse(window.MantouApp.storage.storageRead()); var state = r.success ? JSON.parse(r.data.content || "{}") : {};`
+            4. 写入：`window.MantouApp.storage.storageWrite(JSON.stringify(state));`
+            5. `storageWrite` 的参数必须是合法 JSON 字符串，建议把整个应用状态组织成一个对象后整体写入。
+        """.trimIndent()
+
+        return basePrompt + buildToolsSection(context)
+    }
+
+    /** 读取编译期生成的 assets/mantou_tools.md，作为可调用的 Android 系统能力清单注入到 prompt。 */
+    private fun buildToolsSection(context: Context): String {
+        val doc = runCatching {
+            context.assets.open(TOOLS_DOC_ASSET).bufferedReader().use { it.readText() }
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: return ""
+
+        return "\n\n" + """
+            ---
+
+            # Android 系统能力 (Tools)
+
+            当用户需求涉及"调用安卓系统功能"（闹钟、日历、Toast、跳转系统设置 等）时，
+            生成的 HTML 必须使用下面声明的 Tools 桥接调用真实 Android API，
+            **不要**只写一个纯前端模拟。
+
+            统一调用步骤：
+            1. 入口先判断：`if (window.MantouApp && window.MantouApp.isMantouApp && window.MantouApp.isMantouApp()) { ... }`
+            2. 调用：`var raw = window.MantouApp.<toolName>.<methodName>(...args); var r = JSON.parse(raw);`
+            3. 判断：`if (r.success) { 用 r.data } else { 提示 r.error }`
+            4. 不在馒头 App 中时给降级方案（如 alert / 纯前端模拟）。
+
+            # 持久化存储 (Storage)
+
+            生成的网页 App 可以调用 `window.MantouApp.storage` 读写当前项目专属的 JSON 数据文件：
+            - `window.MantouApp.storage.storageRead()` → `{"success": true, "data": {"content": "{}"}, "error": null}`
+            - `window.MantouApp.storage.storageWrite(jsonContent)` → `{"success": true, "data": {"bytes": 12}, "error": null}`
+            - `window.MantouApp.storage.storageGet(key)` → 从根对象读取某个字段
+            - `window.MantouApp.storage.storageSet(key, valueJson)` → 把某个字段写入根对象，valueJson 必须是合法 JSON 值
+            - `window.MantouApp.storage.storageRemove(key)` → 删除根对象字段
+            - `window.MantouApp.storage.storageClear()` → 清空为 `{}`
+
+            需要永久保存的数据必须使用这个 storage；可以把 localStorage 作为浏览器外的降级方案，但在馒头 App 内优先写 JSON 文件。
+
+            $doc
         """.trimIndent()
     }
 
@@ -169,20 +217,42 @@ object AppGenerator {
         val appDir = File(context.filesDir, AgentWorkspace.WEB_DIR)
         if (!appDir.exists()) appDir.mkdirs()
         val file = nextAvailableHtmlFile(appDir, userMessage)
+        file.parentFile?.mkdirs()
         file.writeText(ensureWebAppIdentity(htmlContent))
+        ensureWebAppDataFile(file)
         return file
+    }
+
+    fun dataFileForHtml(htmlFile: File): File {
+        val name = htmlFile.name
+        val stem = if (htmlFile.extension.isNotBlank()) {
+            name.substringBeforeLast('.')
+        } else {
+            name
+        }
+        return File(htmlFile.parentFile ?: File("."), "$stem.json")
+    }
+
+    fun ensureWebAppDataFile(htmlFile: File): File {
+        val dataFile = dataFileForHtml(htmlFile)
+        if (!dataFile.exists()) {
+            dataFile.parentFile?.mkdirs()
+            dataFile.writeText("{}")
+        }
+        return dataFile
     }
 
     private fun nextAvailableHtmlFile(appDir: File, userMessage: String): File {
         val stem = inferAppFileStem(userMessage)
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        var file = File(appDir, "${stem}_$timestamp.html")
+        val projectName = "${stem}_$timestamp"
+        var projectDir = File(appDir, projectName)
         var index = 2
-        while (file.exists()) {
-            file = File(appDir, "${stem}_${timestamp}_$index.html")
+        while (projectDir.exists()) {
+            projectDir = File(appDir, "${projectName}_$index")
             index++
         }
-        return file
+        return File(projectDir, "$projectName.html")
     }
 
     private fun inferAppFileStem(userMessage: String): String {
@@ -304,6 +374,20 @@ object AppGenerator {
             var userAgentAllowed = (navigator.userAgent || "").indexOf("MantouApp/1") !== -1;
             if (bridgeAllowed || userAgentAllowed) {
                 window.__MANTOU_WEBAPP_ALLOWED__ = true;
+                // 把每个 MantouApp_<toolName> bridge 挂到 window.MantouApp.<toolName> 下，
+                // 让生成的网页写 window.MantouApp.toast.toastShow(...) 这种自然形式。
+                try {
+                    if (window.MantouApp && typeof window.MantouApp.getToolNames === "function") {
+                        var raw = window.MantouApp.getToolNames();
+                        var names = JSON.parse(raw);
+                        for (var i = 0; i < names.length; i++) {
+                            var bridge = window["MantouApp_" + names[i]];
+                            if (bridge) {
+                                window.MantouApp[names[i]] = bridge;
+                            }
+                        }
+                    }
+                } catch (error) { /* 别名表搭建失败时，调用方 try/catch 自行兜底 */ }
                 return;
             }
 

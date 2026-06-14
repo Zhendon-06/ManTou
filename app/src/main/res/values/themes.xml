@@ -1,12 +1,26 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Base.Theme.ManTou" parent="Theme.Material3.Light.NoActionBar">
-        <!-- Customize your light theme here. -->
-        <item name="android:statusBarColor">@color/white</item>
-        <item name="android:navigationBarColor">@color/white</item>
+        <item name="colorPrimary">@color/mt_primary</item>
+        <item name="colorOnPrimary">@color/mt_on_primary</item>
+        <item name="colorPrimaryContainer">@color/mt_surface_blue</item>
+        <item name="colorOnPrimaryContainer">@color/mt_primary_dark</item>
+        <item name="colorSecondary">@color/mt_primary_dark</item>
+        <item name="colorOnSecondary">@color/mt_on_primary</item>
+        <item name="colorSurface">@color/mt_surface</item>
+        <item name="colorOnSurface">@color/mt_text_primary</item>
+        <item name="colorSurfaceVariant">@color/mt_surface_soft</item>
+        <item name="colorOnSurfaceVariant">@color/mt_text_secondary</item>
+        <item name="android:colorBackground">@color/mt_background</item>
+        <item name="colorOutline">@color/mt_outline</item>
+        <item name="colorError">@color/mt_error</item>
+        <item name="android:colorAccent">@color/mt_primary</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:statusBarColor">@color/mt_surface</item>
+        <item name="android:navigationBarColor">@color/mt_surface</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
-        <item name="android:windowBackground">@color/white</item>
+        <item name="android:windowBackground">@color/mt_background</item>
     </style>
 
     <style name="Theme.ManTou" parent="Base.Theme.ManTou" />

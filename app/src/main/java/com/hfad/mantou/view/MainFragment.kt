@@ -1,38 +1,36 @@
 package com.hfad.mantou.view
 
-import android.Manifest
 import android.app.Dialog
-import android.content.ContentUris
-import android.content.ContentValues
+import android.content.res.ColorStateList
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.os.Environment
-import android.provider.MediaStore
+import android.text.Editable
+import android.provider.OpenableColumns
 import android.text.InputType
+import android.text.TextWatcher
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.GestureDetector
 import android.view.LayoutInflater
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.GridLayout
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
@@ -40,17 +38,20 @@ import androidx.core.view.updatePadding
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
-import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
+import com.google.android.material.bottomsheet.BottomSheetDialog
+import com.google.android.material.chip.Chip
+import com.google.android.material.slider.Slider
 import com.hfad.mantou.R
 import com.hfad.mantou.adapter.ChatAdapter
-import com.hfad.mantou.adapter.ImageSelectAdapter
 import com.hfad.mantou.adapter.SessionAdapter
 import com.hfad.mantou.adapter.WorkspaceFileAdapter
 import com.hfad.mantou.data.ChatMessage
-import com.hfad.mantou.data.ImageItem
+import com.hfad.mantou.data.database.ChatSessionEntity
+import com.hfad.mantou.data.preferences.ContextLimitStore
+import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
@@ -61,11 +62,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import kotlin.compareTo
-import kotlin.math.abs
+import kotlin.math.roundToInt
 
 class MainFragment : Fragment() {
 
@@ -79,10 +78,11 @@ class MainFragment : Fragment() {
     private var currentPagerPage = 0
     private var pagerCallback: ViewPager2.OnPageChangeCallback? = null
     private var inputContainerBasePaddingBottom = 0
-    private var functionPanelBaseHeight = 0
-    private var deferFunctionPanelHideForIme = false
     private var lastImeVisible = false
     private var lastAppliedBottomInset = Int.MIN_VALUE
+    private var currentContextTokens = 0
+    private var isTaskRunning = false
+    private val selectedImageUris = mutableListOf<Uri>()
 
     // ViewModel
     private val viewModel: ChatViewModel by viewModels()
@@ -93,49 +93,18 @@ class MainFragment : Fragment() {
     // 会话列表适配器
     private lateinit var sessionAdapter: SessionAdapter
 
-    // 图片选择适配器
-    private lateinit var imageSelectAdapter: ImageSelectAdapter
-
     // workspace 文件树适配器
     private lateinit var workspaceFileAdapter: WorkspaceFileAdapter
 
-    // 手势检测器（用于上滑检测）
-    private lateinit var gestureDetector: GestureDetector
+    private var activeSessions: List<ChatSessionEntity> = emptyList()
+    private var archivedSessions: List<ChatSessionEntity> = emptyList()
+    private var drawerSearchQuery: String = ""
+    private var showArchivedSessions: Boolean = false
 
-    // 相机拍照的临时 Uri
-    private var cameraImageUri: Uri? = null
-
-    // 权限请求启动器
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            loadRecentImages()
-        } else {
-            Toast.makeText(requireContext(), "需要相册权限才能加载图片", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    // 相机权限请求启动器
-    private val requestCameraPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            openCamera()
-        } else {
-            Toast.makeText(requireContext(), "需要相机权限才能拍照", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    // 相机拍照结果处理
-    private val takePictureLauncher = registerForActivityResult(
-        ActivityResultContracts.TakePicture()
-    ) { success ->
-        if (success) {
-            cameraImageUri?.let { uri ->
-                onPhotoTaken(uri)
-            }
-        }
+    private val imagePickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        onImagesSelectedFromPicker(uris)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -165,12 +134,6 @@ class MainFragment : Fragment() {
         // 初始化会话列表 RecyclerView
         setupSessionRecyclerView()
         
-        // 初始化图片选择 RecyclerView
-        setupImageSelectRecyclerView()
-        
-        // 初始化手势检测器
-        setupGestureDetector()
-
         initInsets()
         
         // 观察 ViewModel 数据
@@ -179,25 +142,12 @@ class MainFragment : Fragment() {
         // 初始化模型名称显示
         viewModel.refreshActiveModel()
 
-        // 输入框失去焦点时：切换回搜索态
-        chatBinding.etInput.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus && isInputActive) {
-                // 延迟检查，避免点击其他按钮时误触发
-                view.postDelayed({
-                    if (!chatBinding.etInput.hasFocus() && !isFunctionPanelVisible()) {
-                        switchToIdleState()
-                    }
-                }, 100)
-            }
-        }
-
-        // 添加按钮点击：显示/隐藏功能面板
         chatBinding.etInput.setOnFocusChangeListener { _, hasFocus ->
             if (hasFocus) {
                 enterInputActiveState()
             } else if (isInputActive) {
                 view.postDelayed({
-                    if (!chatBinding.etInput.hasFocus() && !isFunctionPanelVisible()) {
+                    if (!chatBinding.etInput.hasFocus()) {
                         switchToIdleState()
                     }
                 }, 100)
@@ -205,25 +155,20 @@ class MainFragment : Fragment() {
         }
 
         chatBinding.ivAdd.setOnClickListener {
-            toggleFunctionPanel()
+            openImagePicker()
         }
 
-        // 点击聊天列表：隐藏功能面板
+        chatBinding.ivContextLimit.setOnClickListener {
+            showContextLimitDialog()
+        }
+
         chatBinding.rvChat.setOnClickListener {
-            if (isFunctionPanelVisible()) {
-                hideFunctionPanel()
-            }
             chatBinding.etInput.clearFocus()
         }
 
         // 输入框点击：显示输入态
         chatBinding.etInput.setOnClickListener {
             switchToActiveState()
-        }
-
-        // 相机按钮点击：打开相机
-        chatBinding.ivCamera.setOnClickListener {
-            checkCameraPermissionAndOpen()
         }
 
         // 发送按钮点击：发送消息
@@ -241,6 +186,17 @@ class MainFragment : Fragment() {
             }
         }
 
+        chatBinding.etInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                updateCurrentContextTokens()
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        updateCurrentContextTokens()
+        updateSendButtonState(false)
+        applyWallpaper()
+
         // 侧边栏清空历史按钮
         setupDrawerMenu()
 
@@ -248,7 +204,6 @@ class MainFragment : Fragment() {
     }
     private fun initInsets() {
         inputContainerBasePaddingBottom = chatBinding.inputContainer.paddingBottom
-        functionPanelBaseHeight = resolveFunctionPanelHeight()
 
         ViewCompat.setWindowInsetsAnimationCallback(
             binding.root,
@@ -271,23 +226,11 @@ class MainFragment : Fragment() {
         val systemBarsInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars())
         val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
         val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
-        val imeHeight = if (imeVisible) {
+        val bottomInset = if (imeVisible) {
             (imeInsets.bottom - systemBarsInsets.bottom).coerceAtLeast(0)
         } else {
             0
         }
-        val functionPanelHeight = resolveFunctionPanelHeight()
-        var functionPanelVisible = isFunctionPanelVisible()
-        val shouldKeepFunctionPanel = deferFunctionPanelHideForIme &&
-                functionPanelVisible &&
-                imeHeight in 1 until functionPanelHeight
-
-        if (deferFunctionPanelHideForIme && functionPanelVisible && imeHeight >= functionPanelHeight) {
-            hideFunctionPanel()
-            functionPanelVisible = false
-        }
-
-        val bottomInset = if (functionPanelVisible || shouldKeepFunctionPanel) 0 else imeHeight
         val targetPaddingBottom = inputContainerBasePaddingBottom + bottomInset
 
         if (chatBinding.inputContainer.paddingBottom != targetPaddingBottom) {
@@ -309,24 +252,6 @@ class MainFragment : Fragment() {
         chatBinding.rvChat.post {
             chatBinding.rvChat.scrollToPosition(messageCount - 1)
         }
-    }
-
-    private fun isFunctionPanelVisible(): Boolean {
-        val isVisibility =chatBinding.functionPanel.visibility == View.VISIBLE
-        if (isVisibility){
-            chatBinding.etInput.requestFocus()
-        }
-        return isVisibility
-    }
-
-    private fun resolveFunctionPanelHeight(): Int {
-        val measuredHeight = chatBinding.functionPanel.height
-        if (measuredHeight > 0) return measuredHeight
-
-        val layoutHeight = chatBinding.functionPanel.layoutParams?.height ?: 0
-        if (layoutHeight > 0) return layoutHeight
-
-        return functionPanelBaseHeight
     }
 
     private fun setupAppBar() {
@@ -397,6 +322,12 @@ class MainFragment : Fragment() {
             "html", "htm" -> {
                 val intent = Intent(requireContext(), VirtualAppActivity::class.java).apply {
                     putExtra(VirtualAppActivity.EXTRA_HTML_PATH, file.absolutePath)
+                }
+                startActivity(intent)
+            }
+            "json" -> {
+                val intent = Intent(requireContext(), JsonViewerActivity::class.java).apply {
+                    putExtra(JsonViewerActivity.EXTRA_JSON_PATH, file.absolutePath)
                 }
                 startActivity(intent)
             }
@@ -618,18 +549,56 @@ class MainFragment : Fragment() {
         }
     }
 
+    private fun applyWallpaper() {
+        val wallpaperUri = WallpaperStore.getWallpaperUri(requireContext())
+        val defaultBackground = ContextCompat.getColor(requireContext(), R.color.mt_background)
+        if (wallpaperUri == null) {
+            binding.wallpaperBackground.visibility = View.GONE
+            binding.wallpaperBackground.setImageDrawable(null)
+            binding.mainPager.setBackgroundColor(defaultBackground)
+            chatBinding.root.setBackgroundColor(defaultBackground)
+            workspaceBinding.root.setBackgroundColor(defaultBackground)
+            return
+        }
+
+        binding.wallpaperBackground.visibility = View.VISIBLE
+        runCatching {
+            binding.wallpaperBackground.setImageURI(wallpaperUri)
+        }.onFailure {
+            WallpaperStore.clearWallpaper(requireContext())
+            binding.wallpaperBackground.visibility = View.GONE
+            Toast.makeText(requireContext(), "壁纸读取失败，已恢复默认背景", Toast.LENGTH_SHORT).show()
+        }
+        binding.mainPager.setBackgroundColor(Color.TRANSPARENT)
+        chatBinding.root.setBackgroundColor(Color.TRANSPARENT)
+        workspaceBinding.root.setBackgroundColor(Color.TRANSPARENT)
+    }
+
     /**
      * 设置侧边栏菜单
      */
     private fun setupDrawerMenu() {
         val drawerMenu = (activity as? MainActivity)?.findViewById<View>(com.hfad.mantou.R.id.drawerMenu)
-        drawerMenu?.findViewById<android.widget.TextView>(com.hfad.mantou.R.id.tvClearHistory)?.setOnClickListener {
+        drawerMenu?.findViewById<View>(com.hfad.mantou.R.id.tvClearHistory)?.setOnClickListener {
             showClearHistoryDialog()
         }
-        drawerMenu?.findViewById<ImageButton>(com.hfad.mantou.R.id.btn_setting)?.setOnClickListener {
+        drawerMenu?.findViewById<View>(com.hfad.mantou.R.id.btn_setting)?.setOnClickListener {
             (activity as? MainActivity)?.closeDrawer()
-            startActivity(Intent(requireContext(), ModelSettingActivity::class.java))
+            startActivity(Intent(requireContext(), SettingsActivity::class.java))
         }
+        drawerMenu?.findViewById<ImageButton>(com.hfad.mantou.R.id.btnArchiveToggle)?.setOnClickListener {
+            showArchivedSessions = !showArchivedSessions
+            refreshDrawerSessionList()
+        }
+        drawerMenu?.findViewById<EditText>(com.hfad.mantou.R.id.etSessionSearch)
+            ?.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    drawerSearchQuery = s?.toString().orEmpty().trim()
+                    refreshDrawerSessionList()
+                }
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
     }
 
     /**
@@ -658,11 +627,7 @@ class MainFragment : Fragment() {
         // 清空输入框
         chatBinding.etInput.text?.clear()
         
-        // 清空图片选择
-        clearImageSelection()
-        
-        // 隐藏功能面板
-        hideFunctionPanel()
+        clearSelectedImages()
         
         Toast.makeText(requireContext(), "已创建新会话", Toast.LENGTH_SHORT).show()
     }
@@ -679,8 +644,7 @@ class MainFragment : Fragment() {
                 Toast.makeText(requireContext(), "已切换到: ${session.title}", Toast.LENGTH_SHORT).show()
             },
             onSessionLongClick = { session ->
-                // 长按会话：显示删除确认对话框
-                showDeleteSessionDialog(session)
+                showSessionActions(session)
             }
         )
 
@@ -691,12 +655,80 @@ class MainFragment : Fragment() {
             layoutManager = LinearLayoutManager(requireContext())
             adapter = sessionAdapter
         }
+        refreshDrawerSessionList()
+    }
+
+    private fun refreshDrawerSessionList() {
+        if (!::sessionAdapter.isInitialized) return
+
+        val drawerMenu = (activity as? MainActivity)?.findViewById<View>(com.hfad.mantou.R.id.drawerMenu)
+        val titleView = drawerMenu?.findViewById<TextView>(com.hfad.mantou.R.id.tvSessionSectionTitle)
+        val emptyView = drawerMenu?.findViewById<TextView>(com.hfad.mantou.R.id.tvEmptySessions)
+        val archiveButton = drawerMenu?.findViewById<ImageButton>(com.hfad.mantou.R.id.btnArchiveToggle)
+
+        val source = if (drawerSearchQuery.isNotBlank()) {
+            (activeSessions + archivedSessions).distinctBy { it.sessionId }
+        } else if (showArchivedSessions) {
+            archivedSessions
+        } else {
+            activeSessions
+        }
+        val visibleSessions = if (drawerSearchQuery.isBlank()) {
+            source
+        } else {
+            source.filter { it.title.contains(drawerSearchQuery, ignoreCase = true) }
+        }
+
+        titleView?.text = when {
+            drawerSearchQuery.isNotBlank() -> "搜索结果"
+            showArchivedSessions -> "归档对话"
+            else -> "最近对话"
+        }
+        emptyView?.text = when {
+            drawerSearchQuery.isNotBlank() -> "没有匹配的会话"
+            showArchivedSessions -> "暂无归档会话"
+            else -> "暂无会话"
+        }
+        emptyView?.visibility = if (visibleSessions.isEmpty()) View.VISIBLE else View.GONE
+
+        val accentColor = if (showArchivedSessions) {
+            ContextCompat.getColor(requireContext(), R.color.mt_primary)
+        } else {
+            ContextCompat.getColor(requireContext(), R.color.mt_text_primary)
+        }
+        archiveButton?.imageTintList = ColorStateList.valueOf(accentColor)
+        archiveButton?.contentDescription = if (showArchivedSessions) "返回最近对话" else "查看归档"
+
+        sessionAdapter.submitList(visibleSessions)
+    }
+
+    /**
+     * 显示会话操作菜单
+     */
+    private fun showSessionActions(session: ChatSessionEntity) {
+        val archiveLabel = if (session.isArchived) "取消归档" else "归档"
+        showActionMenu(
+            listOf(
+                ActionMenuItem(archiveLabel, R.drawable.ic_archive_outline) {
+                    val nextArchived = !session.isArchived
+                    viewModel.setSessionArchived(session.sessionId, nextArchived)
+                    Toast.makeText(
+                        requireContext(),
+                        if (nextArchived) "已归档会话" else "已取消归档",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                },
+                ActionMenuItem("删除", R.drawable.ic_delete_outline) {
+                    showDeleteSessionDialog(session)
+                }
+            )
+        )
     }
 
     /**
      * 显示删除会话确认对话框
      */
-    private fun showDeleteSessionDialog(session: com.hfad.mantou.data.database.ChatSessionEntity) {
+    private fun showDeleteSessionDialog(session: ChatSessionEntity) {
         androidx.appcompat.app.AlertDialog.Builder(requireContext())
             .setTitle("删除会话")
             .setMessage("确定要删除会话「${session.title}」吗？")
@@ -916,6 +948,10 @@ class MainFragment : Fragment() {
         return (value * resources.displayMetrics.density).toInt()
     }
 
+    private fun dp(value: Float): Int {
+        return (value * resources.displayMetrics.density).roundToInt()
+    }
+
     private fun selectableItemBackgroundRes(): Int {
         val typedValue = TypedValue()
         requireContext().theme.resolveAttribute(
@@ -964,6 +1000,7 @@ class MainFragment : Fragment() {
         // 观察消息列表
         viewModel.messages.observe(viewLifecycleOwner) { messages ->
             chatAdapter.submitList(messages)
+            updateCurrentContextTokens(messages)
             
             // 滚动到最新消息
             if (messages.isNotEmpty()) {
@@ -976,14 +1013,22 @@ class MainFragment : Fragment() {
         // 观察所有会话列表
         lifecycleScope.launch {
             viewModel.allSessions.collect { sessions ->
-                sessionAdapter.submitList(sessions)
+                activeSessions = sessions
+                refreshDrawerSessionList()
+            }
+        }
+
+        // 观察已归档会话列表
+        lifecycleScope.launch {
+            viewModel.archivedSessions.collect { sessions ->
+                archivedSessions = sessions
+                refreshDrawerSessionList()
             }
         }
 
         // 观察加载状态
         viewModel.isLoading.observe(viewLifecycleOwner) { isLoading ->
-            // 可以在这里显示/隐藏加载指示器
-            // 例如：binding.progressBar.visibility = if (isLoading) View.VISIBLE else View.GONE
+            updateSendButtonState(isLoading)
         }
 
         viewModel.isGeneratingApp.observe(viewLifecycleOwner) { isGeneratingApp ->
@@ -1024,312 +1069,497 @@ class MainFragment : Fragment() {
         }
     }
 
-    /**
-     * 初始化手势检测器（用于上滑进入图片选择器）
-     */
-    private fun setupGestureDetector() {
-        gestureDetector = GestureDetector(requireContext(), object : GestureDetector.SimpleOnGestureListener() {
-            private val SWIPE_THRESHOLD = 100
-            private val SWIPE_VELOCITY_THRESHOLD = 100
+    private fun openImagePicker() {
+        imagePickerLauncher.launch(arrayOf("image/*"))
+    }
 
-            override fun onFling(
-                e1: MotionEvent?,
-                e2: MotionEvent,
-                velocityX: Float,
-                velocityY: Float
-            ): Boolean {
-                if (e1 == null) return false
-                
-                val diffY = e1.y - e2.y // 上滑时 diffY > 0
-                val diffX = e2.x - e1.x
+    private fun onImagesSelectedFromPicker(uris: List<Uri>) {
+        if (uris.isEmpty()) return
 
-                // 检测上滑手势
-                if (abs(diffY) > abs(diffX) && 
-                    diffY > SWIPE_THRESHOLD && 
-                    abs(velocityY) > SWIPE_VELOCITY_THRESHOLD) {
-                    // 上滑 - 打开图片选择器
-                    openImagePicker()
-                    return true
-                }
-                return false
+        uris.forEach { uri ->
+            persistReadPermission(uri)
+            if (selectedImageUris.none { it == uri }) {
+                selectedImageUris.add(uri)
             }
+        }
+        renderSelectedImageChips()
+        updateCurrentContextTokens()
+    }
+
+    private fun persistReadPermission(uri: Uri) {
+        runCatching {
+            requireContext().contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+    }
+
+    private fun renderSelectedImageChips() {
+        chatBinding.selectedImageChipGroup.removeAllViews()
+        chatBinding.selectedImageChipScroll.visibility =
+            if (selectedImageUris.isEmpty()) View.GONE else View.VISIBLE
+
+        selectedImageUris.forEach { uri ->
+            val chip = Chip(requireContext()).apply {
+                text = queryDisplayName(uri)
+                isCloseIconVisible = true
+                isClickable = true
+                isCheckable = false
+                setTextColor(Color.rgb(44, 83, 122))
+                textSize = 13f
+                chipBackgroundColor = android.content.res.ColorStateList.valueOf(Color.rgb(238, 245, 255))
+                chipStrokeColor = android.content.res.ColorStateList.valueOf(Color.rgb(187, 216, 255))
+                chipStrokeWidth = dp(1).toFloat()
+                closeIconTint = android.content.res.ColorStateList.valueOf(Color.rgb(44, 131, 216))
+                setOnCloseIconClickListener {
+                    selectedImageUris.remove(uri)
+                    renderSelectedImageChips()
+                    updateCurrentContextTokens()
+                }
+            }
+            chatBinding.selectedImageChipGroup.addView(chip)
+        }
+    }
+
+    private fun clearSelectedImages() {
+        selectedImageUris.clear()
+        renderSelectedImageChips()
+        updateCurrentContextTokens()
+    }
+
+    private fun showContextLimitDialog() {
+        val dialog = BottomSheetDialog(requireContext())
+        val content = buildContextLimitSheet()
+        dialog.setContentView(content)
+        dialog.setOnShowListener {
+            val sheet = dialog.findViewById<FrameLayout>(
+                com.google.android.material.R.id.design_bottom_sheet
+            )
+            sheet?.background = ColorDrawable(Color.TRANSPARENT)
+        }
+        dialog.show()
+    }
+
+    private fun buildContextLimitSheet(): View {
+        var syncing = false
+        var currentLimit = ContextLimitStore.getTokenLimit(requireContext())
+        lateinit var saveLimitAction: (Int, Boolean) -> Unit
+
+        val scroll = ScrollView(requireContext()).apply {
+            isFillViewport = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val container = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            background = roundedBackground(Color.WHITE, topLeft = 28f, topRight = 28f)
+            setPadding(dp(22), dp(12), dp(22), dp(22))
+        }
+        scroll.addView(
+            container,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        container.addView(
+            View(requireContext()).apply {
+                background = roundedBackground(Color.rgb(220, 226, 238), 2.5f)
+            },
+            LinearLayout.LayoutParams(dp(46), dp(5)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                bottomMargin = dp(26)
+            }
+        )
+
+        container.addView(
+            TextView(requireContext()).apply {
+                text = "调整上下文阈值"
+                textSize = 26f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(45, 52, 68))
+                includeFontPadding = false
+            }
+        )
+
+        container.addView(
+            TextView(requireContext()).apply {
+                text = "修改后自动保存，新的阈值会立刻应用"
+                textSize = 15f
+                setTextColor(Color.rgb(111, 119, 137))
+                setLineSpacing(dp(3).toFloat(), 1f)
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(14)
+            }
+        )
+
+        container.addView(divider(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(1)
+        ).apply {
+            topMargin = dp(26)
+            bottomMargin = dp(20)
         })
 
-        // 在功能面板上设置触摸监听
-        chatBinding.functionPanel.setOnTouchListener { _, event ->
-            gestureDetector.onTouchEvent(event)
-            false // 返回 false 让 RecyclerView 继续处理滚动
+        val statsRow = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
+        val currentValue = createStatValue(formatNumber(currentContextTokens), Color.rgb(45, 52, 68))
+        val targetValue = createStatValue(formatNumber(currentLimit), Color.rgb(58, 132, 226))
+        val percentValue = createStatValue(formatPercent(currentContextTokens, currentLimit), Color.rgb(65, 145, 126))
+        statsRow.addView(createStatColumn("当前上下文", currentValue), statColumnParams())
+        statsRow.addView(verticalDivider())
+        statsRow.addView(createStatColumn("目标阈值", targetValue), statColumnParams())
+        statsRow.addView(verticalDivider())
+        statsRow.addView(createStatColumn("占用比例", percentValue), statColumnParams())
+        container.addView(statsRow)
 
-        // 在输入区域设置触摸监听（用于上滑打开图片选择器）
-        chatBinding.inputCard.setOnTouchListener { _, event ->
-            if (chatBinding.functionPanel.visibility == View.VISIBLE) {
-                gestureDetector.onTouchEvent(event)
+        container.addView(divider(), LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(1)
+        ).apply {
+            topMargin = dp(22)
+            bottomMargin = dp(28)
+        })
+
+        val slider = Slider(requireContext()).apply {
+            valueFrom = ContextLimitStore.MIN_TOKEN_LIMIT.toFloat()
+            valueTo = ContextLimitStore.MAX_TOKEN_LIMIT.toFloat()
+            value = currentLimit.toFloat()
+        }
+        container.addView(slider)
+
+        val optionsGrid = GridLayout(requireContext()).apply {
+            columnCount = 4
+            useDefaultMargins = false
+        }
+        val optionButtons = mutableMapOf<Int, TextView>()
+        ContextLimitStore.TOKEN_OPTIONS.forEach { option ->
+            val button = TextView(requireContext()).apply {
+                text = formatCompactToken(option)
+                gravity = Gravity.CENTER
+                textSize = 16f
+                typeface = Typeface.DEFAULT_BOLD
+                includeFontPadding = false
+                setOnClickListener {
+                    saveLimitAction(option, true)
+                }
             }
-            false
+            optionButtons[option] = button
+            optionsGrid.addView(
+                button,
+                GridLayout.LayoutParams().apply {
+                    width = dp(70)
+                    height = dp(48)
+                    setMargins(0, 0, dp(10), dp(10))
+                }
+            )
+        }
+        container.addView(
+            optionsGrid,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(18)
+            }
+        )
+
+        container.addView(
+            TextView(requireContext()).apply {
+                text = "精确阈值"
+                textSize = 15f
+                setTextColor(Color.rgb(111, 119, 137))
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(10)
+                leftMargin = dp(16)
+            }
+        )
+
+        val exactInput = EditText(requireContext()).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+            textSize = 22f
+            setTextColor(Color.rgb(45, 52, 68))
+            setText(currentLimit.toString())
+            setPadding(dp(18), 0, dp(18), 0)
+            background = roundedStrokeBackground(
+                fillColor = Color.rgb(244, 247, 255),
+                strokeColor = Color.rgb(225, 231, 243),
+                radius = 16f
+            )
+        }
+        container.addView(
+            exactInput,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(64)
+            ).apply {
+                topMargin = dp(4)
+            }
+        )
+
+        container.addView(
+            TextView(requireContext()).apply {
+                text = "默认 ${formatNumber(ContextLimitStore.DEFAULT_TOKEN_LIMIT)}，范围 ${formatNumber(ContextLimitStore.MIN_TOKEN_LIMIT)} - ${formatNumber(ContextLimitStore.MAX_TOKEN_LIMIT)}"
+                textSize = 14f
+                setTextColor(Color.rgb(150, 158, 176))
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+                leftMargin = dp(16)
+            }
+        )
+
+        val savedRow = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        savedRow.addView(
+            TextView(requireContext()).apply {
+                text = "✓"
+                gravity = Gravity.CENTER
+                textSize = 17f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(112, 124, 145))
+                background = roundedStrokeBackground(
+                    fillColor = Color.TRANSPARENT,
+                    strokeColor = Color.rgb(112, 124, 145),
+                    radius = 13f
+                )
+            },
+            LinearLayout.LayoutParams(dp(27), dp(27))
+        )
+        savedRow.addView(
+            TextView(requireContext()).apply {
+                text = "已自动保存"
+                textSize = 17f
+                setTextColor(Color.rgb(112, 124, 145))
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                leftMargin = dp(12)
+            }
+        )
+        container.addView(
+            savedRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(22)
+            }
+        )
+
+        fun refreshSheet(limit: Int) {
+            val clamped = limit.coerceIn(
+                ContextLimitStore.MIN_TOKEN_LIMIT,
+                ContextLimitStore.MAX_TOKEN_LIMIT
+            )
+            currentLimit = clamped
+            currentValue.text = formatNumber(currentContextTokens)
+            targetValue.text = formatNumber(clamped)
+            percentValue.text = formatPercent(currentContextTokens, clamped)
+            optionButtons.forEach { (option, button) ->
+                val selected = option == clamped
+                button.setTextColor(if (selected) Color.WHITE else Color.rgb(122, 133, 153))
+                button.background = roundedStrokeBackground(
+                    fillColor = if (selected) Color.rgb(58, 132, 226) else Color.rgb(245, 247, 252),
+                    strokeColor = if (selected) Color.rgb(58, 132, 226) else Color.rgb(228, 233, 243),
+                    radius = 24f
+                )
+            }
+            updateContextProgressIndicator()
+        }
+
+        saveLimitAction = { limit, updateInput ->
+            if (!syncing) {
+                val clamped = limit.coerceIn(
+                    ContextLimitStore.MIN_TOKEN_LIMIT,
+                    ContextLimitStore.MAX_TOKEN_LIMIT
+                )
+                ContextLimitStore.setTokenLimit(requireContext(), clamped)
+                syncing = true
+                if (slider.value.roundToInt() != clamped) {
+                    slider.value = clamped.toFloat()
+                }
+                if (updateInput && exactInput.text?.toString() != clamped.toString()) {
+                    exactInput.setText(clamped.toString())
+                    exactInput.setSelection(exactInput.text?.length ?: 0)
+                }
+                syncing = false
+                refreshSheet(clamped)
+            }
+        }
+
+        slider.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                saveLimitAction(value.roundToInt(), true)
+            }
+        }
+        exactInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (syncing) return
+                val parsed = s?.toString()?.toIntOrNull() ?: return
+                saveLimitAction(parsed, false)
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        refreshSheet(currentLimit)
+
+        return scroll
+    }
+
+    private fun updateCurrentContextTokens(messages: List<ChatMessage>? = null) {
+        val sourceMessages = messages ?: viewModel.messages.value.orEmpty()
+        val messageChars = sourceMessages.sumOf { message ->
+            message.content.length + (message.thinking?.length ?: 0)
+        }
+        val inputChars = chatBinding.etInput.text?.length ?: 0
+        val imageTokenEstimate = selectedImageUris.size * 1024
+        currentContextTokens = estimateTokens(messageChars + inputChars) + imageTokenEstimate
+        updateContextProgressIndicator()
+    }
+
+    private fun updateContextProgressIndicator() {
+        val limit = ContextLimitStore.getTokenLimit(requireContext())
+        val fraction = if (limit <= 0) 0f else currentContextTokens.toFloat() / limit.toFloat()
+        chatBinding.ivContextLimit.setProgressFraction(fraction)
+        chatBinding.ivContextLimit.contentDescription =
+            "上下文限制，已使用 ${formatNumber(currentContextTokens)} / ${formatNumber(limit)}"
+    }
+
+    private fun estimateTokens(characterCount: Int): Int {
+        return (characterCount / 2.2f).roundToInt().coerceAtLeast(0)
+    }
+
+    private fun createStatColumn(label: String, valueView: TextView): LinearLayout {
+        return LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(requireContext()).apply {
+                text = label
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(122, 133, 153))
+            })
+            addView(valueView, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+            })
         }
     }
 
-    /**
-     * 打开系统图片选择器
-     */
-    private fun openImagePicker() {
-        val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI).apply {
-            type = "image/*"
-            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+    private fun createStatValue(textValue: String, color: Int): TextView {
+        return TextView(requireContext()).apply {
+            text = textValue
+            textSize = 22f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(color)
+            includeFontPadding = false
         }
-        imagePickerLauncher.launch(intent)
     }
 
-    // 图片选择器结果处理
-    private val imagePickerLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            val data = result.data
-            val selectedUris = mutableListOf<android.net.Uri>()
-            
-            // 处理多选
-            data?.clipData?.let { clipData ->
-                for (i in 0 until clipData.itemCount) {
-                    clipData.getItemAt(i).uri?.let { uri ->
-                        selectedUris.add(uri)
+    private fun statColumnParams(): LinearLayout.LayoutParams {
+        return LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+    }
+
+    private fun divider(): View {
+        return View(requireContext()).apply {
+            background = ColorDrawable(Color.rgb(232, 236, 244))
+        }
+    }
+
+    private fun verticalDivider(): View {
+        return View(requireContext()).apply {
+            background = ColorDrawable(Color.rgb(232, 236, 244))
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(58)).apply {
+                leftMargin = dp(12)
+                rightMargin = dp(20)
+            }
+        }
+    }
+
+    private fun roundedBackground(color: Int, radius: Float = 0f, topLeft: Float = radius, topRight: Float = radius): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadii = floatArrayOf(
+                dp(topLeft).toFloat(), dp(topLeft).toFloat(),
+                dp(topRight).toFloat(), dp(topRight).toFloat(),
+                0f, 0f,
+                0f, 0f
+            )
+        }
+    }
+
+    private fun roundedStrokeBackground(fillColor: Int, strokeColor: Int, radius: Float): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(fillColor)
+            setCornerRadius(dp(radius).toFloat())
+            setStroke(dp(1), strokeColor)
+        }
+    }
+
+    private fun formatNumber(value: Int): String {
+        return String.format(Locale.US, "%,d", value)
+    }
+
+    private fun formatPercent(current: Int, limit: Int): String {
+        if (limit <= 0) return "0%"
+        return String.format(Locale.US, "%.1f%%", current * 100f / limit)
+    }
+
+    private fun formatCompactToken(value: Int): String {
+        return if (value >= 1_000_000) {
+            "${value / 1_000_000}M"
+        } else {
+            "${value / 1_000}k"
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String {
+        return runCatching {
+            requireContext().contentResolver
+                .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
+                    } else {
+                        null
                     }
                 }
-            }
-            
-            // 处理单选
-            if (selectedUris.isEmpty()) {
-                data?.data?.let { uri ->
-                    selectedUris.add(uri)
-                }
-            }
-            
-            if (selectedUris.isNotEmpty()) {
-                // 处理选中的图片
-                onImagesSelectedFromPicker(selectedUris)
-            }
-        }
-    }
-
-    /**
-     * 从系统选择器选中图片后的回调
-     */
-    private fun onImagesSelectedFromPicker(uris: List<android.net.Uri>) {
-        // 可以在这里处理从系统选择器选中的图片
-        Toast.makeText(requireContext(), "已选择 ${uris.size} 张图片", Toast.LENGTH_SHORT).show()
-    }
-
-    /**
-     * 检查相机权限并打开相机
-     */
-    private fun checkCameraPermissionAndOpen() {
-        when {
-            ContextCompat.checkSelfPermission(
-                requireContext(),
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED -> {
-                openCamera()
-            }
-            shouldShowRequestPermissionRationale(Manifest.permission.CAMERA) -> {
-                Toast.makeText(requireContext(), "需要相机权限来拍照", Toast.LENGTH_SHORT).show()
-                requestCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-            }
-            else -> {
-                requestCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-            }
-        }
-    }
-
-    /**
-     * 打开相机拍照
-     */
-    private fun openCamera() {
-        val uri = createImageUri()
-        if (uri != null) {
-            cameraImageUri = uri
-            takePictureLauncher.launch(uri)
-        } else {
-            Toast.makeText(requireContext(), "无法创建图片文件", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /**
-     * 创建用于保存拍照图片的 Uri
-     */
-    private fun createImageUri(): Uri? {
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val imageFileName = "JPEG_${timeStamp}.jpg"
-        
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Android 10+ 使用 MediaStore
-            val contentValues = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, imageFileName)
-                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES)
-            }
-            requireContext().contentResolver.insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                contentValues
-            )
-        } else {
-            // Android 9 及以下使用 FileProvider
-            val storageDir = requireContext().getExternalFilesDir(Environment.DIRECTORY_PICTURES)
-            val imageFile = File(storageDir, imageFileName)
-            FileProvider.getUriForFile(
-                requireContext(),
-                "${requireContext().packageName}.fileprovider",
-                imageFile
-            )
-        }
-    }
-
-    /**
-     * 拍照完成后的回调
-     */
-    private fun onPhotoTaken(uri: Uri) {
-        Toast.makeText(requireContext(), "拍照成功", Toast.LENGTH_SHORT).show()
-        // 可以在这里处理拍摄的照片，例如显示预览或发送
-        // 刷新图片列表以显示新拍摄的照片
-        if (chatBinding.functionPanel.visibility == View.VISIBLE) {
-            loadRecentImages()
-        }
-    }
-
-    /**
-     * 初始化图片选择 RecyclerView
-     */
-    private fun setupImageSelectRecyclerView() {
-        imageSelectAdapter = ImageSelectAdapter { selectedImages ->
-            // 选中状态变化回调
-            onImageSelectionChanged(selectedImages)
-        }
-
-        chatBinding.functionPanel.apply {
-            layoutManager = GridLayoutManager(requireContext(), 4) // 4列
-            adapter = imageSelectAdapter
-            setHasFixedSize(true)
-        }
-    }
-
-    /**
-     * 图片选中状态变化回调
-     */
-    private fun onImageSelectionChanged(selectedImages: List<ImageItem>) {
-        // 可以在这里处理选中图片变化，例如更新UI显示选中数量
-        // Toast.makeText(requireContext(), "已选择 ${selectedImages.size} 张图片", Toast.LENGTH_SHORT).show()
-    }
-
-    /**
-     * 获取选中的图片列表
-     */
-    fun getSelectedImages(): List<ImageItem> {
-        return if (::imageSelectAdapter.isInitialized) {
-            imageSelectAdapter.getSelectedImages()
-        } else {
-            emptyList()
-        }
-    }
-
-    /**
-     * 清除图片选中状态
-     */
-    fun clearImageSelection() {
-        if (::imageSelectAdapter.isInitialized) {
-            imageSelectAdapter.clearSelection()
-        }
-    }
-
-    /**
-     * 检查并请求相册权限
-     */
-    private fun checkAndRequestPermission() {
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+ 使用 READ_MEDIA_IMAGES
-            Manifest.permission.READ_MEDIA_IMAGES
-        } else {
-            // Android 12 及以下使用 READ_EXTERNAL_STORAGE
-            Manifest.permission.READ_EXTERNAL_STORAGE
-        }
-
-        when {
-            ContextCompat.checkSelfPermission(
-                requireContext(),
-                permission
-            ) == PackageManager.PERMISSION_GRANTED -> {
-                // 已有权限，直接加载图片
-                loadRecentImages()
-            }
-            shouldShowRequestPermissionRationale(permission) -> {
-                // 需要解释为什么需要权限
-                Toast.makeText(requireContext(), "需要相册权限来选择图片", Toast.LENGTH_SHORT).show()
-                requestPermissionLauncher.launch(permission)
-            }
-            else -> {
-                // 请求权限
-                requestPermissionLauncher.launch(permission)
-            }
-        }
-    }
-
-    /**
-     * 从 MediaStore 加载最新 12 张图片
-     */
-    private fun loadRecentImages() {
-        val imageList = mutableListOf<ImageItem>()
-
-        val projection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DATE_ADDED
-        )
-
-        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
-
-        val query = requireContext().contentResolver.query(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            null,
-            null,
-            sortOrder
-        )
-
-        query?.use { cursor ->
-            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-            var count = 0
-
-            while (cursor.moveToNext() && count < 12) {
-                val id = cursor.getLong(idColumn)
-                val contentUri = ContentUris.withAppendedId(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    id
-                )
-                imageList.add(ImageItem(id, contentUri))
-                count++
-            }
-        }
-
-        // 更新适配器数据
-        imageSelectAdapter.setImages(imageList)
+        }.getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+            ?: "已选择图片"
     }
 
     /**
      * 切换到输入态
      */
     private fun switchToActiveState() {
-        deferFunctionPanelHideForIme = isFunctionPanelVisible()
-        
         isInputActive = true
         if (!chatBinding.etInput.hasFocus()) {
             chatBinding.etInput.requestFocus()
         }
         showKeyboard()
-        return
-        
-        // 延迟获取焦点，确保布局已更新
-        chatBinding.etInput.postDelayed({
-            chatBinding.etInput.requestFocus()
-            showKeyboard()
-        }, 100)
     }
 
     /**
@@ -1341,61 +1571,10 @@ class MainFragment : Fragment() {
 
     private fun switchToIdleState() {
         if (!isInputActive) return
-        
-        // 如果功能面板正在显示，不切换
-        if (chatBinding.functionPanel.visibility == View.VISIBLE) {
-            return
-        }
-        
         isInputActive = false
         hideKeyboard()
-        hideFunctionPanel()
-        
-        // 清空输入框
+
         chatBinding.etInput.clearFocus()
-        chatBinding.etInput.text?.clear()
-    }
-
-    /**
-     * 显示/隐藏功能面板
-     */
-    private fun toggleFunctionPanel() {
-        if (chatBinding.functionPanel.visibility == View.VISIBLE) {
-            hideFunctionPanel()
-        } else {
-            showFunctionPanel()
-        }
-    }
-
-    /**
-     * 显示功能面板
-     */
-    private fun showFunctionPanel() {
-        deferFunctionPanelHideForIme = false
-        resetInputContainerForFunctionPanel()
-        chatBinding.functionPanel.visibility = View.VISIBLE
-        // 隐藏键盘
-        hideKeyboard()
-        chatBinding.etInput.clearFocus()
-        
-        // 检查权限并加载图片
-        checkAndRequestPermission()
-    }
-
-    /**
-     * 隐藏功能面板
-     */
-    private fun hideFunctionPanel() {
-        deferFunctionPanelHideForIme = false
-        chatBinding.functionPanel.visibility = View.GONE
-    }
-
-    private fun resetInputContainerForFunctionPanel() {
-        if (chatBinding.inputContainer.paddingBottom != inputContainerBasePaddingBottom) {
-            chatBinding.inputContainer.updatePadding(bottom = inputContainerBasePaddingBottom)
-        }
-        lastImeVisible = false
-        lastAppliedBottomInset = 0
     }
 
     /**
@@ -1424,29 +1603,49 @@ class MainFragment : Fragment() {
         }
     }
 
+    private fun updateSendButtonState(taskRunning: Boolean) {
+        isTaskRunning = taskRunning
+        val enabled = !taskRunning
+        val backgroundColor = if (enabled) {
+            Color.rgb(44, 131, 216)
+        } else {
+            Color.rgb(209, 229, 255)
+        }
+        val iconColor = if (enabled) {
+            Color.WHITE
+        } else {
+            Color.argb(185, 255, 255, 255)
+        }
+
+        chatBinding.ivSend.isEnabled = enabled
+        chatBinding.ivSend.isClickable = enabled
+        chatBinding.ivSend.backgroundTintList = ColorStateList.valueOf(backgroundColor)
+        chatBinding.ivSend.imageTintList = ColorStateList.valueOf(iconColor)
+        chatBinding.ivSend.contentDescription = if (enabled) "发送" else "正在处理，暂不可发送"
+    }
+
     /**
      * 发送消息
      */
     private fun sendMessage() {
+        if (isTaskRunning) {
+            return
+        }
         val text = chatBinding.etInput.text?.toString()?.trim() ?: ""
-        
-        // 获取选中的图片
-        val selectedImages = getSelectedImages()
+        val imageUris = selectedImageUris.toList()
         
         // 检查是否有内容
-        if (text.isEmpty() && selectedImages.isEmpty()) {
+        if (text.isEmpty() && imageUris.isEmpty()) {
             Toast.makeText(requireContext(), "请输入消息内容", Toast.LENGTH_SHORT).show()
             return
         }
+        updateSendButtonState(true)
 
-        // 获取图片 URI 列表
-        val imageUris = selectedImages.map { it.uri }
         val firstImagePath = imageUris.firstOrNull()?.toString()
 
         // 清空输入框和图片选择
         chatBinding.etInput.text?.clear()
-        clearImageSelection()
-        hideFunctionPanel()
+        clearSelectedImages()
         hideKeyboard()
 
         // 通过 ViewModel 发送消息（支持多图）
@@ -1461,6 +1660,7 @@ class MainFragment : Fragment() {
         super.onResume()
         viewModel.refreshActiveModel()
         refreshWorkspaceTree()
+        applyWallpaper()
     }
 
     override fun onDestroyView() {

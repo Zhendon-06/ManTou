@@ -13,7 +13,9 @@ data class ChatSessionEntity(
     
     val title: String,  // 保存该会话第一个用户问题
     
-    val createTime: Long  // 创建时间戳
+    val createTime: Long,  // 创建时间戳
+
+    val isArchived: Boolean = false
 )
 
 
