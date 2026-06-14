@@ -16,6 +16,7 @@ import com.hfad.mantou.utils.AppGenerator
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.ImageUtils
 import com.hfad.mantou.utils.AppIntentDetector
+import com.hfad.mantou.data.preferences.ContextLimitStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -40,6 +41,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val messages: LiveData<List<ChatMessage>> = _messages
 
     val allSessions: Flow<List<ChatSessionEntity>> = repository.getAllSessions()
+
+    val archivedSessions: Flow<List<ChatSessionEntity>> = repository.getArchivedSessions()
 
     private val _isLoading = MutableLiveData(false)
     val isLoading: LiveData<Boolean> = _isLoading
@@ -244,7 +247,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 model = config.model,
                 messages = apiMessages,
                 stream = true,
-                maxTokens = AppGenerator.APP_GEN_MAX_TOKENS
+                maxTokens = ContextLimitStore.getTokenLimit(getApplication())
             )
 
             val htmlBuffer = StringBuilder()
@@ -492,6 +495,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _currentSessionId.value = null
                 _messages.value = emptyList()
             }
+        }
+    }
+
+    fun setSessionArchived(sessionId: Long, isArchived: Boolean) {
+        viewModelScope.launch {
+            repository.setSessionArchived(sessionId, isArchived)
         }
     }
 

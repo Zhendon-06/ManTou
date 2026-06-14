@@ -48,8 +48,9 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:lineSpacingExtra="2dp"
-            android:textColor="#333333"
+            android:textColor="@color/mt_text_primary"
             android:textSize="15sp"
+            android:textIsSelectable="true"
             tools:text="这是 AI 助手回复的消息内容，可以很长很长..." />
 
         <!-- WebView 容器（CardView 实现圆角裁剪，与外层气泡风格一致） -->
@@ -60,8 +61,9 @@
             android:layout_marginTop="8dp"
             app:cardCornerRadius="12dp"
             app:cardElevation="0dp"
-            app:cardBackgroundColor="#F0F0F0"
-            app:strokeWidth="0dp"
+            app:cardBackgroundColor="@color/mt_surface"
+            app:strokeColor="@color/mt_outline"
+            app:strokeWidth="1dp"
             android:visibility="gone">
 
             <WebView

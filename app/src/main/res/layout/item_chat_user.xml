@@ -39,9 +39,10 @@
             android:id="@+id/tvMessage"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:textColor="#FFFFFF"
+            android:textColor="@color/mt_on_primary"
             android:textSize="15sp"
             android:lineSpacingExtra="2dp"
+            android:textIsSelectable="true"
             tools:text="这是用户发送的消息内容" />
 
     </LinearLayout>

@@ -17,6 +17,7 @@ object AgentWorkspace {
 
     fun ensureWorkspace(context: Context) {
         webDir(context).mkdirs()
+        normalizeGeneratedAppProjects(context)
         agentDir(context).mkdirs()
         memoryDir(context).mkdirs()
 
@@ -35,6 +36,15 @@ object AgentWorkspace {
             "# Memory",
             memoryFile(context).readText()
         ).joinToString("\n\n")
+    }
+
+    fun memoryDocuments(context: Context): List<WorkspaceMemoryDocument> {
+        ensureWorkspace(context)
+        return listOf(
+            WorkspaceMemoryDocument(SOUL_FILE, "Agent 灵魂", soulFile(context)),
+            WorkspaceMemoryDocument(CHAT_FILE, "纯聊天系统提示词", chatFile(context)),
+            WorkspaceMemoryDocument(MEMORY_FILE, "长期记忆", memoryFile(context))
+        )
     }
 
     fun appendExplicitMemoryIfNeeded(context: Context, userMessage: String): Boolean {
@@ -188,6 +198,46 @@ object AgentWorkspace {
         if (!file.exists()) file.writeText(content.trimIndent() + "\n")
     }
 
+    private fun normalizeGeneratedAppProjects(context: Context) {
+        val root = webDir(context)
+        val rootHtmlFiles = root.listFiles()
+            ?.filter { it.isFile && isHtmlFile(it) }
+            .orEmpty()
+
+        for (htmlFile in rootHtmlFiles) {
+            val projectDir = nextAvailableProjectDir(root, htmlFile.nameWithoutExtension)
+            if (!projectDir.mkdirs() && !projectDir.isDirectory) continue
+
+            val targetHtml = File(projectDir, htmlFile.name)
+            if (!htmlFile.renameTo(targetHtml)) continue
+
+            val dataFile = File(root, "${htmlFile.nameWithoutExtension}.json")
+            if (dataFile.isFile) {
+                dataFile.renameTo(File(projectDir, dataFile.name))
+            }
+            AppGenerator.ensureWebAppDataFile(targetHtml)
+        }
+    }
+
+    private fun nextAvailableProjectDir(root: File, baseName: String): File {
+        val safeName = baseName
+            .replace(Regex("[\\\\/:*?\"<>|]+"), "_")
+            .trim('_', '-', '.', ' ')
+            .ifBlank { "web_app" }
+
+        var dir = File(root, safeName)
+        var index = 2
+        while (dir.exists()) {
+            dir = File(root, "${safeName}_$index")
+            index++
+        }
+        return dir
+    }
+
+    private fun isHtmlFile(file: File): Boolean {
+        return file.extension.equals("html", true) || file.extension.equals("htm", true)
+    }
+
     private val DEFAULT_SOUL = """
         # SOUL
 
@@ -263,4 +313,10 @@ data class WorkspaceNode(
     val absolutePath: String? = null,
     val defaultExpanded: Boolean = false,
     val children: List<WorkspaceNode> = emptyList()
+)
+
+data class WorkspaceMemoryDocument(
+    val fileName: String,
+    val description: String,
+    val file: File
 )

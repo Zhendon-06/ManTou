@@ -4,7 +4,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#F5F6FA">
+    android:background="@color/mt_background">
 
     <LinearLayout
         android:id="@+id/workspacePathBar"
@@ -33,7 +33,7 @@
             android:layout_marginStart="12dp"
             android:layout_weight="1"
             android:text="/workspace"
-            android:textColor="#2B3142"
+            android:textColor="@color/mt_text_primary"
             android:textSize="18sp"
             android:textStyle="bold" />
     </LinearLayout>
@@ -45,7 +45,9 @@
         android:layout_marginHorizontal="18dp"
         android:layout_marginTop="16dp"
         android:layout_marginBottom="24dp"
-        app:cardBackgroundColor="#FFFFFF"
+        app:cardBackgroundColor="@color/mt_surface"
+        app:strokeColor="@color/mt_outline"
+        app:strokeWidth="1dp"
         app:cardCornerRadius="16dp"
         app:cardElevation="0dp"
         app:layout_constraintBottom_toBottomOf="parent"

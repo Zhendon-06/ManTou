@@ -31,8 +31,14 @@ interface ChatDao {
     /**
      * 查询所有会话，按创建时间倒序排列
      */
-    @Query("SELECT * FROM chat_sessions ORDER BY createTime DESC")
+    @Query("SELECT * FROM chat_sessions WHERE isArchived = 0 ORDER BY createTime DESC")
     fun getAllSessions(): Flow<List<ChatSessionEntity>>
+
+    /**
+     * 查询所有已归档会话，按创建时间倒序排列
+     */
+    @Query("SELECT * FROM chat_sessions WHERE isArchived = 1 ORDER BY createTime DESC")
+    fun getArchivedSessions(): Flow<List<ChatSessionEntity>>
     
     /**
      * 根据 sessionId 查询会话
@@ -45,6 +51,12 @@ interface ChatDao {
      */
     @Query("DELETE FROM chat_sessions WHERE sessionId = :sessionId")
     suspend fun deleteSession(sessionId: Long)
+
+    /**
+     * 设置会话归档状态
+     */
+    @Query("UPDATE chat_sessions SET isArchived = :isArchived WHERE sessionId = :sessionId")
+    suspend fun setSessionArchived(sessionId: Long, isArchived: Boolean)
     
     /**
      * 删除所有会话

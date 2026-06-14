@@ -3,6 +3,7 @@ package com.hfad.mantou.utils
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class AppGeneratorTest {
 
@@ -61,5 +62,14 @@ class AppGeneratorTest {
 
         assertEquals("BaseUA MantouApp/1", userAgent)
         assertEquals(userAgent, AppGenerator.withMantouWebAppUserAgent(userAgent))
+    }
+
+    @Test
+    fun dataFileForHtmlUsesSameStemWithJsonExtension() {
+        val htmlFile = File("generated_apps/todo_20260614_210000.html")
+
+        val dataFile = AppGenerator.dataFileForHtml(htmlFile)
+
+        assertEquals("todo_20260614_210000.json", dataFile.name)
     }
 }

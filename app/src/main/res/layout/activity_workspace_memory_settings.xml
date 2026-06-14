@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/main"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/mt_background"
+    android:orientation="vertical">
+
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:background="@color/mt_background"
+        app:navigationIcon="@drawable/ic_arrow_back"
+        app:navigationIconTint="@color/mt_text_primary"
+        app:title="Workspace 记忆"
+        app:titleCentered="true"
+        app:titleTextColor="@color/mt_text_primary"
+        app:titleTextAppearance="@style/TextAppearance.Material3.TitleMedium" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false"
+        android:fillViewport="true"
+        android:overScrollMode="ifContentScrolls"
+        android:paddingHorizontal="14dp"
+        android:paddingBottom="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="文档内容"
+                    android:textColor="@color/mt_text_muted"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:background="@color/mt_outline" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="15dp"
+                android:text="SOUL.md（Agent 灵魂）"
+                android:textColor="@color/mt_text_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etSoul"
+                android:layout_width="match_parent"
+                android:layout_height="130dp"
+                android:layout_marginTop="9dp"
+                android:background="@drawable/bg_settings_panel"
+                android:fontFamily="monospace"
+                android:gravity="top|start"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:nestedScrollingEnabled="true"
+                android:overScrollMode="ifContentScrolls"
+                android:padding="11dp"
+                android:scrollbars="vertical"
+                android:textColor="@color/mt_text_primary"
+                android:textColorHint="@color/mt_text_muted"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/btnSaveSoul"
+                android:layout_width="70dp"
+                android:layout_height="32dp"
+                android:layout_gravity="end"
+                android:layout_marginTop="9dp"
+                android:background="@drawable/bg_settings_save_button"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:gravity="center"
+                android:text="保存"
+                android:textColor="@color/mt_primary"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="17dp"
+                android:background="@color/mt_outline" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="15dp"
+                android:text="CHAT.md（纯聊天系统提示词）"
+                android:textColor="@color/mt_text_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etChat"
+                android:layout_width="match_parent"
+                android:layout_height="130dp"
+                android:layout_marginTop="9dp"
+                android:background="@drawable/bg_settings_panel"
+                android:fontFamily="monospace"
+                android:gravity="top|start"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:nestedScrollingEnabled="true"
+                android:overScrollMode="ifContentScrolls"
+                android:padding="11dp"
+                android:scrollbars="vertical"
+                android:textColor="@color/mt_text_primary"
+                android:textColorHint="@color/mt_text_muted"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/btnSaveChat"
+                android:layout_width="70dp"
+                android:layout_height="32dp"
+                android:layout_gravity="end"
+                android:layout_marginTop="9dp"
+                android:background="@drawable/bg_settings_save_button"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:gravity="center"
+                android:text="保存"
+                android:textColor="@color/mt_primary"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="17dp"
+                android:background="@color/mt_outline" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="15dp"
+                android:text="MEMORY.md（长期记忆）"
+                android:textColor="@color/mt_text_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etMemory"
+                android:layout_width="match_parent"
+                android:layout_height="130dp"
+                android:layout_marginTop="9dp"
+                android:background="@drawable/bg_settings_panel"
+                android:fontFamily="monospace"
+                android:gravity="top|start"
+                android:inputType="textMultiLine|textNoSuggestions"
+                android:nestedScrollingEnabled="true"
+                android:overScrollMode="ifContentScrolls"
+                android:padding="11dp"
+                android:scrollbars="vertical"
+                android:textColor="@color/mt_text_primary"
+                android:textColorHint="@color/mt_text_muted"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/btnSaveMemory"
+                android:layout_width="70dp"
+                android:layout_height="32dp"
+                android:layout_gravity="end"
+                android:layout_marginTop="9dp"
+                android:background="@drawable/bg_settings_save_button"
+                android:clickable="true"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:gravity="center"
+                android:text="保存"
+                android:textColor="@color/mt_primary"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>
