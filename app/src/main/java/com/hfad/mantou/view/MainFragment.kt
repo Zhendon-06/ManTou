@@ -56,6 +56,7 @@ import com.hfad.mantou.databinding.FragmentMainBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
 import com.hfad.mantou.utils.AgentWorkspace
+import com.hfad.mantou.utils.ContextTokenCounter
 import com.hfad.mantou.utils.WorkspaceNode
 import com.hfad.mantou.viewmodel.ChatViewModel
 import kotlinx.coroutines.Dispatchers
@@ -81,6 +82,10 @@ class MainFragment : Fragment() {
     private var lastImeVisible = false
     private var lastAppliedBottomInset = Int.MIN_VALUE
     private var currentContextTokens = 0
+    private var cachedChatSystemPrompt: String? = null
+    private var forceScrollToLatestMessage = false
+    private var isChatScrollActive = false
+    private var pendingMessagesWhileScrolling: List<ChatMessage>? = null
     private var isTaskRunning = false
     private val selectedImageUris = mutableListOf<Uri>()
 
@@ -138,6 +143,7 @@ class MainFragment : Fragment() {
         
         // 观察 ViewModel 数据
         observeViewModel()
+        warmUpContextPromptCache()
 
         // 初始化模型名称显示
         viewModel.refreshActiveModel()
@@ -251,6 +257,69 @@ class MainFragment : Fragment() {
         if (messageCount <= 0) return
         chatBinding.rvChat.post {
             chatBinding.rvChat.scrollToPosition(messageCount - 1)
+        }
+    }
+
+    private fun shouldFollowNewMessages(): Boolean {
+        val itemCount = chatAdapter.itemCount
+        if (itemCount <= 0) return true
+        val distanceToBottom = chatBinding.rvChat.computeVerticalScrollRange() -
+                chatBinding.rvChat.computeVerticalScrollOffset() -
+                chatBinding.rvChat.computeVerticalScrollExtent()
+        return distanceToBottom <= dp(96)
+    }
+
+    private fun renderChatMessages(messages: List<ChatMessage>) {
+        if (forceScrollToLatestMessage) {
+            pendingMessagesWhileScrolling = null
+        }
+        if (isChatScrollActive && !forceScrollToLatestMessage) {
+            pendingMessagesWhileScrolling = messages
+            updateCurrentContextTokens(messages)
+            return
+        }
+
+        val followNewMessages = forceScrollToLatestMessage || shouldFollowNewMessages()
+        forceScrollToLatestMessage = false
+        val anchor = if (followNewMessages) null else captureChatViewportAnchor()
+        chatAdapter.submitList(messages) {
+            if (isChatScrollActive) {
+                pendingMessagesWhileScrolling = messages
+                return@submitList
+            }
+            when {
+                messages.isNotEmpty() && followNewMessages -> scrollChatToBottom()
+                anchor != null -> restoreChatViewportAnchor(anchor)
+            }
+        }
+        updateCurrentContextTokens(messages)
+    }
+
+    private fun captureChatViewportAnchor(): ChatViewportAnchor? {
+        val layoutManager = chatBinding.rvChat.layoutManager as? LinearLayoutManager ?: return null
+        val position = layoutManager.findFirstVisibleItemPosition()
+        if (position == RecyclerView.NO_POSITION) return null
+        val view = layoutManager.findViewByPosition(position) ?: return null
+        return ChatViewportAnchor(position, view.top - chatBinding.rvChat.paddingTop)
+    }
+
+    private fun restoreChatViewportAnchor(anchor: ChatViewportAnchor) {
+        val layoutManager = chatBinding.rvChat.layoutManager as? LinearLayoutManager ?: return
+        val lastPosition = (chatAdapter.itemCount - 1).coerceAtLeast(0)
+        layoutManager.scrollToPositionWithOffset(
+            anchor.position.coerceAtMost(lastPosition),
+            anchor.topOffset
+        )
+    }
+
+    private fun warmUpContextPromptCache() {
+        val appContext = requireContext().applicationContext
+        viewLifecycleOwner.lifecycleScope.launch {
+            val prompt = withContext(Dispatchers.IO) {
+                AgentWorkspace.buildSystemPrompt(appContext)
+            }
+            cachedChatSystemPrompt = prompt
+            updateCurrentContextTokens()
         }
     }
 
@@ -988,6 +1057,18 @@ class MainFragment : Fragment() {
         chatBinding.rvChat.apply {
             layoutManager = LinearLayoutManager(requireContext())
             adapter = chatAdapter
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                    super.onScrollStateChanged(recyclerView, newState)
+                    isChatScrollActive = newState != RecyclerView.SCROLL_STATE_IDLE
+                    if (!isChatScrollActive) {
+                        pendingMessagesWhileScrolling?.let { pendingMessages ->
+                            pendingMessagesWhileScrolling = null
+                            renderChatMessages(pendingMessages)
+                        }
+                    }
+                }
+            })
             // 设置 item 动画（可选）
             itemAnimator = null  // 禁用动画以避免闪烁，或使用自定义动画
         }
@@ -999,15 +1080,7 @@ class MainFragment : Fragment() {
     private fun observeViewModel() {
         // 观察消息列表
         viewModel.messages.observe(viewLifecycleOwner) { messages ->
-            chatAdapter.submitList(messages)
-            updateCurrentContextTokens(messages)
-            
-            // 滚动到最新消息
-            if (messages.isNotEmpty()) {
-                chatBinding.rvChat.post {
-                    chatBinding.rvChat.scrollToPosition(messages.size - 1)
-                }
-            }
+            renderChatMessages(messages)
         }
 
         // 观察所有会话列表
@@ -1045,6 +1118,8 @@ class MainFragment : Fragment() {
 
         // 观察当前会话 ID
         viewModel.currentSessionId.observe(viewLifecycleOwner) { sessionId ->
+            pendingMessagesWhileScrolling = null
+            forceScrollToLatestMessage = true
             // 可以在这里更新 UI，显示当前会话信息
         }
 
@@ -1428,12 +1503,12 @@ class MainFragment : Fragment() {
 
     private fun updateCurrentContextTokens(messages: List<ChatMessage>? = null) {
         val sourceMessages = messages ?: viewModel.messages.value.orEmpty()
-        val messageChars = sourceMessages.sumOf { message ->
-            message.content.length + (message.thinking?.length ?: 0)
-        }
-        val inputChars = chatBinding.etInput.text?.length ?: 0
-        val imageTokenEstimate = selectedImageUris.size * 1024
-        currentContextTokens = estimateTokens(messageChars + inputChars) + imageTokenEstimate
+        currentContextTokens = ContextTokenCounter.estimateChatMessages(
+            messages = sourceMessages,
+            draftText = chatBinding.etInput.text?.toString().orEmpty(),
+            selectedImageCount = selectedImageUris.size,
+            systemPrompt = cachedChatSystemPrompt
+        )
         updateContextProgressIndicator()
     }
 
@@ -1443,10 +1518,6 @@ class MainFragment : Fragment() {
         chatBinding.ivContextLimit.setProgressFraction(fraction)
         chatBinding.ivContextLimit.contentDescription =
             "上下文限制，已使用 ${formatNumber(currentContextTokens)} / ${formatNumber(limit)}"
-    }
-
-    private fun estimateTokens(characterCount: Int): Int {
-        return (characterCount / 2.2f).roundToInt().coerceAtLeast(0)
     }
 
     private fun createStatColumn(label: String, valueView: TextView): LinearLayout {
@@ -1640,6 +1711,7 @@ class MainFragment : Fragment() {
             return
         }
         updateSendButtonState(true)
+        forceScrollToLatestMessage = true
 
         val firstImagePath = imageUris.firstOrNull()?.toString()
 
@@ -1682,6 +1754,11 @@ class MainFragment : Fragment() {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
+
+    private data class ChatViewportAnchor(
+        val position: Int,
+        val topOffset: Int
+    )
 
     private class StaticPagerAdapter(
         private val pages: List<View>
