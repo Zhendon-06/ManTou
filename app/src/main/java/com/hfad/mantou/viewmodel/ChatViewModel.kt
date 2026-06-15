@@ -69,6 +69,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var thinkingContent = StringBuilder()
     private val STREAMING_MESSAGE_ID = -1L
     private val APP_GENERATION_PROGRESS_INTERVAL_MS = 1_500L
+    private val STREAMING_UI_UPDATE_INTERVAL_MS = 120L
+    private var lastStreamingContentUpdateAt = 0L
+    private var lastStreamingThinkingUpdateAt = 0L
 
     init {
         AgentWorkspace.ensureWorkspace(application)
@@ -378,6 +381,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun addStreamingPlaceholder(status: String) {
+        lastStreamingContentUpdateAt = 0L
+        lastStreamingThinkingUpdateAt = 0L
         val currentList = _messages.value?.toMutableList() ?: mutableListOf()
         currentList.add(ChatMessage(
             messageId = STREAMING_MESSAGE_ID,
@@ -389,7 +394,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = currentList
     }
 
-    private fun updateStreamingThinking(thinking: String) {
+    private fun updateStreamingThinking(thinking: String, force: Boolean = false) {
+        if (!force && !shouldUpdateStreamingThinking()) return
         val currentList = _messages.value?.toMutableList() ?: return
         val index = currentList.indexOfFirst { it.messageId == STREAMING_MESSAGE_ID }
         if (index >= 0 && currentList[index].isStreaming) {
@@ -398,7 +404,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun updateStreamingMessage(content: String) {
+    private fun updateStreamingMessage(content: String, force: Boolean = false) {
+        if (!force && !shouldUpdateStreamingContent()) return
         val currentList = _messages.value?.toMutableList() ?: return
         val index = currentList.indexOfFirst { it.messageId == STREAMING_MESSAGE_ID }
         if (index >= 0) {
@@ -410,7 +417,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun shouldUpdateStreamingContent(): Boolean {
+        val now = System.currentTimeMillis()
+        if (lastStreamingContentUpdateAt == 0L ||
+            now - lastStreamingContentUpdateAt >= STREAMING_UI_UPDATE_INTERVAL_MS) {
+            lastStreamingContentUpdateAt = now
+            return true
+        }
+        return false
+    }
+
+    private fun shouldUpdateStreamingThinking(): Boolean {
+        val now = System.currentTimeMillis()
+        if (lastStreamingThinkingUpdateAt == 0L ||
+            now - lastStreamingThinkingUpdateAt >= STREAMING_UI_UPDATE_INTERVAL_MS) {
+            lastStreamingThinkingUpdateAt = now
+            return true
+        }
+        return false
+    }
+
     private fun removeStreamingPlaceholder() {
+        lastStreamingContentUpdateAt = 0L
+        lastStreamingThinkingUpdateAt = 0L
         val currentList = _messages.value?.toMutableList() ?: return
         currentList.removeAll { it.messageId == STREAMING_MESSAGE_ID }
         _messages.value = currentList
@@ -421,6 +450,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         streamingJob = null
         stopAppGenerationProgressHeartbeat()
         _isGeneratingApp.value = false
+        lastStreamingContentUpdateAt = 0L
+        lastStreamingThinkingUpdateAt = 0L
         streamingContent.clear()
         thinkingContent.clear()
         removeStreamingPlaceholder()
