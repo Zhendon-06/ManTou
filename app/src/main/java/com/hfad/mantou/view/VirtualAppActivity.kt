@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.View
+import android.view.ViewGroup
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -25,6 +26,7 @@ import java.util.Locale
 class VirtualAppActivity : AppCompatActivity() {
 
     private lateinit var binding: VirtualappBinding
+    private lateinit var webView: WebView
     private var currentHtmlPath: String? = null
 
     companion object {
@@ -36,6 +38,15 @@ class VirtualAppActivity : AppCompatActivity() {
 
         binding = VirtualappBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        webView = WebView(this).also { view ->
+            binding.webViewHost.addView(
+                view,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
 
         val decorView = window.decorView
         val flags = (View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -48,7 +59,7 @@ class VirtualAppActivity : AppCompatActivity() {
 
         val htmlPath = intent.getStringExtra(EXTRA_HTML_PATH)
 
-        binding.webView.apply {
+        webView.apply {
             webViewClient = WebViewClient()
             webChromeClient = WebChromeClient()
             settings.apply {
@@ -66,8 +77,8 @@ class VirtualAppActivity : AppCompatActivity() {
             ensureStoredWebAppIdentity(File(path), "打开准备失败")?.absolutePath
         }
         if (!currentHtmlPath.isNullOrEmpty()) {
-            MantouWebViewRuntime.install(binding.webView, File(currentHtmlPath!!))
-            binding.webView.loadUrl("file://$currentHtmlPath")
+            MantouWebViewRuntime.install(webView, File(currentHtmlPath!!))
+            webView.loadUrl("file://$currentHtmlPath")
         } else {
             Toast.makeText(this, "没有可打开的网页应用", Toast.LENGTH_SHORT).show()
         }
@@ -284,7 +295,7 @@ class VirtualAppActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        binding.webView.apply {
+        webView.apply {
             stopLoading()
             settings.javaScriptEnabled = false
             loadUrl("about:blank")

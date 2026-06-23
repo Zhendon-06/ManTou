@@ -9,9 +9,9 @@
         android:layout_height="match_parent"
         android:background="@drawable/bg_chat_assistant">
 
-        <!-- WebView -->
-        <WebView
-            android:id="@+id/webView"
+        <!-- WebView is created at runtime so Android Studio layout preview can render this file. -->
+        <FrameLayout
+            android:id="@+id/webViewHost"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
