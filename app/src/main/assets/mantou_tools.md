@@ -195,23 +195,41 @@ window.MantouApp.calendar.calendarOpen(1718352000000);
 
 ## `camera`
 
-**描述**：唤起系统相机/录像/视频应用
+**描述**：唤起系统相机拍照/录像，并可把拍到的照片回传给网页显示
 
-**使用场景**：网页里需要让用户拍一张照片、录制一段视频，或直接打开系统相机
+**使用场景**：网页里需要让用户拍一张照片并显示在 HTML 页面中、录制一段视频，或直接打开系统相机
 
 ### `window.MantouApp.camera.cameraTakePhoto()` → String
 
-打开系统相机进入拍照模式。用户拍完照自动保存到系统相册。
+打开系统相机拍照，拍完后会调用 window.MantouApp.onCameraPhoto(dataUrl, uri)；dataUrl 可直接赋给 img.src 在 HTML 页面显示。
 
-**返回**：是否成功唤起相机
+**返回**：是否成功发起拍照；照片结果通过 JS 回调异步返回
 
 ```json
-{"success": true, "data": {"launched": true}, "error": null}
+{"success": true, "data": {"launched": true, "callback": "window.MantouApp.onCameraPhoto"}, "error": null}
 ```
 
 **调用示例**：
 ```js
-window.MantouApp.camera.cameraTakePhoto();
+window.MantouApp.onCameraPhoto = function(dataUrl){ document.querySelector('#preview').src = dataUrl; }; window.MantouApp.camera.cameraTakePhoto();
+```
+
+### `window.MantouApp.camera.cameraTakePhotoWithCallback(callbackName: String)` → String
+
+打开系统相机拍照，拍完后调用指定 JS 回调。回调函数接收两个参数：dataUrl 和 uri；dataUrl 可直接赋给 img.src。
+
+**参数**：
+- `callbackName` (String)：全局 JS 回调函数名，例如 window.handlePhoto；为空则使用 window.MantouApp.onCameraPhoto
+
+**返回**：是否成功发起拍照；照片结果通过 callbackName 指向的 JS 函数异步返回
+
+```json
+{"success": true, "data": {"launched": true, "callback": "window.handlePhoto"}, "error": null}
+```
+
+**调用示例**：
+```js
+window.handlePhoto = function(dataUrl, uri){ document.getElementById('preview').src = dataUrl; }; window.MantouApp.camera.cameraTakePhotoWithCallback('window.handlePhoto');
 ```
 
 ### `window.MantouApp.camera.cameraRecordVideo()` → String

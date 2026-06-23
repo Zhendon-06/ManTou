@@ -11,9 +11,12 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import com.hfad.mantou.databinding.VirtualappBinding
+import com.hfad.mantou.tool.impl.CameraPhotoBridge
+import com.hfad.mantou.tool.impl.CameraPhotoHost
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.AppGenerator
 import com.hfad.mantou.utils.MantouWebViewRuntime
@@ -23,11 +26,20 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-class VirtualAppActivity : AppCompatActivity() {
+class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
 
     private lateinit var binding: VirtualappBinding
     private lateinit var webView: WebView
+    private lateinit var cameraPhotoHost: CameraPhotoHost
     private var currentHtmlPath: String? = null
+
+    private val takePictureLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        cameraPhotoHost.onCameraPhotoResult(success)
+    }
+
+    private val requestCameraPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        cameraPhotoHost.onCameraPermissionResult(granted)
+    }
 
     companion object {
         const val EXTRA_HTML_PATH = "html_path"
@@ -38,6 +50,13 @@ class VirtualAppActivity : AppCompatActivity() {
 
         binding = VirtualappBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        CameraPhotoBridge.attach(this)
+        cameraPhotoHost = CameraPhotoHost(
+            activity = this,
+            takePictureLauncher = takePictureLauncher,
+            requestPermissionLauncher = requestCameraPermissionLauncher,
+            webViewProvider = { if (::webView.isInitialized) webView else null }
+        )
         webView = WebView(this).also { view ->
             binding.webViewHost.addView(
                 view,
@@ -90,6 +109,10 @@ class VirtualAppActivity : AppCompatActivity() {
         binding.btnShare.setOnClickListener {
             shareCurrentWebApp()
         }
+    }
+
+    override fun requestCameraPhoto(callbackName: String?) {
+        cameraPhotoHost.requestCameraPhoto(callbackName)
     }
 
     private fun resolveSharedHtmlPath(intent: Intent): String? {
@@ -295,6 +318,7 @@ class VirtualAppActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        CameraPhotoBridge.detach(this)
         webView.apply {
             stopLoading()
             settings.javaScriptEnabled = false

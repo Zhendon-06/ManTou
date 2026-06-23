@@ -72,4 +72,15 @@ class AppGeneratorTest {
 
         assertEquals("todo_20260614_210000.json", dataFile.name)
     }
+
+    @Test
+    fun inferAppFileStemAddsMantouPrefixForKnownAppTypes() {
+        assertEquals("馒头番茄钟", AppGenerator.inferAppFileStem("帮我生成一个番茄钟"))
+        assertEquals("馒头记事本", AppGenerator.inferAppFileStem("生成一个记事本"))
+    }
+
+    @Test
+    fun inferAppFileStemDoesNotDuplicateMantouPrefix() {
+        assertEquals("馒头习惯追踪", AppGenerator.inferAppFileStem("帮我做一个馒头习惯追踪"))
+    }
 }

@@ -20,6 +20,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
+import android.webkit.WebView
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
@@ -55,6 +56,8 @@ import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
+import com.hfad.mantou.tool.impl.CameraPhotoBridge
+import com.hfad.mantou.tool.impl.CameraPhotoHost
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.ContextTokenCounter
 import com.hfad.mantou.utils.WorkspaceNode
@@ -67,7 +70,7 @@ import java.util.Locale
 import kotlin.compareTo
 import kotlin.math.roundToInt
 
-class MainFragment : Fragment() {
+class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private var _binding: FragmentMainBinding? = null
     private val binding get() = _binding!!
@@ -88,6 +91,8 @@ class MainFragment : Fragment() {
     private var pendingMessagesWhileScrolling: List<ChatMessage>? = null
     private var isTaskRunning = false
     private val selectedImageUris = mutableListOf<Uri>()
+    private var activeAppWebView: WebView? = null
+    private lateinit var cameraPhotoHost: CameraPhotoHost
 
     // ViewModel
     private val viewModel: ChatViewModel by viewModels()
@@ -112,8 +117,22 @@ class MainFragment : Fragment() {
         onImagesSelectedFromPicker(uris)
     }
 
+    private val takePictureLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        cameraPhotoHost.onCameraPhotoResult(success)
+    }
+
+    private val requestCameraPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        cameraPhotoHost.onCameraPermissionResult(granted)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        cameraPhotoHost = CameraPhotoHost(
+            activity = requireActivity(),
+            takePictureLauncher = takePictureLauncher,
+            requestPermissionLauncher = requestCameraPermissionLauncher,
+            webViewProvider = { activeAppWebView }
+        )
     }
 
     override fun onCreateView(
@@ -135,6 +154,7 @@ class MainFragment : Fragment() {
         
         // 初始化聊天 RecyclerView
         setupChatRecyclerView()
+        CameraPhotoBridge.attach(this)
         
         // 初始化会话列表 RecyclerView
         setupSessionRecyclerView()
@@ -207,6 +227,10 @@ class MainFragment : Fragment() {
         setupDrawerMenu()
 
 
+    }
+
+    override fun requestCameraPhoto(callbackName: String?) {
+        cameraPhotoHost.requestCameraPhoto(callbackName)
     }
     private fun initInsets() {
         inputContainerBasePaddingBottom = chatBinding.inputContainer.paddingBottom
@@ -1051,6 +1075,14 @@ class MainFragment : Fragment() {
             },
             onMessageLongClick = { message ->
                 showMessageActions(message)
+            },
+            onActiveWebViewChanged = { webView ->
+                activeAppWebView = webView
+            },
+            onWebViewReleased = { webView ->
+                if (activeAppWebView === webView) {
+                    activeAppWebView = null
+                }
             }
         )
 
@@ -1737,6 +1769,8 @@ class MainFragment : Fragment() {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        CameraPhotoBridge.detach(this)
+        activeAppWebView = null
         setKeepScreenOn(false)
         pagerCallback?.let { binding.mainPager.unregisterOnPageChangeCallback(it) }
         pagerCallback = null

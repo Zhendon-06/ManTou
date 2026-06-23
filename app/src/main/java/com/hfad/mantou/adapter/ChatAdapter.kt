@@ -3,6 +3,7 @@ package com.hfad.mantou.adapter
 import android.animation.AnimatorInflater
 import android.animation.AnimatorSet
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
@@ -27,7 +28,9 @@ import java.io.File
 class ChatAdapter(
     private val onDataChanged: ((itemCount: Int) -> Unit)? = null,
     private val onFullscreenClick: ((htmlPath: String) -> Unit)? = null,
-    private val onMessageLongClick: ((ChatMessage) -> Unit)? = null
+    private val onMessageLongClick: ((ChatMessage) -> Unit)? = null,
+    private val onActiveWebViewChanged: ((WebView) -> Unit)? = null,
+    private val onWebViewReleased: ((WebView) -> Unit)? = null
 ) : ListAdapter<ChatMessage, RecyclerView.ViewHolder>(ChatMessageDiffCallback()) {
 
     companion object {
@@ -200,7 +203,14 @@ class ChatAdapter(
                     loadWithOverviewMode = true
                 }
                 MantouWebViewRuntime.install(this, File(htmlPath))
+                setOnTouchListener { view, event ->
+                    if (event.action == MotionEvent.ACTION_DOWN) {
+                        (view as? WebView)?.let { onActiveWebViewChanged?.invoke(it) }
+                    }
+                    false
+                }
                 loadUrl("file://$htmlPath")
+                onActiveWebViewChanged?.invoke(this)
             }
 
             binding.btnFullscreen.setOnClickListener {
@@ -222,7 +232,10 @@ class ChatAdapter(
         }
 
         fun clearWebView() {
-            appWebView?.loadUrl("about:blank")
+            appWebView?.let { webView ->
+                onWebViewReleased?.invoke(webView)
+                webView.loadUrl("about:blank")
+            }
         }
 
         fun updateContent(content: String) {

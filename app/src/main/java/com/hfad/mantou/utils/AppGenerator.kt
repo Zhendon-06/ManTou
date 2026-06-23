@@ -26,7 +26,8 @@ object AppGenerator {
 4. 使用现代化的配色方案
 5. 所有交互功能必须完整实现，不能有占位或空函数
 6. 只返回HTML代码，不要有任何解释说明文字
-7. 代码必须以<!DOCTYPE html>开头，以</html>结尾"""
+7. 代码必须以<!DOCTYPE html>开头，以</html>结尾
+8. 应用命名必须使用“馒头xxx”的形式，其中 xxx 是应用本身的自然名称，例如番茄钟叫“馒头番茄钟”，记事本叫“馒头记事本”；HTML 的 title 和主标题应优先使用这个名称。"""
 
     const val APP_GEN_MAX_TOKENS = 81920
     const val WEB_APP_BRIDGE_NAME = "MantouApp"
@@ -114,6 +115,14 @@ object AppGenerator {
             - `window.MantouApp.storage.storageClear()` → 清空为 `{}`
 
             需要永久保存的数据必须使用这个 storage；可以把 localStorage 作为浏览器外的降级方案，但在馒头 App 内优先写 JSON 文件。
+
+            # 相机拍照结果回显
+
+            如果网页 App 需要拍照并把照片显示在 HTML 页面中，必须使用异步回调：
+            1. 先定义回调：`window.MantouApp.onCameraPhoto = function(dataUrl, uri) { document.querySelector("img").src = dataUrl; };`
+            2. 再调用：`window.MantouApp.camera.cameraTakePhoto();`
+            3. `dataUrl` 是 `data:image/jpeg;base64,...`，可直接赋给 `<img>` 的 `src`，也可以写入 storage 做持久化。
+            4. 也可以调用 `cameraTakePhotoWithCallback("window.handlePhoto")` 指定自己的全局回调函数。
 
             $doc
         """.trimIndent()
@@ -255,14 +264,14 @@ object AppGenerator {
         return File(projectDir, "$projectName.html")
     }
 
-    private fun inferAppFileStem(userMessage: String): String {
+    internal fun inferAppFileStem(userMessage: String): String {
         val message = userMessage.trim()
         val lower = message.lowercase(Locale.getDefault())
 
         APP_TYPE_KEYWORDS.firstOrNull { (keyword, _) ->
             lower.contains(keyword.lowercase(Locale.getDefault()))
         }?.let { (_, name) ->
-            return sanitizeFileStem(name)
+            return sanitizeFileStem(withMantouPrefix(name))
         }
 
         val cleaned = COMMON_REQUEST_WORDS.fold(message) { current, word ->
@@ -271,7 +280,16 @@ object AppGenerator {
             .replace(Regex("[，。！？、,.!?；;：:\\[\\]（）(){}]+"), "")
             .trim()
 
-        return sanitizeFileStem(cleaned.ifBlank { "web_app" })
+        return sanitizeFileStem(withMantouPrefix(cleaned.ifBlank { "应用" }))
+    }
+
+    private fun withMantouPrefix(appName: String): String {
+        val normalized = appName.trim()
+        return if (normalized.startsWith(MANTOU_APP_NAME_PREFIX)) {
+            normalized
+        } else {
+            "$MANTOU_APP_NAME_PREFIX$normalized"
+        }
     }
 
     private fun sanitizeFileStem(rawName: String): String {
@@ -284,10 +302,17 @@ object AppGenerator {
         return sanitized.ifBlank { "web_app" }
     }
 
+    private const val MANTOU_APP_NAME_PREFIX = "馒头"
+
     private val APP_TYPE_KEYWORDS = listOf(
         "pomodoro" to "番茄钟",
         "番茄钟" to "番茄钟",
         "番茄" to "番茄钟",
+        "notepad" to "记事本",
+        "记事本" to "记事本",
+        "记事" to "记事本",
+        "备忘录" to "备忘录",
+        "便签" to "便签",
         "todo" to "待办清单",
         "待办" to "待办清单",
         "任务" to "任务清单",
