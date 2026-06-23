@@ -112,8 +112,9 @@ class ChatAdapter(
 
     override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
         super.onViewRecycled(holder)
-        if (holder is LoadingViewHolder) {
-            holder.unbind()
+        when (holder) {
+            is AssistantMessageViewHolder -> holder.clearWebView()
+            is LoadingViewHolder -> holder.unbind()
         }
     }
 
@@ -150,6 +151,7 @@ class ChatAdapter(
     inner class AssistantMessageViewHolder(
         private val binding: ItemChatAssistantBinding
     ) : RecyclerView.ViewHolder(binding.root) {
+        private var appWebView: WebView? = null
 
         init {
             binding.root.setOnLongClickListener {
@@ -180,12 +182,12 @@ class ChatAdapter(
                 setupWebView(message.appHtmlPath)
             } else {
                 binding.webViewContainer.visibility = View.GONE
-                binding.appWebView.loadUrl("about:blank")
+                clearWebView()
             }
         }
 
         private fun setupWebView(htmlPath: String) {
-            binding.appWebView.apply {
+            ensureWebView().apply {
                 webViewClient = WebViewClient()
                 webChromeClient = WebChromeClient()
                 settings.apply {
@@ -204,6 +206,23 @@ class ChatAdapter(
             binding.btnFullscreen.setOnClickListener {
                 onFullscreenClick?.invoke(htmlPath)
             }
+        }
+
+        private fun ensureWebView(): WebView {
+            return appWebView ?: WebView(binding.appWebViewHost.context).also { webView ->
+                binding.appWebViewHost.addView(
+                    webView,
+                    ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                )
+                appWebView = webView
+            }
+        }
+
+        fun clearWebView() {
+            appWebView?.loadUrl("about:blank")
         }
 
         fun updateContent(content: String) {

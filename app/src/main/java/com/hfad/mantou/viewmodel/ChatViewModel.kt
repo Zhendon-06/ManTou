@@ -16,6 +16,7 @@ import com.hfad.mantou.utils.AppGenerator
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.ImageUtils
 import com.hfad.mantou.utils.AppIntentDetector
+import com.hfad.mantou.utils.ChatContextFormatter
 import com.hfad.mantou.data.preferences.ContextLimitStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -242,9 +243,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             addStreamingPlaceholder("正在生成应用")
             updateStreamingThinking(buildAppGenerationProgressText(elapsedSeconds = 0, receivedChars = 0))
 
-            val apiMessages = listOf(
-                ApiMessage(role = "system", content = AppGenerator.buildSystemPrompt(getApplication())),
-                ApiMessage(role = "user", content = userMessage)
+            val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
+            val apiMessages = buildApiMessages(
+                historyMessages = historyMessages,
+                systemPrompt = AppGenerator.buildSystemPrompt(getApplication())
             )
             val request = ChatRequest(
                 model = config.model,
@@ -501,18 +503,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         historyMessages.forEachIndexed { index, entity ->
             val isLastUserMessage = index == historyMessages.lastIndex && entity.role == "user"
+            val contextContent = ChatContextFormatter.contentForContext(entity)
 
             if (isLastUserMessage && currentImageBase64List.isNotEmpty()) {
                 val contentParts = mutableListOf<ContentPart>()
-                if (entity.content.isNotEmpty()) {
-                    contentParts.add(ContentPart(type = "text", text = entity.content))
+                if (contextContent.isNotEmpty()) {
+                    contentParts.add(ContentPart(type = "text", text = contextContent))
                 }
                 currentImageBase64List.forEach { base64 ->
                     contentParts.add(ContentPart(type = "image_url", imageUrl = ImageUrl(url = base64)))
                 }
                 messages.add(ApiMessage(role = entity.role, content = contentParts))
             } else {
-                messages.add(ApiMessage(role = entity.role, content = entity.content))
+                messages.add(ApiMessage(role = entity.role, content = contextContent))
             }
         }
 

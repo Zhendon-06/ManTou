@@ -29,7 +29,7 @@ object ContextTokenCounter {
         messages.asSequence()
             .filterNot { it.isStreaming }
             .forEach { message ->
-                total += MESSAGE_OVERHEAD_TOKENS + estimateText(message.content)
+                total += MESSAGE_OVERHEAD_TOKENS + estimateText(ChatContextFormatter.contentForContext(message))
                 if (!message.imagePath.isNullOrBlank()) {
                     total += IMAGE_TOKENS
                 }

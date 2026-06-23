@@ -1,8 +1,11 @@
 package com.hfad.mantou.view
 
 import android.app.AlertDialog
+import android.content.Context
 import android.os.Bundle
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.LayoutInflater
 import android.view.View
 import android.widget.ArrayAdapter
@@ -60,6 +63,11 @@ class ModelSettingActivity : AppCompatActivity() {
     private var allProviders: List<ProviderEntity> = emptyList()
     private var currentProviderId: Long? = null
     private var modelsJob: Job? = null
+    private var isBindingProviderForm = false
+
+    private val draftPrefs by lazy {
+        getSharedPreferences(PREF_MODEL_SETTING_DRAFT, Context.MODE_PRIVATE)
+    }
 
     private val apiFormatLabels = linkedMapOf(
         ProviderEntity.API_FORMAT_OPENAI to "OpenAI",
@@ -75,6 +83,7 @@ class ModelSettingActivity : AppCompatActivity() {
         setupToolbar()
         setupModelList()
         setupApiFormatDropdown()
+        setupDraftPersistence()
         setupClickListeners()
         observeProviders()
     }
@@ -133,14 +142,21 @@ class ModelSettingActivity : AppCompatActivity() {
             val key = apiFormatLabels.keys.toList()[position]
             val label = labels[position]
             actvProvider2.setText(label, false)
-            currentProviderId?.let { pid ->
-                val provider = allProviders.firstOrNull { it.providerId == pid } ?: return@let
-                if (provider.apiFormat != key) {
-                    lifecycleScope.launch {
-                        providerRepository.updateProvider(provider.copy(apiFormat = key))
-                    }
+            saveCurrentDraft()
+        }
+    }
+
+    private fun setupDraftPersistence() {
+        listOf(etProviderName, etBaseUrl, etApiKey, actvProvider2).forEach { input ->
+            input.addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    saveCurrentDraft()
                 }
-            }
+
+                override fun afterTextChanged(s: Editable?) = Unit
+            })
         }
     }
 
@@ -173,7 +189,7 @@ class ModelSettingActivity : AppCompatActivity() {
                     val hadProvider = currentProviderId != null
                     allProviders = providers
                     updateProviderDropdown(providers)
-                    val pid = currentProviderId
+                    val pid = currentProviderId ?: getSelectedProviderId()
                     when {
                         providers.isEmpty() -> {
                             // 仅当原本绑着 Provider（例如刚被删除）时才清空表单；
@@ -186,6 +202,9 @@ class ModelSettingActivity : AppCompatActivity() {
                         }
                         pid == null || providers.none { it.providerId == pid } -> {
                             switchToProvider(providers.first())
+                        }
+                        currentProviderId != pid -> {
+                            providers.firstOrNull { it.providerId == pid }?.let { switchToProvider(it) }
                         }
                         else -> {
                             // 同步当前 Provider 最新内容（例如刚被 updateProvider 修改）
@@ -205,26 +224,31 @@ class ModelSettingActivity : AppCompatActivity() {
 
     private fun switchToProvider(provider: ProviderEntity) {
         currentProviderId = provider.providerId
+        saveSelectedProviderId(provider.providerId)
         fillProviderForm(provider)
         observeModelsForProvider(provider.providerId)
     }
 
     private fun fillProviderForm(provider: ProviderEntity) {
-        actvProvider.setText(provider.name, false)
-        etProviderName.setText(provider.name)
-        etBaseUrl.setText(provider.baseUrl)
-        etApiKey.setText(provider.apiKey)
-        actvProvider2.setText(apiFormatLabels[provider.apiFormat] ?: "OpenAI", false)
+        val draft = loadDraft(provider.providerId)
+        setProviderForm(
+            name = draft?.name ?: provider.name,
+            baseUrl = draft?.baseUrl ?: provider.baseUrl,
+            apiKey = draft?.apiKey ?: provider.apiKey,
+            apiFormat = draft?.apiFormat ?: provider.apiFormat
+        )
     }
 
     private fun resetForm() {
         currentProviderId = null
+        clearSelectedProviderId()
         modelsJob?.cancel()
-        actvProvider.setText("", false)
-        etProviderName.setText("")
-        etBaseUrl.setText("")
-        etApiKey.setText("")
-        actvProvider2.setText("OpenAI", false)
+        setProviderForm(
+            name = "",
+            baseUrl = "",
+            apiKey = "",
+            apiFormat = ProviderEntity.API_FORMAT_OPENAI
+        )
         modelAdapter.submitList(emptyList())
         modelAdapter.setSelected(null)
         updateModelCount(0)
@@ -234,7 +258,16 @@ class ModelSettingActivity : AppCompatActivity() {
     /** 仅同步“没有 Provider”的列表/模型计数状态，保留用户已输入的表单内容。 */
     private fun applyEmptyProvidersState() {
         currentProviderId = null
+        clearSelectedProviderId()
         modelsJob?.cancel()
+        loadDraft(null)?.let { draft ->
+            setProviderForm(
+                name = draft.name,
+                baseUrl = draft.baseUrl,
+                apiKey = draft.apiKey,
+                apiFormat = draft.apiFormat
+            )
+        }
         modelAdapter.submitList(emptyList())
         modelAdapter.setSelected(null)
         updateModelCount(0)
@@ -315,7 +348,8 @@ class ModelSettingActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     providerRepository.deleteProvider(pid)
                     ActiveModelStore.clearIfMatches(this@ModelSettingActivity, pid)
-                    currentProviderId = null
+                    clearDraft(pid)
+                    resetForm()
                     // observeProviders Flow 会回调，自动切到剩余第一个或 resetForm
                 }
             }
@@ -345,33 +379,22 @@ class ModelSettingActivity : AppCompatActivity() {
 
         Toast.makeText(this, "拉取中…", Toast.LENGTH_SHORT).show()
         lifecycleScope.launch {
-            // 没有 currentProviderId 时（首次配置/新增），先把表单作为新 Provider 落库
-            val existingId = currentProviderId
-            val providerId = if (existingId != null) {
-                existingId
-            } else {
-                val newId = providerRepository.createProvider(name)
-                currentProviderId = newId
-                // 关键：立即对新 Provider 启动模型 Flow 观察，
-                // 否则下面 replaceModels 写库后 UI 收不到刷新
-                observeModelsForProvider(newId)
-                newId
-            }
-            val existing = providerRepository.getProviderById(providerId) ?: return@launch
-            providerRepository.updateProvider(existing.copy(
-                name = name,
-                baseUrl = baseUrl,
-                apiKey = apiKey,
-                apiFormat = apiFormat
-            ))
-
             val result = ModelListApiService.fetchModels(baseUrl, apiKey, apiFormat)
             result.onSuccess { modelIds ->
+                val wasNewProvider = currentProviderId == null
+                val provider = saveProviderConfig(name, baseUrl, apiKey, apiFormat)
+                    ?: return@onSuccess
+                clearDraft(provider.providerId)
+                if (wasNewProvider) {
+                    clearDraft(null)
+                }
+                switchToProvider(provider)
+
                 if (modelIds.isEmpty()) {
                     Toast.makeText(this@ModelSettingActivity,
-                        "未拉到任何模型", Toast.LENGTH_SHORT).show()
+                        "未拉到任何模型，已保存 Provider 配置", Toast.LENGTH_SHORT).show()
                 } else {
-                    providerRepository.replaceModels(providerId, modelIds)
+                    providerRepository.replaceModels(provider.providerId, modelIds)
                     Toast.makeText(this@ModelSettingActivity,
                         "已拉取 ${modelIds.size} 个模型", Toast.LENGTH_SHORT).show()
                 }
@@ -419,5 +442,130 @@ class ModelSettingActivity : AppCompatActivity() {
         return apiFormatLabels.entries
             .firstOrNull { it.value.equals(label, ignoreCase = true) }
             ?.key ?: ProviderEntity.API_FORMAT_OPENAI
+    }
+
+    private suspend fun saveProviderConfig(
+        name: String,
+        baseUrl: String,
+        apiKey: String,
+        apiFormat: String
+    ): ProviderEntity? {
+        val existing = currentProviderId?.let { providerRepository.getProviderById(it) }
+        val provider = if (existing != null) {
+            existing.copy(
+                name = name,
+                baseUrl = baseUrl,
+                apiKey = apiKey,
+                apiFormat = apiFormat
+            )
+        } else {
+            val newId = providerRepository.createProvider(name)
+            val created = providerRepository.getProviderById(newId) ?: return null
+            created.copy(
+                name = name,
+                baseUrl = baseUrl,
+                apiKey = apiKey,
+                apiFormat = apiFormat
+            )
+        }
+        providerRepository.updateProvider(provider)
+        return provider
+    }
+
+    private fun setProviderForm(
+        name: String,
+        baseUrl: String,
+        apiKey: String,
+        apiFormat: String
+    ) {
+        isBindingProviderForm = true
+        actvProvider.setText(name, false)
+        etProviderName.setText(name)
+        etBaseUrl.setText(baseUrl)
+        etApiKey.setText(apiKey)
+        actvProvider2.setText(apiFormatLabels[apiFormat] ?: "OpenAI", false)
+        isBindingProviderForm = false
+    }
+
+    private fun saveCurrentDraft() {
+        if (isBindingProviderForm) return
+        val suffix = draftSuffix(currentProviderId)
+        draftPrefs.edit()
+            .putString(draftKey(KEY_DRAFT_NAME, suffix), etProviderName.text?.toString().orEmpty())
+            .putString(draftKey(KEY_DRAFT_BASE_URL, suffix), etBaseUrl.text?.toString().orEmpty())
+            .putString(draftKey(KEY_DRAFT_API_KEY, suffix), etApiKey.text?.toString().orEmpty())
+            .putString(draftKey(KEY_DRAFT_API_FORMAT, suffix), labelToApiFormat(actvProvider2.text?.toString()))
+            .apply()
+    }
+
+    private fun loadDraft(providerId: Long?): ProviderFormDraft? {
+        val suffix = draftSuffix(providerId)
+        val nameKey = draftKey(KEY_DRAFT_NAME, suffix)
+        val baseUrlKey = draftKey(KEY_DRAFT_BASE_URL, suffix)
+        val apiKeyKey = draftKey(KEY_DRAFT_API_KEY, suffix)
+        val apiFormatKey = draftKey(KEY_DRAFT_API_FORMAT, suffix)
+        val hasDraft = draftPrefs.contains(nameKey) ||
+            draftPrefs.contains(baseUrlKey) ||
+            draftPrefs.contains(apiKeyKey) ||
+            draftPrefs.contains(apiFormatKey)
+        if (!hasDraft) return null
+
+        return ProviderFormDraft(
+            name = draftPrefs.getString(nameKey, "").orEmpty(),
+            baseUrl = draftPrefs.getString(baseUrlKey, "").orEmpty(),
+            apiKey = draftPrefs.getString(apiKeyKey, "").orEmpty(),
+            apiFormat = draftPrefs.getString(apiFormatKey, ProviderEntity.API_FORMAT_OPENAI)
+                ?: ProviderEntity.API_FORMAT_OPENAI
+        )
+    }
+
+    private fun clearDraft(providerId: Long?) {
+        val suffix = draftSuffix(providerId)
+        draftPrefs.edit()
+            .remove(draftKey(KEY_DRAFT_NAME, suffix))
+            .remove(draftKey(KEY_DRAFT_BASE_URL, suffix))
+            .remove(draftKey(KEY_DRAFT_API_KEY, suffix))
+            .remove(draftKey(KEY_DRAFT_API_FORMAT, suffix))
+            .apply()
+    }
+
+    private fun saveSelectedProviderId(providerId: Long) {
+        draftPrefs.edit()
+            .putLong(KEY_SELECTED_PROVIDER_ID, providerId)
+            .apply()
+    }
+
+    private fun getSelectedProviderId(): Long? {
+        if (!draftPrefs.contains(KEY_SELECTED_PROVIDER_ID)) return null
+        val id = draftPrefs.getLong(KEY_SELECTED_PROVIDER_ID, -1L)
+        return if (id > 0L) id else null
+    }
+
+    private fun clearSelectedProviderId() {
+        draftPrefs.edit()
+            .remove(KEY_SELECTED_PROVIDER_ID)
+            .apply()
+    }
+
+    private fun draftSuffix(providerId: Long?): String =
+        providerId?.takeIf { it > 0L }?.toString() ?: KEY_NEW_PROVIDER_DRAFT
+
+    private fun draftKey(prefix: String, suffix: String): String = "${prefix}_$suffix"
+
+    private data class ProviderFormDraft(
+        val name: String,
+        val baseUrl: String,
+        val apiKey: String,
+        val apiFormat: String
+    )
+
+    companion object {
+        private const val PREF_MODEL_SETTING_DRAFT = "model_setting_draft_pref"
+        private const val KEY_SELECTED_PROVIDER_ID = "selected_provider_id"
+        private const val KEY_NEW_PROVIDER_DRAFT = "new_provider"
+        private const val KEY_DRAFT_NAME = "draft_name"
+        private const val KEY_DRAFT_BASE_URL = "draft_base_url"
+        private const val KEY_DRAFT_API_KEY = "draft_api_key"
+        private const val KEY_DRAFT_API_FORMAT = "draft_api_format"
     }
 }
