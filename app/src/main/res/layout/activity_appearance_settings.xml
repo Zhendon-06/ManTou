@@ -58,7 +58,7 @@
 
             <FrameLayout
                 android:layout_width="match_parent"
-                android:layout_height="115dp"
+                android:layout_height="400dp"
                 android:layout_marginTop="13dp"
                 android:background="@drawable/bg_wallpaper_preview"
                 android:clipToOutline="true"

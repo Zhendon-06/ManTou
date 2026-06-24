@@ -15,7 +15,7 @@
         <item name="colorOutline">@color/mt_outline</item>
         <item name="colorError">@color/mt_error</item>
         <item name="android:colorAccent">@color/mt_primary</item>
-        <item name="android:fontFamily">sans</item>
+        <item name="android:fontFamily">sans-serif</item>
         <item name="android:statusBarColor">@color/mt_surface</item>
         <item name="android:navigationBarColor">@color/mt_surface</item>
         <item name="android:windowLightStatusBar">true</item>
