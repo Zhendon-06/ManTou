@@ -306,11 +306,11 @@ class ChatAdapter(
         val context = textView.context
         val palette = when (role) {
             RichTextRole.USER -> RichTextFormatter.Palette(
-                textColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_on_primary),
-                secondaryColor = ContextCompat.getColor(context, R.color.mt_surface_blue),
-                accentColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_on_primary),
-                codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_primary_dark),
-                codeTextColor = ContextCompat.getColor(context, R.color.mt_on_primary)
+                textColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_text_primary),
+                secondaryColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
+                accentColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_primary_dark),
+                codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
+                codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
             )
             RichTextRole.ASSISTANT -> RichTextFormatter.Palette(
                 textColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_text_primary),

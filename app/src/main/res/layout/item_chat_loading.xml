@@ -1,38 +1,60 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- AI 助手等待动画布局 -->
 <androidx.constraintlayout.widget.ConstraintLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:padding="8dp">
+    android:paddingStart="22dp"
+    android:paddingTop="10dp"
+    android:paddingEnd="22dp"
+    android:paddingBottom="16dp">
 
-    <!-- AI 头像 -->
     <ImageView
         android:id="@+id/ivAvatar"
         android:layout_width="36dp"
         android:layout_height="36dp"
-        android:src="@drawable/mantou"
+        android:background="@drawable/bg_drawer_action_circle"
         android:contentDescription="@string/app_name"
+        android:padding="6dp"
+        android:src="@drawable/mantou"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- 等待动画容器 -->
+    <TextView
+        android:id="@+id/tvLoadingStatus"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:text="处理中"
+        android:textColor="@color/mt_text_muted"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        app:layout_constraintBottom_toBottomOf="@id/ivAvatar"
+        app:layout_constraintStart_toEndOf="@id/ivAvatar"
+        app:layout_constraintTop_toTopOf="@id/ivAvatar" />
+
+    <View
+        android:id="@+id/headerDivider"
+        android:layout_width="0dp"
+        android:layout_height="1dp"
+        android:layout_marginStart="16dp"
+        android:background="@color/mt_outline"
+        app:layout_constraintBottom_toBottomOf="@id/ivAvatar"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/tvLoadingStatus"
+        app:layout_constraintTop_toTopOf="@id/ivAvatar" />
+
     <LinearLayout
         android:id="@+id/loadingContainer"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:layout_marginEnd="60dp"
+        android:layout_marginTop="14dp"
         android:orientation="vertical"
-        android:background="@drawable/bg_chat_assistant"
-        android:padding="12dp"
-        app:layout_constraintStart_toEndOf="@id/ivAvatar"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="parent">
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/ivAvatar">
 
-        <!-- 思考过程固定高度面板 -->
         <LinearLayout
             android:id="@+id/thinkingPanel"
             android:layout_width="match_parent"
@@ -79,43 +101,43 @@
                     android:layout_height="wrap_content"
                     android:lineSpacingExtra="3dp"
                     android:textColor="@color/mt_text_secondary"
-                    android:textSize="13sp"
                     android:textIsSelectable="true"
+                    android:textSize="13sp"
                     tools:text="正在规划页面结构、生成样式和交互逻辑..." />
 
             </ScrollView>
 
         </LinearLayout>
 
-        <!-- 等待动画点 -->
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
             <View
                 android:id="@+id/dot1"
                 android:layout_width="8dp"
                 android:layout_height="8dp"
                 android:layout_marginEnd="4dp"
-                android:background="@drawable/loading_dot"
-                android:alpha="0.3" />
+                android:alpha="0.3"
+                android:background="@drawable/loading_dot" />
 
             <View
                 android:id="@+id/dot2"
                 android:layout_width="8dp"
                 android:layout_height="8dp"
                 android:layout_marginEnd="4dp"
-                android:background="@drawable/loading_dot"
-                android:alpha="0.6" />
+                android:alpha="0.6"
+                android:background="@drawable/loading_dot" />
 
             <View
                 android:id="@+id/dot3"
                 android:layout_width="8dp"
                 android:layout_height="8dp"
-                android:background="@drawable/loading_dot"
-                android:alpha="1.0" />
+                android:alpha="1.0"
+                android:background="@drawable/loading_dot" />
 
         </LinearLayout>
 
