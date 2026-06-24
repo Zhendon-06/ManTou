@@ -1,0 +1,7 @@
+<resources>
+    <style name="ThemeOverlay.ManTou.GlassAlertDialog" parent="ThemeOverlay.ManTou.GlassAlertDialog.Base">
+        <item name="android:windowBackgroundBlurRadius">28dp</item>
+        <item name="android:windowBlurBehindEnabled">true</item>
+        <item name="android:windowBlurBehindRadius">18dp</item>
+    </style>
+</resources>

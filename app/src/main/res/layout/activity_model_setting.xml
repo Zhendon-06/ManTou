@@ -301,7 +301,7 @@
                 android:textColor="#374151"
                 android:textSize="10sp" />
 
-            <!-- 操作行：计数 + 添加 + 下载 + 排序 -->
+            <!-- 操作行：计数 + 添加 + 下载 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -344,16 +344,6 @@
                     android:padding="12dp"
                     android:src="@drawable/ic_download" />
 
-                <!-- 排序 -->
-                <ImageView
-                    android:id="@+id/btnSortModels"
-                    android:layout_width="36dp"
-                    android:layout_height="36dp"
-                    android:layout_marginStart="8dp"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="排序"
-                    android:padding="8dp"
-                    android:src="@drawable/ic_sort_list" />
             </LinearLayout>
 
             <!-- 模型列表区域 -->

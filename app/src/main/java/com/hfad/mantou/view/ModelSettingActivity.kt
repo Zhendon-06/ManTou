@@ -53,7 +53,6 @@ class ModelSettingActivity : AppCompatActivity() {
     private lateinit var etApiKey: TextInputEditText
     private lateinit var btnAddModel: ImageView
     private lateinit var btnRefreshModels: ImageView
-    private lateinit var btnSortModels: ImageView
     private lateinit var tvModelCount: TextView
     private lateinit var rvModelList: RecyclerView
     private lateinit var emptyModelState: View
@@ -103,7 +102,6 @@ class ModelSettingActivity : AppCompatActivity() {
         etApiKey = findViewById(R.id.etApiKey)
         btnAddModel = findViewById(R.id.btnAddModel)
         btnRefreshModels = findViewById(R.id.btnRefreshModels)
-        btnSortModels = findViewById(R.id.btnSortModels)
         tvModelCount = findViewById(R.id.tvModelCount)
         rvModelList = findViewById(R.id.rvModelList)
         emptyModelState = findViewById(R.id.emptyModelState)
@@ -172,10 +170,6 @@ class ModelSettingActivity : AppCompatActivity() {
         btnRefreshModels.setOnClickListener { refreshModelsFromApi() }
 
         btnAddModel.setOnClickListener { showAddModelDialog() }
-
-        btnSortModels.setOnClickListener {
-            Toast.makeText(this, "排序功能稍后接入", Toast.LENGTH_SHORT).show()
-        }
     }
 
     // ===================================================================

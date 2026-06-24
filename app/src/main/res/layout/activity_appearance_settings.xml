@@ -71,6 +71,12 @@
                     android:contentDescription="@null"
                     android:scaleType="centerCrop" />
 
+                <View
+                    android:id="@+id/wallpaperPreviewMask"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:visibility="gone" />
+
                 <TextView
                     android:id="@+id/tvWallpaperEmpty"
                     android:layout_width="match_parent"
@@ -101,7 +107,7 @@
                 <TextView
                     android:id="@+id/btnChooseWallpaper"
                     android:layout_width="0dp"
-                    android:layout_height="32dp"
+                    android:layout_height="48dp"
                     android:layout_marginEnd="5dp"
                     android:layout_weight="1"
                     android:background="@drawable/bg_settings_save_button"
@@ -117,7 +123,7 @@
                 <TextView
                     android:id="@+id/btnClearWallpaper"
                     android:layout_width="0dp"
-                    android:layout_height="32dp"
+                    android:layout_height="48dp"
                     android:layout_marginStart="5dp"
                     android:layout_weight="1"
                     android:background="@drawable/bg_settings_save_button"
@@ -130,6 +136,192 @@
                     android:textSize="12sp"
                     android:textStyle="bold" />
             </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="26dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="效果调整"
+                    android:textColor="@color/mt_text_muted"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:background="@color/mt_outline" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvBlurTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="22dp"
+                android:textColor="@color/mt_text_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="调节图片上方蒙版的柔化程度"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="12sp" />
+
+            <SeekBar
+                android:id="@+id/seekBlur"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginHorizontal="8dp"
+                android:layout_marginTop="8dp"
+                android:max="30"
+                android:progressTint="@color/mt_primary"
+                android:thumbTint="@color/mt_primary" />
+
+            <TextView
+                android:id="@+id/tvMaskStrengthTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:textColor="@color/mt_text_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="增强统一蒙版，让页面元素更干净"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="12sp" />
+
+            <SeekBar
+                android:id="@+id/seekMaskStrength"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginHorizontal="8dp"
+                android:layout_marginTop="8dp"
+                android:max="80"
+                android:progressTint="@color/mt_primary"
+                android:thumbTint="@color/mt_primary" />
+
+            <TextView
+                android:id="@+id/tvMaskToneTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:textColor="@color/mt_text_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="提亮或压暗蒙版，不会直接修改原图"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="12sp" />
+
+            <SeekBar
+                android:id="@+id/seekMaskTone"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginHorizontal="8dp"
+                android:layout_marginTop="8dp"
+                android:max="200"
+                android:progressTint="@color/mt_primary"
+                android:thumbTint="@color/mt_primary" />
+
+            <TextView
+                android:id="@+id/tvTextSizeTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:textColor="@color/mt_text_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="仅调整用户消息、AI 回复与思考区字号"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="12sp" />
+
+            <SeekBar
+                android:id="@+id/seekTextSize"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:layout_marginHorizontal="8dp"
+                android:layout_marginTop="8dp"
+                android:max="100"
+                android:progressTint="@color/mt_primary"
+                android:thumbTint="@color/mt_primary" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="22dp"
+                android:text="聊天文本颜色"
+                android:textColor="@color/mt_text_primary"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="默认会自动跟随背景明暗，也可以改成固定颜色"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="12sp" />
+
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:clipToPadding="false"
+                android:overScrollMode="never"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/colorOptions"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal" />
+            </HorizontalScrollView>
+
+            <EditText
+                android:id="@+id/etCustomColor"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:layout_marginTop="16dp"
+                android:background="@drawable/bg_appearance_input"
+                android:hint="自定义色号"
+                android:inputType="text"
+                android:maxLines="1"
+                android:paddingHorizontal="16dp"
+                android:textColor="@color/mt_text_primary"
+                android:textColorHint="@color/mt_text_muted"
+                android:textSize="15sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="图片会在聊天背景中尽量贴近预览效果。"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="12sp" />
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

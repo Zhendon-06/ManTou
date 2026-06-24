@@ -11,12 +11,13 @@
     <!-- 用户消息气泡容器 -->
     <LinearLayout
         android:id="@+id/messageContainer"
-        android:layout_width="0dp"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginStart="60dp"
         android:orientation="vertical"
         android:background="@drawable/bg_chat_user"
         android:padding="12dp"
+        app:layout_constrainedWidth="true"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintHorizontal_bias="1.0"
@@ -25,10 +26,15 @@
         <!-- 图片（如果有） -->
         <ImageView
             android:id="@+id/ivImage"
-            android:layout_width="match_parent"
-            android:layout_height="200dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
             android:layout_marginBottom="8dp"
-            android:scaleType="centerCrop"
+            android:adjustViewBounds="true"
+            android:clickable="true"
+            android:focusable="true"
+            android:maxWidth="280dp"
+            android:maxHeight="360dp"
+            android:scaleType="fitCenter"
             android:visibility="gone"
             android:contentDescription="@string/app_name"
             tools:visibility="visible"

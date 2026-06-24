@@ -21,7 +21,31 @@
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
         <item name="android:windowBackground">@color/mt_background</item>
+        <item name="android:alertDialogTheme">@style/ThemeOverlay.ManTou.GlassAlertDialog</item>
+        <item name="alertDialogTheme">@style/ThemeOverlay.ManTou.GlassAlertDialog</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.ManTou.GlassAlertDialog</item>
     </style>
 
     <style name="Theme.ManTou" parent="Base.Theme.ManTou" />
+
+    <style name="ShapeAppearance.ManTou.Dialog" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">24dp</item>
+    </style>
+
+    <style name="ThemeOverlay.ManTou.GlassAlertDialog.Base" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="android:windowBackground">@drawable/bg_dialog_glass</item>
+        <item name="android:colorBackgroundFloating">@color/mt_dialog_glass</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.28</item>
+        <item name="backgroundTint">@android:color/transparent</item>
+        <item name="backgroundInsetStart">24dp</item>
+        <item name="backgroundInsetEnd">24dp</item>
+        <item name="backgroundInsetTop">24dp</item>
+        <item name="backgroundInsetBottom">24dp</item>
+        <item name="colorSurface">@color/mt_dialog_glass</item>
+        <item name="shapeAppearanceOverlay">@style/ShapeAppearance.ManTou.Dialog</item>
+    </style>
+
+    <style name="ThemeOverlay.ManTou.GlassAlertDialog" parent="ThemeOverlay.ManTou.GlassAlertDialog.Base" />
 </resources>

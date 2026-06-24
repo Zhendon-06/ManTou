@@ -2,6 +2,10 @@ package com.hfad.mantou.adapter
 
 import android.animation.AnimatorInflater
 import android.animation.AnimatorSet
+import android.app.Dialog
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Drawable
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
@@ -10,14 +14,20 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import com.bumptech.glide.load.DataSource
+import com.bumptech.glide.load.engine.GlideException
+import com.bumptech.glide.request.RequestListener
+import com.bumptech.glide.request.target.Target
 import com.bumptech.glide.Glide
 import com.hfad.mantou.R
 import com.hfad.mantou.data.ChatMessage
+import com.hfad.mantou.data.preferences.AppearanceSettingsStore
 import com.hfad.mantou.databinding.ItemChatAssistantBinding
 import com.hfad.mantou.databinding.ItemChatLoadingBinding
 import com.hfad.mantou.databinding.ItemChatUserBinding
@@ -37,6 +47,15 @@ class ChatAdapter(
         private const val VIEW_TYPE_USER = 1
         private const val VIEW_TYPE_ASSISTANT = 2
         private const val VIEW_TYPE_LOADING = 3
+        private const val PAYLOAD_APPEARANCE_CHANGED = "appearance_changed"
+    }
+
+    private var appearanceSettings = AppearanceSettingsStore.Settings()
+
+    fun updateAppearance(settings: AppearanceSettingsStore.Settings) {
+        if (appearanceSettings == settings) return
+        appearanceSettings = settings
+        notifyItemRangeChanged(0, itemCount, PAYLOAD_APPEARANCE_CHANGED)
     }
 
     override fun getItemViewType(position: Int): Int {
@@ -96,8 +115,27 @@ class ChatAdapter(
         if (payloads.isNotEmpty()) {
             val message = getItem(position)
             when (holder) {
-                is AssistantMessageViewHolder -> holder.updateContent(message.content)
-                is LoadingViewHolder -> holder.updateThinking(message.thinking)
+                is UserMessageViewHolder -> {
+                    if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) {
+                        holder.bind(message)
+                    } else {
+                        super.onBindViewHolder(holder, position, payloads)
+                    }
+                }
+                is AssistantMessageViewHolder -> {
+                    if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) {
+                        holder.bind(message)
+                    } else {
+                        holder.updateContent(message.content)
+                    }
+                }
+                is LoadingViewHolder -> {
+                    if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) {
+                        holder.bind(message)
+                    } else {
+                        holder.updateThinking(message.thinking)
+                    }
+                }
                 else -> super.onBindViewHolder(holder, position, payloads)
             }
         } else {
@@ -137,17 +175,7 @@ class ChatAdapter(
 
         fun bind(message: ChatMessage) {
             bindRichText(binding.tvMessage, message.content, RichTextRole.USER)
-
-            if (message.imagePath != null) {
-                binding.ivImage.visibility = View.VISIBLE
-                Glide.with(binding.ivImage.context)
-                    .load(message.imagePath)
-                    .centerCrop()
-                    .placeholder(R.drawable.ic_launcher_background)
-                    .into(binding.ivImage)
-            } else {
-                binding.ivImage.visibility = View.GONE
-            }
+            bindImage(binding.ivImage, message.imagePath)
         }
     }
 
@@ -168,17 +196,7 @@ class ChatAdapter(
 
         fun bind(message: ChatMessage) {
             bindRichText(binding.tvMessage, message.content, RichTextRole.ASSISTANT)
-
-            if (message.imagePath != null) {
-                binding.ivImage.visibility = View.VISIBLE
-                Glide.with(binding.ivImage.context)
-                    .load(message.imagePath)
-                    .centerCrop()
-                    .placeholder(R.drawable.ic_launcher_background)
-                    .into(binding.ivImage)
-            } else {
-                binding.ivImage.visibility = View.GONE
-            }
+            bindImage(binding.ivImage, message.imagePath)
 
             if (!message.appHtmlPath.isNullOrEmpty()) {
                 binding.webViewContainer.visibility = View.VISIBLE
@@ -250,9 +268,13 @@ class ChatAdapter(
         private var animatorSet: AnimatorSet? = null
 
         fun bind(message: ChatMessage) {
-            binding.tvThinkingTitle.text = message.content.ifBlank { "正在处理" }
-            updateThinking(message.thinking)
             val context = binding.root.context
+            binding.tvThinkingTitle.text = message.content.ifBlank { "正在处理" }
+            binding.tvThinkingTitle.textSize = appearanceSettings.chatTextSizeSp
+            binding.tvThinkingTitle.setTextColor(
+                fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_text_primary)
+            )
+            updateThinking(message.thinking)
             val animator = AnimatorInflater.loadAnimator(context, R.animator.loading_animation)
             if (animator is AnimatorSet) {
                 animatorSet = animator
@@ -284,31 +306,130 @@ class ChatAdapter(
         val context = textView.context
         val palette = when (role) {
             RichTextRole.USER -> RichTextFormatter.Palette(
-                textColor = ContextCompat.getColor(context, R.color.mt_on_primary),
+                textColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_on_primary),
                 secondaryColor = ContextCompat.getColor(context, R.color.mt_surface_blue),
-                accentColor = ContextCompat.getColor(context, R.color.mt_on_primary),
+                accentColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_on_primary),
                 codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_primary_dark),
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_on_primary)
             )
             RichTextRole.ASSISTANT -> RichTextFormatter.Palette(
-                textColor = ContextCompat.getColor(context, R.color.mt_text_primary),
+                textColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_text_primary),
                 secondaryColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
-                accentColor = ContextCompat.getColor(context, R.color.mt_primary_dark),
+                accentColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_primary_dark),
                 codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
             )
             RichTextRole.THINKING -> RichTextFormatter.Palette(
-                textColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
+                textColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_text_secondary),
                 secondaryColor = ContextCompat.getColor(context, R.color.mt_text_muted),
-                accentColor = ContextCompat.getColor(context, R.color.mt_primary_dark),
+                accentColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_primary_dark),
                 codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
             )
         }
+        textView.textSize = appearanceSettings.chatTextSizeSp
         textView.setTextColor(palette.textColor)
         textView.setTextIsSelectable(true)
         textView.text = RichTextFormatter.format(content, palette)
     }
+
+    private fun bindImage(imageView: ImageView, imagePath: String?) {
+        if (imagePath.isNullOrEmpty()) {
+            Glide.with(imageView).clear(imageView)
+            imageView.visibility = View.GONE
+            imageView.setOnClickListener(null)
+            return
+        }
+
+        imageView.visibility = View.VISIBLE
+        imageView.scaleType = ImageView.ScaleType.FIT_CENTER
+        imageView.layoutParams = imageView.layoutParams.apply {
+            width = ViewGroup.LayoutParams.WRAP_CONTENT
+            height = ViewGroup.LayoutParams.WRAP_CONTENT
+        }
+        imageView.setOnClickListener { showImagePreview(imageView, imagePath) }
+        Glide.with(imageView.context)
+            .load(imagePath)
+            .fitCenter()
+            .placeholder(R.drawable.ic_launcher_background)
+            .listener(object : RequestListener<Drawable> {
+                override fun onLoadFailed(
+                    e: GlideException?,
+                    model: Any?,
+                    target: Target<Drawable>,
+                    isFirstResource: Boolean
+                ): Boolean = false
+
+                override fun onResourceReady(
+                    resource: Drawable,
+                    model: Any,
+                    target: Target<Drawable>?,
+                    dataSource: DataSource,
+                    isFirstResource: Boolean
+                ): Boolean {
+                    resizeImageView(imageView, resource.intrinsicWidth, resource.intrinsicHeight)
+                    return false
+                }
+            })
+            .into(imageView)
+    }
+
+    private fun resizeImageView(imageView: ImageView, intrinsicWidth: Int, intrinsicHeight: Int) {
+        if (intrinsicWidth <= 0 || intrinsicHeight <= 0) return
+
+        val metrics = imageView.resources.displayMetrics
+        val maxWidth = (metrics.widthPixels * 0.68f).toInt().coerceAtMost(dp(imageView, 280))
+        val maxHeight = (metrics.heightPixels * 0.45f).toInt().coerceAtMost(dp(imageView, 420))
+        val scale = minOf(
+            1f,
+            maxWidth.toFloat() / intrinsicWidth.toFloat(),
+            maxHeight.toFloat() / intrinsicHeight.toFloat()
+        )
+        val targetWidth = (intrinsicWidth * scale).toInt().coerceAtLeast(1)
+        val targetHeight = (intrinsicHeight * scale).toInt().coerceAtLeast(1)
+
+        imageView.layoutParams = imageView.layoutParams.apply {
+            width = targetWidth
+            height = targetHeight
+        }
+    }
+
+    private fun showImagePreview(anchor: ImageView, imagePath: String) {
+        val context = anchor.context
+        val dialog = Dialog(context)
+        val preview = ImageView(context).apply {
+            setBackgroundColor(Color.BLACK)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            adjustViewBounds = true
+            setOnClickListener { dialog.dismiss() }
+        }
+        dialog.setContentView(
+            preview,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        dialog.show()
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.BLACK))
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        Glide.with(context)
+            .load(imagePath)
+            .fitCenter()
+            .into(preview)
+    }
+
+    private fun dp(view: View, value: Int): Int {
+        return (value * view.resources.displayMetrics.density).toInt()
+    }
+
+    private val fixedTextColor: Int?
+        get() = appearanceSettings.chatTextColor.takeIf {
+            it != AppearanceSettingsStore.AUTO_TEXT_COLOR
+        }
 
     private enum class RichTextRole {
         USER,
