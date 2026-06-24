@@ -4,10 +4,13 @@ import android.app.Dialog
 import android.content.res.ColorStateList
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.text.Editable
 import android.provider.OpenableColumns
@@ -51,6 +54,7 @@ import com.hfad.mantou.adapter.SessionAdapter
 import com.hfad.mantou.adapter.WorkspaceFileAdapter
 import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.data.database.ChatSessionEntity
+import com.hfad.mantou.data.preferences.AppearanceSettingsStore
 import com.hfad.mantou.data.preferences.ContextLimitStore
 import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
@@ -259,12 +263,16 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val bottomInset = if (imeVisible) {
             (imeInsets.bottom - systemBarsInsets.bottom).coerceAtLeast(0)
         } else {
-            0
+            systemBarsInsets.bottom
         }
         val targetPaddingBottom = inputContainerBasePaddingBottom + bottomInset
 
         if (chatBinding.inputContainer.paddingBottom != targetPaddingBottom) {
             chatBinding.inputContainer.updatePadding(bottom = targetPaddingBottom)
+        }
+        val targetListPaddingBottom = dp(8) + bottomInset
+        if (chatBinding.rvChat.paddingBottom != targetListPaddingBottom) {
+            chatBinding.rvChat.updatePadding(bottom = targetListPaddingBottom)
         }
 
         if (imeVisible && (!lastImeVisible || lastAppliedBottomInset != bottomInset)) {
@@ -644,10 +652,18 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun applyWallpaper() {
         val wallpaperUri = WallpaperStore.getWallpaperUri(requireContext())
+        val appearanceSettings = AppearanceSettingsStore.getSettings(requireContext())
+        if (::chatAdapter.isInitialized) {
+            chatAdapter.updateAppearance(appearanceSettings)
+        }
         val defaultBackground = ContextCompat.getColor(requireContext(), R.color.mt_background)
         if (wallpaperUri == null) {
             binding.wallpaperBackground.visibility = View.GONE
             binding.wallpaperBackground.setImageDrawable(null)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                binding.wallpaperBackground.setRenderEffect(null)
+            }
+            binding.wallpaperMask.visibility = View.GONE
             binding.mainPager.setBackgroundColor(defaultBackground)
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
@@ -655,13 +671,35 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
 
         binding.wallpaperBackground.visibility = View.VISIBLE
-        runCatching {
+        val wallpaperLoaded = runCatching {
             binding.wallpaperBackground.setImageURI(wallpaperUri)
-        }.onFailure {
+        }.isSuccess
+        if (!wallpaperLoaded) {
             WallpaperStore.clearWallpaper(requireContext())
             binding.wallpaperBackground.visibility = View.GONE
+            binding.wallpaperBackground.setImageDrawable(null)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                binding.wallpaperBackground.setRenderEffect(null)
+            }
+            binding.wallpaperMask.visibility = View.GONE
+            binding.mainPager.setBackgroundColor(defaultBackground)
+            chatBinding.root.setBackgroundColor(defaultBackground)
+            workspaceBinding.root.setBackgroundColor(defaultBackground)
             Toast.makeText(requireContext(), "壁纸读取失败，已恢复默认背景", Toast.LENGTH_SHORT).show()
+            return
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val blur = appearanceSettings.backgroundBlur
+            binding.wallpaperBackground.setRenderEffect(
+                if (blur > 0f) {
+                    RenderEffect.createBlurEffect(blur, blur, Shader.TileMode.CLAMP)
+                } else {
+                    null
+                }
+            )
+        }
+        binding.wallpaperMask.visibility = View.VISIBLE
+        binding.wallpaperMask.setBackgroundColor(AppearanceSettingsStore.maskColor(appearanceSettings))
         binding.mainPager.setBackgroundColor(Color.TRANSPARENT)
         chatBinding.root.setBackgroundColor(Color.TRANSPARENT)
         workspaceBinding.root.setBackgroundColor(Color.TRANSPARENT)
@@ -1104,6 +1142,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             // 设置 item 动画（可选）
             itemAnimator = null  // 禁用动画以避免闪烁，或使用自定义动画
         }
+        chatAdapter.updateAppearance(AppearanceSettingsStore.getSettings(requireContext()))
     }
 
     /**

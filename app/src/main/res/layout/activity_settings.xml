@@ -59,7 +59,7 @@
             <LinearLayout
                 android:id="@+id/rowModelConfig"
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="66dp"
                 android:clickable="true"
                 android:focusable="true"
                 android:foreground="?attr/selectableItemBackground"
@@ -113,7 +113,7 @@
             <LinearLayout
                 android:id="@+id/rowWorkspaceMemory"
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="66dp"
                 android:clickable="true"
                 android:focusable="true"
                 android:foreground="?attr/selectableItemBackground"
@@ -184,7 +184,7 @@
             <LinearLayout
                 android:id="@+id/rowAppearance"
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
+                android:layout_height="66dp"
                 android:clickable="true"
                 android:focusable="true"
                 android:foreground="?attr/selectableItemBackground"

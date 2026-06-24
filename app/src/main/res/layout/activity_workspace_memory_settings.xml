@@ -69,7 +69,7 @@
             <EditText
                 android:id="@+id/etSoul"
                 android:layout_width="match_parent"
-                android:layout_height="130dp"
+                android:layout_height="230dp"
                 android:layout_marginTop="9dp"
                 android:background="@drawable/bg_settings_panel"
                 android:fontFamily="monospace"
@@ -117,7 +117,7 @@
             <EditText
                 android:id="@+id/etChat"
                 android:layout_width="match_parent"
-                android:layout_height="130dp"
+                android:layout_height="230dp"
                 android:layout_marginTop="9dp"
                 android:background="@drawable/bg_settings_panel"
                 android:fontFamily="monospace"
@@ -165,7 +165,7 @@
             <EditText
                 android:id="@+id/etMemory"
                 android:layout_width="match_parent"
-                android:layout_height="130dp"
+                android:layout_height="230dp"
                 android:layout_marginTop="9dp"
                 android:background="@drawable/bg_settings_panel"
                 android:fontFamily="monospace"

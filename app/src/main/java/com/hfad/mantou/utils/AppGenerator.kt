@@ -29,7 +29,7 @@ object AppGenerator {
 7. 代码必须以<!DOCTYPE html>开头，以</html>结尾
 8. 应用命名必须使用“馒头xxx”的形式，其中 xxx 是应用本身的自然名称，例如番茄钟叫“馒头番茄钟”，记事本叫“馒头记事本”；HTML 的 title 和主标题应优先使用这个名称。"""
 
-    const val APP_GEN_MAX_TOKENS = 81920
+    const val APP_GEN_MAX_TOKENS = 256000
     const val WEB_APP_BRIDGE_NAME = "MantouApp"
     const val WEB_APP_USER_AGENT_TOKEN = "MantouApp/1"
     /** 编译期 generateToolsDoc 任务的输出，运行时从 assets 读出来注入 prompt。 */

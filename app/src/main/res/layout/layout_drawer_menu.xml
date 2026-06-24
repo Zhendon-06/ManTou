@@ -128,8 +128,8 @@
             android:orientation="vertical">
 
             <ImageView
-                android:layout_width="32dp"
-                android:layout_height="32dp"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
                 android:background="@drawable/bg_drawer_action_circle"
                 android:contentDescription="设置"
                 android:elevation="3dp"
@@ -157,8 +157,8 @@
             android:orientation="vertical">
 
             <ImageView
-                android:layout_width="32dp"
-                android:layout_height="32dp"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
                 android:background="@drawable/bg_drawer_action_circle"
                 android:contentDescription="清空对话"
                 android:elevation="3dp"
