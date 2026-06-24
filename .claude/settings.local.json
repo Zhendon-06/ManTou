@@ -6,7 +6,8 @@
       "Bash(./gradlew :app:assembleDebug)",
       "Bash(./gradlew :app:generateToolsDoc)",
       "Bash(./gradlew :app:generateToolsDoc --rerun-tasks)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "WebSearch"
     ]
   }
 }

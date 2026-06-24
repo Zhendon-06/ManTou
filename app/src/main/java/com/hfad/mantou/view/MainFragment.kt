@@ -1,6 +1,8 @@
 package com.hfad.mantou.view
 
+import android.Manifest
 import android.app.Dialog
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.Intent
 import android.graphics.Color
@@ -21,6 +23,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
@@ -53,13 +56,21 @@ import com.hfad.mantou.adapter.ChatAdapter
 import com.hfad.mantou.adapter.SessionAdapter
 import com.hfad.mantou.adapter.WorkspaceFileAdapter
 import com.hfad.mantou.data.ChatMessage
+import com.hfad.mantou.data.api.VoiceInputConfig
+import com.hfad.mantou.data.api.VoiceTranscriptionApiService
+import com.hfad.mantou.data.api.WavAudioRecorder
+import com.hfad.mantou.data.database.AppDatabase
 import com.hfad.mantou.data.database.ChatSessionEntity
+import com.hfad.mantou.data.database.ProviderEntity
 import com.hfad.mantou.data.preferences.AppearanceSettingsStore
+import com.hfad.mantou.data.preferences.ActiveModelStore
 import com.hfad.mantou.data.preferences.ContextLimitStore
+import com.hfad.mantou.data.preferences.VoiceInputModelStore
 import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
+import com.hfad.mantou.data.repository.ProviderRepository
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
 import com.hfad.mantou.tool.impl.CameraPhotoHost
 import com.hfad.mantou.utils.AgentWorkspace
@@ -97,6 +108,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private val selectedImageUris = mutableListOf<Uri>()
     private var activeAppWebView: WebView? = null
     private lateinit var cameraPhotoHost: CameraPhotoHost
+    private var voiceRecorder: WavAudioRecorder? = null
+    private var voiceInputFile: File? = null
+    private var voiceRecordingConfig: VoiceInputConfig? = null
+    private var isVoiceRecording = false
+    private var isVoiceTranscribing = false
+    private var pendingVoiceStartAfterPermission = false
+    private val providerRepository by lazy {
+        ProviderRepository(AppDatabase.getDatabase(requireContext().applicationContext).providerDao())
+    }
 
     // ViewModel
     private val viewModel: ChatViewModel by viewModels()
@@ -127,6 +147,16 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private val requestCameraPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         cameraPhotoHost.onCameraPermissionResult(granted)
+    }
+
+    private val requestAudioPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted && pendingVoiceStartAfterPermission) {
+            pendingVoiceStartAfterPermission = false
+            startVoiceInputWithConfiguredModel()
+        } else if (!granted) {
+            pendingVoiceStartAfterPermission = false
+            Toast.makeText(requireContext(), "需要麦克风权限才能语音输入", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -192,6 +222,22 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             showContextLimitDialog()
         }
 
+        chatBinding.ivModelPicker.setOnClickListener {
+            showModelPickerPanel()
+        }
+
+        chatBinding.ivVoiceInput.setOnClickListener {
+            onVoiceInputClicked()
+        }
+        chatBinding.ivVoiceInput.setOnLongClickListener {
+            if (isVoiceRecording || isVoiceTranscribing) {
+                Toast.makeText(requireContext(), "请先结束当前语音输入", Toast.LENGTH_SHORT).show()
+            } else {
+                showMimoVoiceKeyDialog(startAfterActivation = false)
+            }
+            true
+        }
+
         chatBinding.rvChat.setOnClickListener {
             chatBinding.etInput.clearFocus()
         }
@@ -225,6 +271,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         })
         updateCurrentContextTokens()
         updateSendButtonState(false)
+        updateVoiceInputButtonState()
         applyWallpaper()
 
         // 侧边栏清空历史按钮
@@ -1274,6 +1321,694 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         updateCurrentContextTokens()
     }
 
+    private fun showModelPickerPanel() {
+        showModelPickerPanel(
+            activeProviderId = ActiveModelStore.getActiveProviderId(requireContext()),
+            activeModelName = ActiveModelStore.getActiveModelName(requireContext()),
+            providerFilter = { true },
+            onSelected = { provider, modelName ->
+                ActiveModelStore.setActive(requireContext(), provider.providerId, modelName)
+                viewModel.refreshActiveModel()
+                Toast.makeText(requireContext(), "已切换到 $modelName", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
+    private fun showMimoVoiceKeyDialog(startAfterActivation: Boolean) {
+        val dialog = Dialog(requireContext())
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setContentView(buildMimoVoiceKeyContent(dialog, startAfterActivation))
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.setOnShowListener {
+            configureModelPickerWindow(dialog)
+        }
+        dialog.show()
+    }
+
+    private fun buildMimoVoiceKeyContent(dialog: Dialog, startAfterActivation: Boolean): View {
+        val currentApiKey = VoiceInputModelStore.getActiveApiKey(requireContext())
+        val root = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
+            setPadding(dp(18), dp(18), dp(18), dp(16))
+        }
+
+        root.addView(
+            TextView(requireContext()).apply {
+                text = "MiMo 语音输入"
+                textSize = 18f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(45, 52, 68))
+                includeFontPadding = false
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        root.addView(
+            TextView(requireContext()).apply {
+                text = "输入可用的 MiMo API Key，校验通过后会激活 ${VoiceTranscriptionApiService.MIMO_ASR_MODEL}。"
+                textSize = 13f
+                setTextColor(Color.rgb(112, 124, 145))
+                setPadding(0, dp(8), 0, 0)
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        val apiKeyInput = buildVoiceConfigInput(
+            hint = "MiMo API Key",
+            text = currentApiKey,
+            inputTypeValue = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_PASSWORD or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        )
+
+        root.addView(apiKeyInput, voiceConfigInputLayoutParams(topMargin = dp(16)))
+
+        val buttonRow = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        buttonRow.addView(
+            TextView(requireContext()).apply {
+                text = "取消"
+                textSize = 15f
+                gravity = Gravity.CENTER
+                setTextColor(Color.rgb(97, 113, 137))
+                background = roundedStrokeBackground(
+                    fillColor = Color.argb(140, 248, 251, 255),
+                    strokeColor = Color.argb(180, 218, 228, 244),
+                    radius = 14f
+                )
+                foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
+                setOnClickListener { dialog.dismiss() }
+            },
+            LinearLayout.LayoutParams(0, dp(46), 1f)
+        )
+        buttonRow.addView(
+            TextView(requireContext()).apply {
+                text = "激活"
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                background = roundedStrokeBackground(
+                    fillColor = Color.rgb(44, 131, 216),
+                    strokeColor = Color.rgb(44, 131, 216),
+                    radius = 14f
+                )
+                foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
+                setOnClickListener {
+                    val apiKey = apiKeyInput.text?.toString().orEmpty()
+                    val button = this
+                    button.isEnabled = false
+                    button.alpha = 0.65f
+                    button.text = "校验中..."
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        val result = VoiceTranscriptionApiService.activateMimoAsr(apiKey)
+                        if (!dialog.isShowing) return@launch
+                        button.isEnabled = true
+                        button.alpha = 1f
+                        button.text = "激活"
+                        result.onSuccess { config ->
+                            VoiceInputModelStore.setActive(requireContext(), config)
+                            Toast.makeText(requireContext(), "MiMo 语音输入已激活", Toast.LENGTH_SHORT).show()
+                            dialog.dismiss()
+                            if (startAfterActivation) {
+                                startVoiceInputWithConfiguredModel()
+                            }
+                        }.onFailure { error ->
+                            Toast.makeText(
+                                requireContext(),
+                                error.message ?: "MiMo API Key 校验失败",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+            },
+            LinearLayout.LayoutParams(0, dp(46), 1f).apply {
+                marginStart = dp(12)
+            }
+        )
+        root.addView(
+            buttonRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(16)
+            }
+        )
+
+        return root
+    }
+
+    private fun buildVoiceConfigInput(
+        hint: String,
+        text: String,
+        inputTypeValue: Int
+    ): EditText {
+        return EditText(requireContext()).apply {
+            this.hint = hint
+            setText(text)
+            textSize = 14f
+            setSingleLine(true)
+            setTextColor(Color.rgb(45, 52, 68))
+            setHintTextColor(Color.rgb(150, 162, 182))
+            inputType = inputTypeValue
+            background = roundedStrokeBackground(
+                fillColor = Color.argb(160, 248, 251, 255),
+                strokeColor = Color.WHITE,
+                radius = 14f
+            )
+            setPadding(dp(14), 0, dp(14), 0)
+        }
+    }
+
+    private fun voiceConfigInputLayoutParams(topMargin: Int): LinearLayout.LayoutParams {
+        return LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(50)
+        ).apply {
+            this.topMargin = topMargin
+        }
+    }
+
+    private fun showModelPickerPanel(
+        activeProviderId: Long?,
+        activeModelName: String?,
+        providerFilter: (ProviderEntity) -> Boolean,
+        onSelected: (ProviderEntity, String) -> Unit
+    ) {
+        val dialog = Dialog(requireContext())
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val loadingView = buildModelPickerLoadingView()
+        dialog.setContentView(loadingView)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.setOnShowListener {
+            configureModelPickerWindow(dialog)
+        }
+        dialog.show()
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            val groups = withContext(Dispatchers.IO) {
+                loadModelPickerGroups(providerFilter)
+            }
+            if (!dialog.isShowing) return@launch
+            dialog.setContentView(
+                buildModelPickerContent(
+                    dialog = dialog,
+                    groups = groups,
+                    activeProviderId = activeProviderId,
+                    activeModelName = activeModelName,
+                    onSelected = onSelected
+                )
+            )
+            configureModelPickerWindow(dialog)
+        }
+    }
+
+    private suspend fun loadModelPickerGroups(
+        providerFilter: (ProviderEntity) -> Boolean
+    ): List<ModelProviderGroup> {
+        val providers = providerRepository.getAllProvidersOnce()
+        return providers.filter(providerFilter).map { provider ->
+            ModelProviderGroup(
+                provider = provider,
+                models = providerRepository.getModelsForProviderOnce(provider.providerId)
+                    .map { it.modelName }
+            )
+        }
+    }
+
+    private fun configureModelPickerWindow(dialog: Dialog) {
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0f)
+            setLayout(
+                (resources.displayMetrics.widthPixels - dp(40)).coerceAtLeast(dp(280)),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            attributes = attributes.apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                y = chatBinding.inputContainer.height + dp(8)
+            }
+        }
+    }
+
+    private fun buildModelPickerLoadingView(): View {
+        return LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
+            setPadding(dp(24), dp(34), dp(24), dp(34))
+            addView(
+                TextView(requireContext()).apply {
+                    text = "正在加载模型..."
+                    textSize = 16f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.rgb(112, 124, 145))
+                }
+            )
+        }
+    }
+
+    private fun buildModelPickerContent(
+        dialog: Dialog,
+        groups: List<ModelProviderGroup>,
+        activeProviderId: Long?,
+        activeModelName: String?,
+        onSelected: (ProviderEntity, String) -> Unit
+    ): View {
+        val expandedProviderIds = groups.map { it.provider.providerId }.toMutableSet()
+
+        val root = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
+            setPadding(dp(14), dp(14), dp(14), dp(12))
+        }
+
+        val searchInput = EditText(requireContext()).apply {
+            hint = "搜索模型 ID"
+            textSize = 15f
+            setSingleLine(true)
+            setTextColor(Color.rgb(45, 52, 68))
+            setHintTextColor(Color.rgb(160, 170, 188))
+            background = roundedStrokeBackground(
+                fillColor = Color.argb(160, 248, 251, 255),
+                strokeColor = Color.WHITE,
+                radius = 16f
+            )
+            setPadding(dp(14), 0, dp(14), 0)
+            compoundDrawablePadding = dp(10)
+            setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search_outline, 0, 0, 0)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        root.addView(
+            searchInput,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(54)
+            )
+        )
+
+        val listContainer = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val scroll = ScrollView(requireContext()).apply {
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(
+                listContainer,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+        root.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (resources.displayMetrics.heightPixels * 0.46f).toInt().coerceAtLeast(dp(260))
+            ).apply {
+                topMargin = dp(12)
+            }
+        )
+
+        fun render(query: String) {
+            listContainer.removeAllViews()
+            val normalizedQuery = query.trim().lowercase(Locale.getDefault())
+            val filteredGroups = groups.map { group ->
+                if (normalizedQuery.isBlank()) {
+                    group
+                } else {
+                    group.copy(
+                        models = group.models.filter {
+                            it.lowercase(Locale.getDefault()).contains(normalizedQuery)
+                        }
+                    )
+                }
+            }.filter { normalizedQuery.isBlank() || it.models.isNotEmpty() }
+
+            if (filteredGroups.isEmpty()) {
+                listContainer.addView(buildModelPickerEmptyView())
+                return
+            }
+
+            filteredGroups.forEach { group ->
+                val isExpanded = group.provider.providerId in expandedProviderIds
+                listContainer.addView(
+                    buildModelProviderHeader(group, isExpanded) {
+                        val providerId = group.provider.providerId
+                        if (providerId in expandedProviderIds) {
+                            expandedProviderIds.remove(providerId)
+                        } else {
+                            expandedProviderIds.add(providerId)
+                        }
+                        render(searchInput.text?.toString().orEmpty())
+                    }
+                )
+
+                if (isExpanded) {
+                    if (group.models.isEmpty()) {
+                        listContainer.addView(buildEmptyProviderModelsRow())
+                    } else {
+                        group.models.forEach { modelName ->
+                            val selected = activeProviderId == group.provider.providerId &&
+                                activeModelName == modelName
+                            listContainer.addView(
+                                buildModelPickerModelRow(
+                                    modelName = modelName,
+                                    selected = selected
+                                ) {
+                                    onSelected(group.provider, modelName)
+                                    dialog.dismiss()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        searchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                render(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        render("")
+
+        return root
+    }
+
+    private fun buildModelProviderHeader(
+        group: ModelProviderGroup,
+        expanded: Boolean,
+        onClick: () -> Unit
+    ): View {
+        val row = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(14), dp(8), dp(10))
+            foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
+            setOnClickListener { onClick() }
+        }
+
+        row.addView(
+            TextView(requireContext()).apply {
+                text = group.provider.name
+                textSize = 17f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(97, 113, 137))
+                includeFontPadding = false
+            },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+
+        row.addView(
+            TextView(requireContext()).apply {
+                text = group.models.size.toString()
+                textSize = 17f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(150, 162, 182))
+                includeFontPadding = false
+                gravity = Gravity.CENTER
+            },
+            LinearLayout.LayoutParams(dp(42), LinearLayout.LayoutParams.WRAP_CONTENT)
+        )
+
+        row.addView(
+            ImageView(requireContext()).apply {
+                setImageResource(if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down)
+                imageTintList = ColorStateList.valueOf(Color.rgb(150, 162, 182))
+            },
+            LinearLayout.LayoutParams(dp(24), dp(24))
+        )
+
+        return row
+    }
+
+    private fun buildModelPickerModelRow(
+        modelName: String,
+        selected: Boolean,
+        onClick: () -> Unit
+    ): View {
+        val row = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), 0, dp(12), 0)
+            foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
+            background = if (selected) {
+                roundedStrokeBackground(
+                    fillColor = Color.argb(110, 229, 241, 255),
+                    strokeColor = Color.argb(150, 83, 146, 236),
+                    radius = 14f
+                )
+            } else {
+                ColorDrawable(Color.TRANSPARENT)
+            }
+            setOnClickListener { onClick() }
+        }
+
+        row.addView(
+            TextView(requireContext()).apply {
+                text = modelName
+                textSize = 15f
+                setTextColor(if (selected) Color.rgb(36, 101, 196) else Color.rgb(92, 108, 132))
+                typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                includeFontPadding = false
+            },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+
+        if (selected) {
+            row.addView(
+                ImageView(requireContext()).apply {
+                    setImageResource(R.drawable.ic_check_blue)
+                    imageTintList = ColorStateList.valueOf(Color.rgb(44, 131, 216))
+                },
+                LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                    marginStart = dp(10)
+                }
+            )
+        }
+
+        return FrameLayout(requireContext()).apply {
+            setPadding(0, dp(2), 0, dp(2))
+            addView(
+                row,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    dp(46)
+                )
+            )
+        }
+    }
+
+    private fun buildEmptyProviderModelsRow(): View {
+        return TextView(requireContext()).apply {
+            text = "该 Provider 暂无可选模型"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(160, 170, 188))
+            setPadding(0, dp(12), 0, dp(18))
+        }
+    }
+
+    private fun buildModelPickerEmptyView(): View {
+        return LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(42), dp(12), dp(42))
+            addView(
+                ImageView(requireContext()).apply {
+                    setImageResource(R.drawable.ic_package_empty)
+                    alpha = 0.55f
+                },
+                LinearLayout.LayoutParams(dp(54), dp(54))
+            )
+            addView(
+                TextView(requireContext()).apply {
+                    text = "没有找到可选模型"
+                    textSize = 15f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.rgb(150, 162, 182))
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = dp(12)
+                }
+            )
+        }
+    }
+
+    private fun onVoiceInputClicked() {
+        when {
+            isVoiceTranscribing -> {
+                Toast.makeText(requireContext(), "正在识别语音，请稍等", Toast.LENGTH_SHORT).show()
+            }
+            isVoiceRecording -> {
+                stopVoiceInputAndTranscribe()
+            }
+            VoiceInputModelStore.getActiveConfig(requireContext()) == null -> {
+                showMimoVoiceKeyDialog(startAfterActivation = true)
+            }
+            else -> {
+                startVoiceInputWithConfiguredModel()
+            }
+        }
+    }
+
+    private fun startVoiceInputWithConfiguredModel() {
+        if (isVoiceRecording || isVoiceTranscribing) return
+
+        if (ContextCompat.checkSelfPermission(
+                requireContext(),
+                Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingVoiceStartAfterPermission = true
+            requestAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            val config = resolveVoiceInputConfig()
+            if (config == null) {
+                showMimoVoiceKeyDialog(startAfterActivation = true)
+                return@launch
+            }
+            startVoiceRecording(config)
+        }
+    }
+
+    private fun resolveVoiceInputConfig(): VoiceInputConfig? {
+        return VoiceInputModelStore.getActiveConfig(requireContext())
+    }
+
+    private fun startVoiceRecording(config: VoiceInputConfig) {
+        val outputFile = File(requireContext().cacheDir, "voice-input-${System.currentTimeMillis()}.wav")
+        val recorder = WavAudioRecorder(outputFile)
+
+        runCatching {
+            recorder.start()
+        }.onSuccess {
+            voiceRecorder = recorder
+            voiceInputFile = outputFile
+            voiceRecordingConfig = config
+            isVoiceRecording = true
+            updateVoiceInputButtonState()
+            hideKeyboard()
+            Toast.makeText(requireContext(), "正在语音输入，再次点击结束", Toast.LENGTH_SHORT).show()
+        }.onFailure { error ->
+            runCatching { recorder.cancel() }
+            outputFile.delete()
+            voiceRecorder = null
+            voiceInputFile = null
+            voiceRecordingConfig = null
+            isVoiceRecording = false
+            updateVoiceInputButtonState()
+            Toast.makeText(requireContext(), "无法开始录音: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun stopVoiceInputAndTranscribe() {
+        val recorder = voiceRecorder ?: return
+        val audioFile = voiceInputFile
+        val config = voiceRecordingConfig
+
+        isVoiceRecording = false
+        isVoiceTranscribing = true
+        voiceRecorder = null
+        voiceInputFile = null
+        voiceRecordingConfig = null
+        updateVoiceInputButtonState()
+
+        val pcmBytes = runCatching { recorder.stop() }.getOrDefault(-1L)
+
+        if (pcmBytes <= 0L || audioFile == null || config == null || audioFile.length() <= 0L) {
+            audioFile?.delete()
+            isVoiceTranscribing = false
+            updateVoiceInputButtonState()
+            Toast.makeText(requireContext(), "录音时间太短，请重试", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        Toast.makeText(requireContext(), "正在识别语音...", Toast.LENGTH_SHORT).show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val result = VoiceTranscriptionApiService.transcribe(config, audioFile)
+            audioFile.delete()
+            isVoiceTranscribing = false
+            updateVoiceInputButtonState()
+            result.onSuccess { text ->
+                appendVoiceTextToInput(text)
+            }.onFailure { error ->
+                Toast.makeText(requireContext(), error.message ?: "语音识别失败", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun appendVoiceTextToInput(text: String) {
+        val current = chatBinding.etInput.text?.toString().orEmpty()
+        val separator = if (current.isBlank() || current.endsWith("\n") || current.endsWith(" ")) "" else " "
+        val next = current + separator + text.trim()
+        chatBinding.etInput.setText(next)
+        chatBinding.etInput.setSelection(chatBinding.etInput.text?.length ?: 0)
+        updateCurrentContextTokens()
+    }
+
+    private fun cancelVoiceInput(deleteFile: Boolean = true) {
+        runCatching { voiceRecorder?.cancel() }
+        if (deleteFile) {
+            voiceInputFile?.delete()
+        }
+        voiceRecorder = null
+        voiceInputFile = null
+        voiceRecordingConfig = null
+        isVoiceRecording = false
+        isVoiceTranscribing = false
+        pendingVoiceStartAfterPermission = false
+        if (_chatBinding != null) {
+            updateVoiceInputButtonState()
+        }
+    }
+
+    private fun updateVoiceInputButtonState() {
+        val button = chatBinding.ivVoiceInput
+        when {
+            isVoiceRecording -> {
+                button.isEnabled = true
+                button.alpha = 1f
+                button.imageTintList = ColorStateList.valueOf(Color.rgb(230, 83, 83))
+                button.contentDescription = "结束语音输入"
+            }
+            isVoiceTranscribing -> {
+                button.isEnabled = false
+                button.alpha = 0.55f
+                button.imageTintList = ColorStateList.valueOf(Color.rgb(112, 124, 145))
+                button.contentDescription = "正在识别语音"
+            }
+            else -> {
+                button.isEnabled = true
+                button.alpha = 1f
+                button.imageTintList = ColorStateList.valueOf(Color.rgb(44, 131, 216))
+                button.contentDescription = "语音输入"
+            }
+        }
+    }
+
     private fun showContextLimitDialog() {
         val dialog = BottomSheetDialog(requireContext())
         val content = buildContextLimitSheet()
@@ -1808,6 +2543,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     override fun onDestroyView() {
         super.onDestroyView()
+        cancelVoiceInput()
         CameraPhotoBridge.detach(this)
         activeAppWebView = null
         setKeepScreenOn(false)
@@ -1831,6 +2567,11 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private data class ChatViewportAnchor(
         val position: Int,
         val topOffset: Int
+    )
+
+    private data class ModelProviderGroup(
+        val provider: ProviderEntity,
+        val models: List<String>
     )
 
     private class StaticPagerAdapter(
