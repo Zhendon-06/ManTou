@@ -151,6 +151,17 @@
                             android:contentDescription="上下文限制"
                             android:padding="7dp" />
 
+                        <ImageButton
+                            android:id="@+id/ivModelPicker"
+                            android:layout_width="38dp"
+                            android:layout_height="38dp"
+                            android:layout_marginStart="12dp"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:contentDescription="选择模型"
+                            android:padding="7dp"
+                            android:scaleType="centerInside"
+                            android:src="@drawable/ic_model_picker" />
+
                         <Space
                             android:layout_width="0dp"
                             android:layout_height="1dp"

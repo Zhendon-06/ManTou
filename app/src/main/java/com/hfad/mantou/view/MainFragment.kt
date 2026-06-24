@@ -21,6 +21,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
@@ -53,13 +54,17 @@ import com.hfad.mantou.adapter.ChatAdapter
 import com.hfad.mantou.adapter.SessionAdapter
 import com.hfad.mantou.adapter.WorkspaceFileAdapter
 import com.hfad.mantou.data.ChatMessage
+import com.hfad.mantou.data.database.AppDatabase
 import com.hfad.mantou.data.database.ChatSessionEntity
+import com.hfad.mantou.data.database.ProviderEntity
 import com.hfad.mantou.data.preferences.AppearanceSettingsStore
+import com.hfad.mantou.data.preferences.ActiveModelStore
 import com.hfad.mantou.data.preferences.ContextLimitStore
 import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
+import com.hfad.mantou.data.repository.ProviderRepository
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
 import com.hfad.mantou.tool.impl.CameraPhotoHost
 import com.hfad.mantou.utils.AgentWorkspace
@@ -97,6 +102,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private val selectedImageUris = mutableListOf<Uri>()
     private var activeAppWebView: WebView? = null
     private lateinit var cameraPhotoHost: CameraPhotoHost
+    private val providerRepository by lazy {
+        ProviderRepository(AppDatabase.getDatabase(requireContext().applicationContext).providerDao())
+    }
 
     // ViewModel
     private val viewModel: ChatViewModel by viewModels()
@@ -190,6 +198,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         chatBinding.ivContextLimit.setOnClickListener {
             showContextLimitDialog()
+        }
+
+        chatBinding.ivModelPicker.setOnClickListener {
+            showModelPickerPanel()
         }
 
         chatBinding.rvChat.setOnClickListener {
@@ -1274,6 +1286,354 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         updateCurrentContextTokens()
     }
 
+    private fun showModelPickerPanel() {
+        val dialog = Dialog(requireContext())
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val loadingView = buildModelPickerLoadingView()
+        dialog.setContentView(loadingView)
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.setOnShowListener {
+            configureModelPickerWindow(dialog)
+        }
+        dialog.show()
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            val groups = withContext(Dispatchers.IO) {
+                loadModelPickerGroups()
+            }
+            if (!dialog.isShowing) return@launch
+            dialog.setContentView(buildModelPickerContent(dialog, groups))
+            configureModelPickerWindow(dialog)
+        }
+    }
+
+    private suspend fun loadModelPickerGroups(): List<ModelProviderGroup> {
+        val providers = providerRepository.getAllProvidersOnce()
+        return providers.map { provider ->
+            ModelProviderGroup(
+                provider = provider,
+                models = providerRepository.getModelsForProviderOnce(provider.providerId)
+                    .map { it.modelName }
+            )
+        }
+    }
+
+    private fun configureModelPickerWindow(dialog: Dialog) {
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0f)
+            setLayout(
+                (resources.displayMetrics.widthPixels - dp(40)).coerceAtLeast(dp(280)),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            attributes = attributes.apply {
+                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                y = chatBinding.inputContainer.height + dp(8)
+            }
+        }
+    }
+
+    private fun buildModelPickerLoadingView(): View {
+        return LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
+            setPadding(dp(24), dp(34), dp(24), dp(34))
+            addView(
+                TextView(requireContext()).apply {
+                    text = "正在加载模型..."
+                    textSize = 16f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.rgb(112, 124, 145))
+                }
+            )
+        }
+    }
+
+    private fun buildModelPickerContent(
+        dialog: Dialog,
+        groups: List<ModelProviderGroup>
+    ): View {
+        val activeProviderId = ActiveModelStore.getActiveProviderId(requireContext())
+        val activeModelName = ActiveModelStore.getActiveModelName(requireContext())
+        val expandedProviderIds = groups.map { it.provider.providerId }.toMutableSet()
+
+        val root = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
+            setPadding(dp(14), dp(14), dp(14), dp(12))
+        }
+
+        val searchInput = EditText(requireContext()).apply {
+            hint = "搜索模型 ID"
+            textSize = 15f
+            setSingleLine(true)
+            setTextColor(Color.rgb(45, 52, 68))
+            setHintTextColor(Color.rgb(160, 170, 188))
+            background = roundedStrokeBackground(
+                fillColor = Color.argb(160, 248, 251, 255),
+                strokeColor = Color.WHITE,
+                radius = 16f
+            )
+            setPadding(dp(14), 0, dp(14), 0)
+            compoundDrawablePadding = dp(10)
+            setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search_outline, 0, 0, 0)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        }
+        root.addView(
+            searchInput,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(54)
+            )
+        )
+
+        val listContainer = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val scroll = ScrollView(requireContext()).apply {
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(
+                listContainer,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+        root.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (resources.displayMetrics.heightPixels * 0.46f).toInt().coerceAtLeast(dp(260))
+            ).apply {
+                topMargin = dp(12)
+            }
+        )
+
+        fun render(query: String) {
+            listContainer.removeAllViews()
+            val normalizedQuery = query.trim().lowercase(Locale.getDefault())
+            val filteredGroups = groups.map { group ->
+                if (normalizedQuery.isBlank()) {
+                    group
+                } else {
+                    group.copy(
+                        models = group.models.filter {
+                            it.lowercase(Locale.getDefault()).contains(normalizedQuery)
+                        }
+                    )
+                }
+            }.filter { normalizedQuery.isBlank() || it.models.isNotEmpty() }
+
+            if (filteredGroups.isEmpty()) {
+                listContainer.addView(buildModelPickerEmptyView())
+                return
+            }
+
+            filteredGroups.forEach { group ->
+                val isExpanded = group.provider.providerId in expandedProviderIds
+                listContainer.addView(
+                    buildModelProviderHeader(group, isExpanded) {
+                        val providerId = group.provider.providerId
+                        if (providerId in expandedProviderIds) {
+                            expandedProviderIds.remove(providerId)
+                        } else {
+                            expandedProviderIds.add(providerId)
+                        }
+                        render(searchInput.text?.toString().orEmpty())
+                    }
+                )
+
+                if (isExpanded) {
+                    if (group.models.isEmpty()) {
+                        listContainer.addView(buildEmptyProviderModelsRow())
+                    } else {
+                        group.models.forEach { modelName ->
+                            val selected = activeProviderId == group.provider.providerId &&
+                                activeModelName == modelName
+                            listContainer.addView(
+                                buildModelPickerModelRow(
+                                    modelName = modelName,
+                                    selected = selected
+                                ) {
+                                    ActiveModelStore.setActive(
+                                        requireContext(),
+                                        group.provider.providerId,
+                                        modelName
+                                    )
+                                    viewModel.refreshActiveModel()
+                                    Toast.makeText(
+                                        requireContext(),
+                                        "已切换到 $modelName",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                    dialog.dismiss()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        searchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                render(s?.toString().orEmpty())
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        render("")
+
+        return root
+    }
+
+    private fun buildModelProviderHeader(
+        group: ModelProviderGroup,
+        expanded: Boolean,
+        onClick: () -> Unit
+    ): View {
+        val row = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(10), dp(14), dp(8), dp(10))
+            foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
+            setOnClickListener { onClick() }
+        }
+
+        row.addView(
+            TextView(requireContext()).apply {
+                text = group.provider.name
+                textSize = 17f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(97, 113, 137))
+                includeFontPadding = false
+            },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+
+        row.addView(
+            TextView(requireContext()).apply {
+                text = group.models.size.toString()
+                textSize = 17f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.rgb(150, 162, 182))
+                includeFontPadding = false
+                gravity = Gravity.CENTER
+            },
+            LinearLayout.LayoutParams(dp(42), LinearLayout.LayoutParams.WRAP_CONTENT)
+        )
+
+        row.addView(
+            ImageView(requireContext()).apply {
+                setImageResource(if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down)
+                imageTintList = ColorStateList.valueOf(Color.rgb(150, 162, 182))
+            },
+            LinearLayout.LayoutParams(dp(24), dp(24))
+        )
+
+        return row
+    }
+
+    private fun buildModelPickerModelRow(
+        modelName: String,
+        selected: Boolean,
+        onClick: () -> Unit
+    ): View {
+        val row = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), 0, dp(12), 0)
+            foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
+            background = if (selected) {
+                roundedStrokeBackground(
+                    fillColor = Color.argb(110, 229, 241, 255),
+                    strokeColor = Color.argb(150, 83, 146, 236),
+                    radius = 14f
+                )
+            } else {
+                ColorDrawable(Color.TRANSPARENT)
+            }
+            setOnClickListener { onClick() }
+        }
+
+        row.addView(
+            TextView(requireContext()).apply {
+                text = modelName
+                textSize = 15f
+                setTextColor(if (selected) Color.rgb(36, 101, 196) else Color.rgb(92, 108, 132))
+                typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                includeFontPadding = false
+            },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+
+        if (selected) {
+            row.addView(
+                ImageView(requireContext()).apply {
+                    setImageResource(R.drawable.ic_check_blue)
+                    imageTintList = ColorStateList.valueOf(Color.rgb(44, 131, 216))
+                },
+                LinearLayout.LayoutParams(dp(22), dp(22)).apply {
+                    marginStart = dp(10)
+                }
+            )
+        }
+
+        return FrameLayout(requireContext()).apply {
+            setPadding(0, dp(2), 0, dp(2))
+            addView(
+                row,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    dp(46)
+                )
+            )
+        }
+    }
+
+    private fun buildEmptyProviderModelsRow(): View {
+        return TextView(requireContext()).apply {
+            text = "该 Provider 暂无可选模型"
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(160, 170, 188))
+            setPadding(0, dp(12), 0, dp(18))
+        }
+    }
+
+    private fun buildModelPickerEmptyView(): View {
+        return LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(42), dp(12), dp(42))
+            addView(
+                ImageView(requireContext()).apply {
+                    setImageResource(R.drawable.ic_package_empty)
+                    alpha = 0.55f
+                },
+                LinearLayout.LayoutParams(dp(54), dp(54))
+            )
+            addView(
+                TextView(requireContext()).apply {
+                    text = "没有找到可选模型"
+                    textSize = 15f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(Color.rgb(150, 162, 182))
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = dp(12)
+                }
+            )
+        }
+    }
+
     private fun showContextLimitDialog() {
         val dialog = BottomSheetDialog(requireContext())
         val content = buildContextLimitSheet()
@@ -1831,6 +2191,11 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private data class ChatViewportAnchor(
         val position: Int,
         val topOffset: Int
+    )
+
+    private data class ModelProviderGroup(
+        val provider: ProviderEntity,
+        val models: List<String>
     )
 
     private class StaticPagerAdapter(
