@@ -5,34 +5,55 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:padding="8dp">
+    android:paddingStart="22dp"
+    android:paddingTop="10dp"
+    android:paddingEnd="22dp"
+    android:paddingBottom="16dp">
 
-    <!-- AI头像 -->
     <ImageView
         android:id="@+id/ivAvatar"
         android:layout_width="36dp"
         android:layout_height="36dp"
-        android:src="@drawable/mantou"
+        android:background="@drawable/bg_drawer_action_circle"
         android:contentDescription="@string/app_name"
+        android:padding="6dp"
+        android:src="@drawable/mantou"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- 消息气泡 -->
-    <LinearLayout
-        android:id="@+id/messageContainer"
+    <TextView
+        android:id="@+id/tvAssistantStatus"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:layout_marginEnd="60dp"
-        android:background="@drawable/bg_chat_assistant"
-        android:orientation="vertical"
-        android:padding="12dp"
-        app:layout_constrainedWidth="true"
+        android:layout_marginStart="12dp"
+        android:text="已处理"
+        android:textColor="@color/mt_text_muted"
+        android:textSize="13sp"
+        android:textStyle="bold"
+        app:layout_constraintBottom_toBottomOf="@id/ivAvatar"
         app:layout_constraintStart_toEndOf="@id/ivAvatar"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintTop_toTopOf="parent">
+        app:layout_constraintTop_toTopOf="@id/ivAvatar" />
 
-        <!-- 图片 -->
+    <View
+        android:id="@+id/headerDivider"
+        android:layout_width="0dp"
+        android:layout_height="1dp"
+        android:layout_marginStart="16dp"
+        android:background="@color/mt_outline"
+        app:layout_constraintBottom_toBottomOf="@id/ivAvatar"
+        app:layout_constraintStart_toEndOf="@id/tvAssistantStatus"
+        app:layout_constraintTop_toTopOf="@id/ivAvatar" />
+
+    <LinearLayout
+        android:id="@+id/messageContainer"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:orientation="vertical"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/ivAvatar">
+
         <ImageView
             android:id="@+id/ivImage"
             android:layout_width="wrap_content"
@@ -48,29 +69,28 @@
             android:visibility="gone"
             tools:visibility="gone" />
 
-        <!-- 文本 -->
         <TextView
             android:id="@+id/tvMessage"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:lineSpacingExtra="2dp"
+            android:lineSpacingExtra="4dp"
+            android:lineSpacingMultiplier="1.04"
             android:textColor="@color/mt_text_primary"
-            android:textSize="15sp"
             android:textIsSelectable="true"
-            tools:text="这是 AI 助手回复的消息内容，可以很长很长..." />
+            android:textSize="16sp"
+            tools:text="我已经查看了工作区的结构：\n\n根目录：只有一个 `.omnibot` 配置目录\n\n- `agent` - Agent 配置目录\n- `attachments` - 附件存储\n- `browser` - 浏览器相关" />
 
-        <!-- WebView 容器（CardView 实现圆角裁剪，与外层气泡风格一致） -->
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/webViewContainer"
             android:layout_width="match_parent"
             android:layout_height="300dp"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="12dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="@color/mt_surface"
             app:cardCornerRadius="12dp"
             app:cardElevation="0dp"
-            app:cardBackgroundColor="@color/mt_surface"
             app:strokeColor="@color/mt_outline"
-            app:strokeWidth="1dp"
-            android:visibility="gone">
+            app:strokeWidth="1dp">
 
             <FrameLayout
                 android:id="@+id/appWebViewHost"
