@@ -36,8 +36,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.app.ActivityOptions
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
@@ -53,6 +55,7 @@ import com.google.android.material.chip.Chip
 import com.google.android.material.slider.Slider
 import com.hfad.mantou.R
 import com.hfad.mantou.adapter.ChatAdapter
+import com.hfad.mantou.adapter.DesktopAppAdapter
 import com.hfad.mantou.adapter.SessionAdapter
 import com.hfad.mantou.adapter.WorkspaceFileAdapter
 import com.hfad.mantou.data.ChatMessage
@@ -69,12 +72,14 @@ import com.hfad.mantou.data.preferences.VoiceInputModelStore
 import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
+import com.hfad.mantou.databinding.LayoutDesktopPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
 import com.hfad.mantou.data.repository.ProviderRepository
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
 import com.hfad.mantou.tool.impl.CameraPhotoHost
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.ContextTokenCounter
+import com.hfad.mantou.utils.DesktopAppScanner
 import com.hfad.mantou.utils.WorkspaceNode
 import com.hfad.mantou.viewmodel.ChatViewModel
 import kotlinx.coroutines.Dispatchers
@@ -87,14 +92,23 @@ import kotlin.math.roundToInt
 
 class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
+    private companion object {
+        const val PAGE_DESKTOP = 0
+        const val PAGE_CHAT = 1
+        const val PAGE_WORKSPACE = 2
+    }
+
+
     private var _binding: FragmentMainBinding? = null
     private val binding get() = _binding!!
     private var _chatBinding: LayoutChatPageBinding? = null
     private val chatBinding get() = _chatBinding!!
     private var _workspaceBinding: LayoutWorkspacePageBinding? = null
     private val workspaceBinding get() = _workspaceBinding!!
+    private var _desktopBinding: LayoutDesktopPageBinding? = null
+    private val desktopBinding get() = _desktopBinding!!
     private var isInputActive = false
-    private var currentPagerPage = 0
+    private var currentPagerPage = PAGE_CHAT
     private var pagerCallback: ViewPager2.OnPageChangeCallback? = null
     private var inputContainerBasePaddingBottom = 0
     private var lastImeVisible = false
@@ -129,6 +143,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     // workspace 文件树适配器
     private lateinit var workspaceFileAdapter: WorkspaceFileAdapter
+
+    // 桌面应用适配器
+    private lateinit var desktopAppAdapter: DesktopAppAdapter
 
     private var activeSessions: List<ChatSessionEntity> = emptyList()
     private var archivedSessions: List<ChatSessionEntity> = emptyList()
@@ -176,6 +193,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         _binding = FragmentMainBinding.inflate(inflater, container, false)
         _chatBinding = LayoutChatPageBinding.inflate(inflater)
         _workspaceBinding = LayoutWorkspacePageBinding.inflate(inflater)
+        _desktopBinding = LayoutDesktopPageBinding.inflate(inflater)
         return binding.root
     }
 
@@ -185,6 +203,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         setupAppBar()
         setupMainPager()
         setupWorkspacePage()
+        setupDesktopPage()
         
         // 初始化聊天 RecyclerView
         setupChatRecyclerView()
@@ -407,20 +426,23 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             (activity as? MainActivity)?.openDrawer()
         }
         binding.newChat.setOnClickListener {
-            if (currentPagerPage == 0) {
+            if (currentPagerPage == PAGE_CHAT) {
                 createNewSession()
             } else {
-                binding.mainPager.setCurrentItem(0, true)
+                binding.mainPager.setCurrentItem(PAGE_CHAT, true)
             }
         }
-        updateAppBarAction(0)
+        updateAppBarAction(PAGE_CHAT)
     }
 
     private fun setupMainPager() {
         binding.mainPager.adapter = StaticPagerAdapter(
-            listOf(chatBinding.root, workspaceBinding.root)
+            listOf(desktopBinding.root, chatBinding.root, workspaceBinding.root)
         )
-        binding.mainPager.offscreenPageLimit = 2
+        binding.mainPager.offscreenPageLimit = 3
+        // 初始页保持 chat（index = 1），桌面在左、workspace 在右
+        binding.mainPager.setCurrentItem(PAGE_CHAT, false)
+        currentPagerPage = PAGE_CHAT
 
         pagerCallback = object : ViewPager2.OnPageChangeCallback() {
             override fun onPageScrolled(
@@ -434,6 +456,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             override fun onPageSelected(position: Int) {
                 currentPagerPage = position
                 updateAppBarAction(position)
+                if (position == PAGE_DESKTOP) {
+                    refreshDesktopApps()
+                }
             }
         }
         binding.mainPager.registerOnPageChangeCallback(pagerCallback!!)
@@ -442,6 +467,50 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             updateAppBarAction(currentPagerPage)
             updateAppBarTitleSlide(currentPagerPage, 0f)
         }
+    }
+
+    private fun setupDesktopPage() {
+        desktopAppAdapter = DesktopAppAdapter { item, sourceView ->
+            openWebAppWithAnimation(item.htmlPath, sourceView)
+        }
+        desktopBinding.rvDesktopApps.apply {
+            layoutManager = GridLayoutManager(requireContext(), 4)
+            adapter = desktopAppAdapter
+            itemAnimator = null
+            setHasFixedSize(false)
+        }
+        refreshDesktopApps()
+    }
+
+    private fun refreshDesktopApps() {
+        if (!::desktopAppAdapter.isInitialized) return
+        val items = DesktopAppScanner.loadDesktopApps(requireContext())
+        desktopAppAdapter.submit(items)
+        if (_desktopBinding != null) {
+            desktopBinding.tvDesktopEmpty.visibility =
+                if (items.isEmpty()) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun openWebAppWithAnimation(htmlPath: String, sourceView: View) {
+        val file = File(htmlPath)
+        if (!file.exists()) {
+            Toast.makeText(requireContext(), "文件不存在", Toast.LENGTH_SHORT).show()
+            refreshDesktopApps()
+            return
+        }
+
+        val intent = Intent(requireContext(), VirtualAppActivity::class.java).apply {
+            putExtra(VirtualAppActivity.EXTRA_HTML_PATH, file.absolutePath)
+        }
+        val options = ActivityOptions.makeScaleUpAnimation(
+            sourceView,
+            0,
+            0,
+            sourceView.width,
+            sourceView.height
+        )
+        startActivity(intent, options.toBundle())
     }
 
     private fun setupWorkspacePage() {
@@ -672,22 +741,22 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val width = binding.titleSwitcher.width
         if (width == 0) return
 
-        val progress = when {
-            position <= 0 -> positionOffset
-            else -> 1f
-        }.coerceIn(0f, 1f)
+        val globalProgress = (position + positionOffset).coerceIn(0f, 2f)
+        applyTitleGroup(binding.desktopTitleGroup, 0, globalProgress, width)
+        applyTitleGroup(binding.chatTitleGroup, 1, globalProgress, width)
+        applyTitleGroup(binding.workspaceTitleGroup, 2, globalProgress, width)
+    }
 
-        binding.chatTitleGroup.translationX = -progress * width
-        binding.chatTitleGroup.alpha = 1f - progress
-        binding.workspaceTitleGroup.translationX = (1f - progress) * width
-        binding.workspaceTitleGroup.alpha = progress
+    private fun applyTitleGroup(view: View, index: Int, globalProgress: Float, width: Int) {
+        val delta = index - globalProgress
+        view.translationX = delta * width
+        view.alpha = (1f - kotlin.math.abs(delta)).coerceIn(0f, 1f)
     }
 
     private fun updateAppBarAction(position: Int) {
-        binding.newChat.contentDescription = if (position == 0) {
-            "新建会话"
-        } else {
-            "返回聊天"
+        binding.newChat.contentDescription = when (position) {
+            PAGE_CHAT -> "新建会话"
+            else -> "返回聊天"
         }
     }
 
@@ -714,6 +783,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             binding.mainPager.setBackgroundColor(defaultBackground)
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
+            desktopBinding.root.setBackgroundColor(defaultBackground)
             return
         }
 
@@ -732,6 +802,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             binding.mainPager.setBackgroundColor(defaultBackground)
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
+            desktopBinding.root.setBackgroundColor(defaultBackground)
             Toast.makeText(requireContext(), "壁纸读取失败，已恢复默认背景", Toast.LENGTH_SHORT).show()
             return
         }
@@ -750,6 +821,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         binding.mainPager.setBackgroundColor(Color.TRANSPARENT)
         chatBinding.root.setBackgroundColor(Color.TRANSPARENT)
         workspaceBinding.root.setBackgroundColor(Color.TRANSPARENT)
+        desktopBinding.root.setBackgroundColor(Color.TRANSPARENT)
     }
 
     /**
@@ -2538,6 +2610,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         super.onResume()
         viewModel.refreshActiveModel()
         refreshWorkspaceTree()
+        refreshDesktopApps()
         applyWallpaper()
     }
 
@@ -2552,6 +2625,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         binding.mainPager.adapter = null
         _workspaceBinding = null
         _chatBinding = null
+        _desktopBinding = null
         _binding = null
     }
 

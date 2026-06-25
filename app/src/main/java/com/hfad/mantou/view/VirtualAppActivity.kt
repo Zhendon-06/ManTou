@@ -14,6 +14,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import com.hfad.mantou.R
 import com.hfad.mantou.databinding.VirtualappBinding
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
 import com.hfad.mantou.tool.impl.CameraPhotoHost
@@ -315,6 +316,12 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
 
     private fun sha256(bytes: ByteArray): ByteArray {
         return MessageDigest.getInstance("SHA-256").digest(bytes)
+    }
+
+    override fun finish() {
+        super.finish()
+        @Suppress("DEPRECATION")
+        overridePendingTransition(R.anim.webapp_hold, R.anim.webapp_scale_down)
     }
 
     override fun onDestroy() {
