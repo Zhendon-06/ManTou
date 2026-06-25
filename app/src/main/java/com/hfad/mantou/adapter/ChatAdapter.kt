@@ -51,11 +51,20 @@ class ChatAdapter(
     }
 
     private var appearanceSettings = AppearanceSettingsStore.Settings()
+    private var autoTextColor: Int = android.graphics.Color.BLACK
 
     fun updateAppearance(settings: AppearanceSettingsStore.Settings) {
         if (appearanceSettings == settings) return
         appearanceSettings = settings
         notifyItemRangeChanged(0, itemCount, PAYLOAD_APPEARANCE_CHANGED)
+    }
+
+    fun updateAutoTextColor(color: Int) {
+        if (autoTextColor == color) return
+        autoTextColor = color
+        if (!appearanceSettings.hasFixedTextColor) {
+            notifyItemRangeChanged(0, itemCount, PAYLOAD_APPEARANCE_CHANGED)
+        }
     }
 
     override fun getItemViewType(position: Int): Int {
@@ -271,9 +280,7 @@ class ChatAdapter(
             val context = binding.root.context
             binding.tvThinkingTitle.text = message.content.ifBlank { "正在处理" }
             binding.tvThinkingTitle.textSize = appearanceSettings.chatTextSizeSp
-            binding.tvThinkingTitle.setTextColor(
-                fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_text_primary)
-            )
+            binding.tvThinkingTitle.setTextColor(effectiveTextColor)
             updateThinking(message.thinking)
             val animator = AnimatorInflater.loadAnimator(context, R.animator.loading_animation)
             if (animator is AnimatorSet) {
@@ -306,23 +313,23 @@ class ChatAdapter(
         val context = textView.context
         val palette = when (role) {
             RichTextRole.USER -> RichTextFormatter.Palette(
-                textColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_text_primary),
+                textColor = effectiveTextColor,
                 secondaryColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
-                accentColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_primary_dark),
+                accentColor = effectiveTextColor,
                 codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
             )
             RichTextRole.ASSISTANT -> RichTextFormatter.Palette(
-                textColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_text_primary),
+                textColor = effectiveTextColor,
                 secondaryColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
-                accentColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_primary_dark),
+                accentColor = effectiveTextColor,
                 codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
             )
             RichTextRole.THINKING -> RichTextFormatter.Palette(
-                textColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_text_secondary),
+                textColor = effectiveTextColor,
                 secondaryColor = ContextCompat.getColor(context, R.color.mt_text_muted),
-                accentColor = fixedTextColor ?: ContextCompat.getColor(context, R.color.mt_primary_dark),
+                accentColor = effectiveTextColor,
                 codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
             )
@@ -410,6 +417,7 @@ class ChatAdapter(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
+        dialog.window?.setWindowAnimations(R.style.MtDialogAnimation)
         dialog.show()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.BLACK))
         dialog.window?.setLayout(
@@ -426,9 +434,11 @@ class ChatAdapter(
         return (value * view.resources.displayMetrics.density).toInt()
     }
 
-    private val fixedTextColor: Int?
-        get() = appearanceSettings.chatTextColor.takeIf {
-            it != AppearanceSettingsStore.AUTO_TEXT_COLOR
+    private val effectiveTextColor: Int
+        get() = if (appearanceSettings.hasFixedTextColor) {
+            appearanceSettings.chatTextColor
+        } else {
+            autoTextColor
         }
 
     private enum class RichTextRole {

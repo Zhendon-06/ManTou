@@ -78,6 +78,7 @@ import com.hfad.mantou.data.repository.ProviderRepository
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
 import com.hfad.mantou.tool.impl.CameraPhotoHost
 import com.hfad.mantou.utils.AgentWorkspace
+import com.hfad.mantou.utils.AutoContrastColor
 import com.hfad.mantou.utils.ContextTokenCounter
 import com.hfad.mantou.utils.DesktopAppScanner
 import com.hfad.mantou.utils.WorkspaceNode
@@ -784,6 +785,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
             desktopBinding.root.setBackgroundColor(defaultBackground)
+            dispatchAutoTextColor(appearanceSettings, null)
             return
         }
 
@@ -803,6 +805,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
             desktopBinding.root.setBackgroundColor(defaultBackground)
+            dispatchAutoTextColor(appearanceSettings, null)
             Toast.makeText(requireContext(), "壁纸读取失败，已恢复默认背景", Toast.LENGTH_SHORT).show()
             return
         }
@@ -822,6 +825,21 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         chatBinding.root.setBackgroundColor(Color.TRANSPARENT)
         workspaceBinding.root.setBackgroundColor(Color.TRANSPARENT)
         desktopBinding.root.setBackgroundColor(Color.TRANSPARENT)
+        dispatchAutoTextColor(appearanceSettings, binding.wallpaperBackground.drawable)
+    }
+
+    private fun dispatchAutoTextColor(
+        settings: AppearanceSettingsStore.Settings,
+        wallpaperDrawable: android.graphics.drawable.Drawable?
+    ) {
+        val autoColor = AutoContrastColor.resolve(requireContext(), settings, wallpaperDrawable)
+        val effective = if (settings.hasFixedTextColor) settings.chatTextColor else autoColor
+        if (::chatAdapter.isInitialized) {
+            chatAdapter.updateAutoTextColor(autoColor)
+        }
+        if (::desktopAppAdapter.isInitialized) {
+            desktopAppAdapter.updateTextColor(effective)
+        }
     }
 
     /**
@@ -1623,6 +1641,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0f)
+            setWindowAnimations(R.style.MtDialogAnimation)
             setLayout(
                 (resources.displayMetrics.widthPixels - dp(40)).coerceAtLeast(dp(280)),
                 ViewGroup.LayoutParams.WRAP_CONTENT

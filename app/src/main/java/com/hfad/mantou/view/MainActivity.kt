@@ -31,7 +31,10 @@ class MainActivity : AppCompatActivity() {
         val mainView = findViewById<android.view.View>(R.id.main)
         ViewCompat.setOnApplyWindowInsetsListener(mainView) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(systemBars.left, systemBars.top, systemBars.right, 0)
+            // 过滤 IME 弹起/收起瞬间系统短暂回报的 0 值，避免聊天框上下抖动
+            if (systemBars.top > 0) {
+                v.setPadding(systemBars.left, systemBars.top, systemBars.right, 0)
+            }
             insets
         }
 

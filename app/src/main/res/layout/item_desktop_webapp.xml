@@ -25,7 +25,6 @@
         android:ellipsize="end"
         android:gravity="center"
         android:maxLines="2"
-        android:textColor="@color/mt_text_primary"
         android:textSize="12sp" />
 
 </LinearLayout>
