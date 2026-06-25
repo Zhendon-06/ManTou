@@ -12,70 +12,60 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
-object AppIntentDetector {
+object ErrorAnalyzer {
 
     private const val ANTHROPIC_VERSION = "2023-06-01"
-    private const val INTENT_SYSTEM_PROMPT = """你是一个意图识别助手。判断用户的消息是否想要生成一个网页应用（app/小程序/网页/工具/计算器/游戏等）。
-用户意图是"生成网页应用"时返回JSON: {"intent":"generate_app"}
-用户意图是"普通聊天/提问"时返回JSON: {"intent":"chat"}
-只返回JSON，不要返回任何其他内容。"""
+    private const val SYSTEM_PROMPT = """你是馒头 App 的错误诊断助手。下面是用户调用大模型时出现的原始报错信息。
+请用中文向普通用户解释，严格按下面两段格式输出，不要 markdown 代码块、不要多余前后缀：
+
+问题描述：<一两句话说明发生了什么>
+解决方案：<给出 1-3 条用户可执行的操作建议>"""
 
     private val gson = Gson()
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    private fun isAppGenerationByKeywords(message: String): Boolean {
-        val lower = message.lowercase()
-        val actionWords = listOf("生成", "做一个", "做个", "搞一个", "搞个", "来一个", "来个", "弄一个", "弄个", "帮我做", "创建", "制作", "帮我生成", "帮我创建", "写一个", "写个", "generate", "create", "make")
-        val appWords = listOf("app", "应用", "网页", "工具", "游戏", "小程序", "计算器", "todo", "天气", "日历", "笔记", "时钟", "秒表", "website", "web app")
-        return actionWords.any { lower.contains(it) } && appWords.any { lower.contains(it) }
-    }
-
-    suspend fun isAppGenerationIntent(config: ChatCallConfig, userMessage: String): Boolean = withContext(Dispatchers.IO) {
-        if (isAppGenerationByKeywords(userMessage)) return@withContext true
-
+    suspend fun analyze(
+        config: ChatCallConfig,
+        rawError: String,
+        scene: String
+    ): String? = withContext(Dispatchers.IO) {
         try {
-            val builder = buildIntentRequest(config, userMessage)
-            client.newCall(builder.build()).execute().use { response ->
-                val responseBody = response.body?.string() ?: return@withContext false
-                if (!response.isSuccessful) return@withContext false
-
-                val content = parseIntentContent(responseBody, config.isAnthropic)
-                    ?: return@withContext false
-
-                content.contains("\"generate_app\"")
+            val userMessage = "场景：$scene\n原始报错：\n$rawError"
+            val request = buildRequest(config, userMessage).build()
+            client.newCall(request).execute().use { response ->
+                val body = response.body?.string() ?: return@withContext null
+                if (!response.isSuccessful) return@withContext null
+                parseContent(body, config.isAnthropic)?.takeIf { it.isNotBlank() }?.trim()
             }
         } catch (e: Exception) {
-            isAppGenerationByKeywords(userMessage)
+            null
         }
     }
 
-    private fun buildIntentRequest(
-        config: ChatCallConfig,
-        userMessage: String
-    ): Request.Builder {
+    private fun buildRequest(config: ChatCallConfig, userMessage: String): Request.Builder {
         val requestJson = if (config.isAnthropic) {
             gson.toJson(mapOf(
                 "model" to config.model,
-                "system" to INTENT_SYSTEM_PROMPT,
+                "system" to SYSTEM_PROMPT,
                 "messages" to listOf(
                     mapOf("role" to "user", "content" to userMessage)
                 ),
                 "stream" to false,
-                "max_tokens" to 400
+                "max_tokens" to 600
             ))
         } else {
             gson.toJson(mapOf(
                 "model" to config.model,
                 "messages" to listOf(
-                    mapOf("role" to "system", "content" to INTENT_SYSTEM_PROMPT),
+                    mapOf("role" to "system", "content" to SYSTEM_PROMPT),
                     mapOf("role" to "user", "content" to userMessage)
                 ),
                 "stream" to false,
-                "max_tokens" to 400
+                "max_tokens" to 600
             ))
         }
 
@@ -102,7 +92,7 @@ object AppIntentDetector {
         return builder
     }
 
-    private fun parseIntentContent(responseBody: String, isAnthropic: Boolean): String? {
+    private fun parseContent(responseBody: String, isAnthropic: Boolean): String? {
         if (!isAnthropic) {
             val chatResponse = gson.fromJson(responseBody, ChatCompletionResponse::class.java)
             return chatResponse.choices?.firstOrNull()?.message?.content

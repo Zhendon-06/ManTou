@@ -280,7 +280,9 @@ class ChatAdapter(
             val context = binding.root.context
             binding.tvThinkingTitle.text = message.content.ifBlank { "正在处理" }
             binding.tvThinkingTitle.textSize = appearanceSettings.chatTextSizeSp
-            binding.tvThinkingTitle.setTextColor(effectiveTextColor)
+            binding.tvThinkingTitle.setTextColor(
+                ContextCompat.getColor(context, R.color.mt_text_primary)
+            )
             updateThinking(message.thinking)
             val animator = AnimatorInflater.loadAnimator(context, R.animator.loading_animation)
             if (animator is AnimatorSet) {
@@ -327,9 +329,9 @@ class ChatAdapter(
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
             )
             RichTextRole.THINKING -> RichTextFormatter.Palette(
-                textColor = effectiveTextColor,
+                textColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
                 secondaryColor = ContextCompat.getColor(context, R.color.mt_text_muted),
-                accentColor = effectiveTextColor,
+                accentColor = ContextCompat.getColor(context, R.color.mt_primary_dark),
                 codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
             )
