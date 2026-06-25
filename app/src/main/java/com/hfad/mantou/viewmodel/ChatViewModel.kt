@@ -17,6 +17,7 @@ import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.ImageUtils
 import com.hfad.mantou.utils.AppIntentDetector
 import com.hfad.mantou.utils.ChatContextFormatter
+import com.hfad.mantou.utils.ErrorAnalyzer
 import com.hfad.mantou.data.preferences.ContextLimitStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -199,8 +200,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         StreamingApiService.streamChatCompletion(config, request)
             .catch { e ->
-                _errorMessage.value = "请求失败: ${e.message}"
-                removeStreamingPlaceholder()
+                handleApiError(sessionId, config, e.message ?: "未知错误", "普通聊天")
             }
             .collect { event ->
                 when (event) {
@@ -223,14 +223,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         thinkingContent.clear()
                     }
                     is StreamingApiService.StreamEvent.Error -> {
-                        _errorMessage.value = event.message
-                        val partialContent = streamingContent.toString()
-                        removeStreamingPlaceholder()
-                        if (partialContent.isNotEmpty()) {
-                            repository.addAssistantMessage(sessionId, partialContent)
-                        }
-                        streamingContent.clear()
-                        thinkingContent.clear()
+                        val partialContent = streamingContent.toString().ifEmpty { null }
+                        handleApiError(sessionId, config, event.message, "普通聊天", partialContent)
                     }
                 }
             }
@@ -261,10 +255,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             StreamingApiService.streamChatCompletion(config, request)
                 .catch { e ->
                     stopAppGenerationProgressHeartbeat()
-                    removeStreamingPlaceholder()
-                    thinkingContent.clear()
-                    repository.addAssistantMessage(sessionId, "生成失败: ${e.message}，请重试")
-                    _errorMessage.value = e.message
+                    handleApiError(sessionId, config, e.message ?: "未知错误", "生成网页应用")
                 }
                 .collect { event ->
                     when (event) {
@@ -307,28 +298,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     )
                                     _appGenerated.value = file.absolutePath
                                 } else {
-                                    removeStreamingPlaceholder()
-                                    thinkingContent.clear()
-                                    repository.addAssistantMessage(
-                                        sessionId,
-                                        "生成失败: 无法提取 HTML 内容，请重试"
-                                    )
-                                    _errorMessage.value = "无法提取 HTML 内容"
+                                    handleApiError(sessionId, config, "模型返回内容中未找到合法 HTML", "生成网页应用")
                                 }
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
-                                removeStreamingPlaceholder()
-                                thinkingContent.clear()
-                                repository.addAssistantMessage(sessionId, "生成失败: ${e.message}，请重试")
-                                _errorMessage.value = e.message
+                                handleApiError(sessionId, config, e.message ?: "保存 HTML 时出错", "生成网页应用")
                             }
                         }
                         is StreamingApiService.StreamEvent.Error -> {
                             stopAppGenerationProgressHeartbeat()
-                            removeStreamingPlaceholder()
-                            thinkingContent.clear()
-                            repository.addAssistantMessage(sessionId, "生成失败: ${event.message}，请重试")
-                            _errorMessage.value = event.message
+                            handleApiError(sessionId, config, event.message, "生成网页应用")
                         }
                         else -> {}
                     }
@@ -445,6 +424,48 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val currentList = _messages.value?.toMutableList() ?: return
         currentList.removeAll { it.messageId == STREAMING_MESSAGE_ID }
         _messages.value = currentList
+    }
+
+    private fun updateStreamingStatusText(text: String) {
+        val currentList = _messages.value?.toMutableList() ?: return
+        val index = currentList.indexOfFirst { it.messageId == STREAMING_MESSAGE_ID }
+        if (index >= 0) {
+            currentList[index] = currentList[index].copy(
+                content = text,
+                thinking = null,
+                isStreaming = true
+            )
+            _messages.value = currentList
+        }
+    }
+
+    private suspend fun handleApiError(
+        sessionId: Long,
+        config: ChatCallConfig?,
+        rawError: String,
+        scene: String,
+        partialContentToKeep: String? = null
+    ) {
+        thinkingContent.clear()
+        streamingContent.clear()
+
+        val hasPlaceholder = _messages.value?.any { it.messageId == STREAMING_MESSAGE_ID } == true
+        if (hasPlaceholder) {
+            updateStreamingStatusText("出错了，馒头正在拼命分析…")
+        } else {
+            addStreamingPlaceholder("出错了，馒头正在拼命分析…")
+        }
+
+        val analyzed = config?.let { ErrorAnalyzer.analyze(it, rawError, scene) }
+
+        removeStreamingPlaceholder()
+
+        partialContentToKeep?.takeIf { it.isNotEmpty() }?.let {
+            repository.addAssistantMessage(sessionId, it)
+        }
+
+        val finalText = analyzed ?: "出错了，请稍后重试。"
+        repository.addAssistantMessage(sessionId, finalText)
     }
 
     private fun cancelStreaming() {

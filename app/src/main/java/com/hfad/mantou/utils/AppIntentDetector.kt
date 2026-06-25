@@ -29,7 +29,7 @@ object AppIntentDetector {
 
     private fun isAppGenerationByKeywords(message: String): Boolean {
         val lower = message.lowercase()
-        val actionWords = listOf("生成", "做一个", "帮我做", "创建", "制作", "帮我生成", "帮我创建", "写一个", "generate", "create", "make")
+        val actionWords = listOf("生成", "做一个", "做个", "搞一个", "搞个", "来一个", "来个", "弄一个", "弄个", "帮我做", "创建", "制作", "帮我生成", "帮我创建", "写一个", "写个", "generate", "create", "make")
         val appWords = listOf("app", "应用", "网页", "工具", "游戏", "小程序", "计算器", "todo", "天气", "日历", "笔记", "时钟", "秒表", "website", "web app")
         return actionWords.any { lower.contains(it) } && appWords.any { lower.contains(it) }
     }
@@ -65,8 +65,7 @@ object AppIntentDetector {
                     mapOf("role" to "user", "content" to userMessage)
                 ),
                 "stream" to false,
-                "max_tokens" to 50,
-                "temperature" to 0.0
+                "max_tokens" to 400
             ))
         } else {
             gson.toJson(mapOf(
@@ -76,8 +75,7 @@ object AppIntentDetector {
                     mapOf("role" to "user", "content" to userMessage)
                 ),
                 "stream" to false,
-                "max_tokens" to 50,
-                "temperature" to 0.0
+                "max_tokens" to 400
             ))
         }
 
