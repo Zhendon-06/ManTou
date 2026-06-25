@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.hfad.mantou.data.api.ApiEndpointResolver
 import com.hfad.mantou.data.api.ChatCallConfig
+import com.hfad.mantou.data.logging.ApiLoggingInterceptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -26,6 +27,7 @@ object ErrorAnalyzer {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
+        .addInterceptor(ApiLoggingInterceptor())
         .build()
 
     suspend fun analyze(

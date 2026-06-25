@@ -5,6 +5,7 @@ import android.util.Log
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.hfad.mantou.data.logging.ApiLoggingInterceptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -28,6 +29,7 @@ object VoiceTranscriptionApiService {
         .connectTimeout(60, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
+        .addInterceptor(ApiLoggingInterceptor())
         .build()
 
     suspend fun activateMimoAsr(apiKey: String): Result<VoiceInputConfig> =

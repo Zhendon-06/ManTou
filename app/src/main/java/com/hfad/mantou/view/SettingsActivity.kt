@@ -34,5 +34,8 @@ class SettingsActivity : AppCompatActivity() {
         binding.rowAppearance.setOnClickListener {
             startActivity(Intent(this, AppearanceSettingsActivity::class.java))
         }
+        binding.logpage.setOnClickListener {
+            startActivity(Intent(this, RequestLogActivity::class.java))
+        }
     }
 }
