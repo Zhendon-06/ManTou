@@ -6,6 +6,7 @@
 
 ## 主要能力
 
+
 ### 智能对话
 
 - 支持多轮上下文对话
@@ -33,6 +34,7 @@ generated_apps/
     todo_20260615_120000.html
     todo_20260615_120000.json
 ```
+
 
 ### Workspace 文件与记忆
 
@@ -104,6 +106,7 @@ window.MantouApp.storage.storageWrite(jsonContent)
 
 调用前建议先判断运行环境：
 
+
 ```js
 if (window.MantouApp && window.MantouApp.isMantouApp && window.MantouApp.isMantouApp()) {
   var raw = window.MantouApp.toast.toastShort("保存成功");
@@ -128,6 +131,7 @@ if (window.MantouApp && window.MantouApp.isMantouApp && window.MantouApp.isManto
 | `storageSet(key, valueJson)` | 写入根对象字段 |
 | `storageRemove(key)` | 删除根对象字段 |
 | `storageClear()` | 清空为 `{}` |
+
 
 示例：
 
