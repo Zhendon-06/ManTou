@@ -49,6 +49,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLoading = MutableLiveData(false)
     val isLoading: LiveData<Boolean> = _isLoading
 
+    private val _runningSessionIds = MutableLiveData<Set<Long>>(emptySet())
+    val runningSessionIds: LiveData<Set<Long>> = _runningSessionIds
+
     private val _isGeneratingApp = MutableLiveData(false)
     val isGeneratingApp: LiveData<Boolean> = _isGeneratingApp
 
@@ -64,16 +67,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _noModelConfigured = MutableLiveData(false)
     val noModelConfigured: LiveData<Boolean> = _noModelConfigured
 
-    private var streamingJob: Job? = null
     private var messagesJob: Job? = null
-    private var appGenerationProgressJob: Job? = null
-    private var streamingContent = StringBuilder()
-    private var thinkingContent = StringBuilder()
-    private val STREAMING_MESSAGE_ID = -1L
+    private val streamingStates = mutableMapOf<Long, StreamingSessionState>()
     private val APP_GENERATION_PROGRESS_INTERVAL_MS = 1_500L
     private val STREAMING_UI_UPDATE_INTERVAL_MS = 120L
-    private var lastStreamingContentUpdateAt = 0L
-    private var lastStreamingThinkingUpdateAt = 0L
 
     init {
         AgentWorkspace.ensureWorkspace(application)
@@ -88,21 +85,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun createEmptySession() {
-        cancelStreaming()
         messagesJob?.cancel()
         viewModelScope.launch {
             val sessionId = repository.createSession("新会话")
             _currentSessionId.value = sessionId
             _messages.value = emptyList()
             loadMessages(sessionId)
+            updateSessionLoadingIndicators()
         }
     }
 
     fun switchToSession(sessionId: Long) {
-        cancelStreaming()
         messagesJob?.cancel()
         _currentSessionId.value = sessionId
         loadMessages(sessionId)
+        updateSessionLoadingIndicators()
     }
 
     private fun loadMessages(sessionId: Long) {
@@ -110,17 +107,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             repository.getMessagesBySessionId(sessionId).collect { entities ->
                 if (_currentSessionId.value == sessionId) {
                     val dbMessages = entities.map { it.toChatMessage() }
-
-                    val currentList = _messages.value
-                    val streamingMessage = currentList?.find { it.messageId == STREAMING_MESSAGE_ID }
-
-                    _messages.value = if (streamingMessage != null) {
-                        dbMessages + streamingMessage
-                    } else {
-                        dbMessages
-                    }
+                    publishMessages(sessionId, dbMessages)
                 }
             }
+        }
+    }
+
+    private fun publishMessages(sessionId: Long, dbMessages: List<ChatMessage>) {
+        val streamingMessage = streamingStates[sessionId]?.placeholder
+        _messages.value = if (streamingMessage != null) {
+            dbMessages + streamingMessage
+        } else {
+            dbMessages
         }
     }
 
@@ -130,12 +128,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        cancelStreaming(resetLoading = false)
+        cancelStreaming(sessionId)
+        val state = StreamingSessionState(sessionId)
+        streamingStates[sessionId] = state
+        updateSessionLoadingIndicators()
 
-        streamingJob = viewModelScope.launch {
-            _isLoading.value = true
+        state.job = viewModelScope.launch {
             _errorMessage.value = null
-            streamingContent.clear()
+            state.streamingContent.clear()
             try {
                 withContext(Dispatchers.IO) {
                     AgentWorkspace.appendExplicitMemoryIfNeeded(getApplication(), content)
@@ -172,18 +172,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 if (isAppIntent) {
-                    generateAppFlow(sessionId, config, content)
+                    generateAppFlow(state, config, content)
                 } else {
-                    normalChatFlow(sessionId, config, imageBase64List)
+                    normalChatFlow(state, config, imageBase64List)
                 }
 
             } finally {
-                _isLoading.value = false
+                finishStreamingState(state)
             }
         }
     }
 
-    private suspend fun normalChatFlow(sessionId: Long, config: ChatCallConfig, imageBase64List: List<String>) {
+    private suspend fun normalChatFlow(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        imageBase64List: List<String>
+    ) {
+        val sessionId = state.sessionId
         val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
         val systemPrompt = withContext(Dispatchers.IO) {
             AgentWorkspace.buildSystemPrompt(getApplication())
@@ -196,47 +201,54 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             stream = true
         )
 
-        thinkingContent.clear()
-        addStreamingPlaceholder("正在思考")
+        state.thinkingContent.clear()
+        addStreamingPlaceholder(state, "正在思考")
 
         StreamingApiService.streamChatCompletion(config, request)
             .catch { e ->
-                handleApiError(sessionId, config, e.message ?: "未知错误", "普通聊天")
+                if (e is CancellationException) throw e
+                handleApiError(state, config, e.message ?: "未知错误", "普通聊天")
             }
             .collect { event ->
                 when (event) {
                     is StreamingApiService.StreamEvent.Start -> {}
                     is StreamingApiService.StreamEvent.Thinking -> {
-                        thinkingContent.append(event.text)
-                        updateStreamingThinking(thinkingContent.toString())
+                        state.thinkingContent.append(event.text)
+                        updateStreamingThinking(state, state.thinkingContent.toString())
                     }
                     is StreamingApiService.StreamEvent.Content -> {
-                        streamingContent.append(event.text)
-                        updateStreamingMessage(streamingContent.toString())
+                        state.streamingContent.append(event.text)
+                        updateStreamingMessage(state, state.streamingContent.toString())
                     }
                     is StreamingApiService.StreamEvent.Done -> {
-                        val finalContent = streamingContent.toString()
-                        removeStreamingPlaceholder()
+                        val finalContent = state.streamingContent.toString()
+                        removeStreamingPlaceholder(state)
                         if (finalContent.isNotEmpty()) {
                             repository.addAssistantMessage(sessionId, finalContent)
                         }
-                        streamingContent.clear()
-                        thinkingContent.clear()
+                        state.streamingContent.clear()
+                        state.thinkingContent.clear()
                     }
                     is StreamingApiService.StreamEvent.Error -> {
-                        val partialContent = streamingContent.toString().ifEmpty { null }
-                        handleApiError(sessionId, config, event.message, "普通聊天", partialContent)
+                        val partialContent = state.streamingContent.toString().ifEmpty { null }
+                        handleApiError(state, config, event.message, "普通聊天", partialContent)
                     }
                 }
             }
     }
 
-    private suspend fun generateAppFlow(sessionId: Long, config: ChatCallConfig, userMessage: String) {
-        _isGeneratingApp.value = true
+    private suspend fun generateAppFlow(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        userMessage: String
+    ) {
+        val sessionId = state.sessionId
+        state.isGeneratingApp = true
+        updateSessionLoadingIndicators()
         try {
-            thinkingContent.clear()
-            addStreamingPlaceholder("正在生成应用")
-            updateStreamingThinking(buildAppGenerationProgressText(elapsedSeconds = 0, receivedChars = 0))
+            state.thinkingContent.clear()
+            addStreamingPlaceholder(state, "正在生成应用")
+            updateStreamingThinking(state, buildAppGenerationProgressText(elapsedSeconds = 0, receivedChars = 0))
 
             val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
             val apiMessages = buildApiMessages(
@@ -251,23 +263,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
 
             val htmlBuffer = StringBuilder()
-            startAppGenerationProgressHeartbeat(htmlBuffer)
+            startAppGenerationProgressHeartbeat(state, htmlBuffer)
 
             StreamingApiService.streamChatCompletion(config, request)
                 .catch { e ->
-                    stopAppGenerationProgressHeartbeat()
-                    handleApiError(sessionId, config, e.message ?: "未知错误", "生成网页应用")
+                    if (e is CancellationException) throw e
+                    stopAppGenerationProgressHeartbeat(state)
+                    handleApiError(state, config, e.message ?: "未知错误", "生成网页应用")
                 }
                 .collect { event ->
                     when (event) {
                         is StreamingApiService.StreamEvent.Thinking -> {
-                            thinkingContent.append(event.text)
-                            updateStreamingThinking(thinkingContent.toString())
+                            state.thinkingContent.append(event.text)
+                            updateStreamingThinking(state, state.thinkingContent.toString())
                         }
                         is StreamingApiService.StreamEvent.Content -> {
                             htmlBuffer.append(event.text)
-                            if (thinkingContent.isBlank()) {
+                            if (state.thinkingContent.isBlank()) {
                                 updateStreamingThinking(
+                                    state,
                                     buildAppGenerationProgressText(
                                         elapsedSeconds = null,
                                         receivedChars = htmlBuffer.length
@@ -276,9 +290,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                         is StreamingApiService.StreamEvent.Done -> {
-                            stopAppGenerationProgressHeartbeat()
-                            if (thinkingContent.isBlank()) {
+                            stopAppGenerationProgressHeartbeat(state)
+                            if (state.thinkingContent.isBlank()) {
                                 updateStreamingThinking(
+                                    state,
                                     "模型已返回代码内容\n正在整理 HTML 并写入本地文件..."
                                 )
                             }
@@ -290,8 +305,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     val file = withContext(Dispatchers.IO) {
                                         AppGenerator.saveHtmlFile(getApplication(), htmlContent, userMessage)
                                     }
-                                    removeStreamingPlaceholder()
-                                    thinkingContent.clear()
+                                    removeStreamingPlaceholder(state)
+                                    state.thinkingContent.clear()
                                     repository.addAssistantMessage(
                                         sessionId,
                                         "已为你生成网页应用，点击下方预览或全屏查看 👇",
@@ -299,34 +314,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     )
                                     _appGenerated.value = file.absolutePath
                                 } else {
-                                    handleApiError(sessionId, config, "模型返回内容中未找到合法 HTML", "生成网页应用")
+                                    handleApiError(state, config, "模型返回内容中未找到合法 HTML", "生成网页应用")
                                 }
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
-                                handleApiError(sessionId, config, e.message ?: "保存 HTML 时出错", "生成网页应用")
+                                handleApiError(state, config, e.message ?: "保存 HTML 时出错", "生成网页应用")
                             }
                         }
                         is StreamingApiService.StreamEvent.Error -> {
-                            stopAppGenerationProgressHeartbeat()
-                            handleApiError(sessionId, config, event.message, "生成网页应用")
+                            stopAppGenerationProgressHeartbeat(state)
+                            handleApiError(state, config, event.message, "生成网页应用")
                         }
                         else -> {}
                     }
                 }
         } finally {
-            stopAppGenerationProgressHeartbeat()
-            _isGeneratingApp.value = false
+            stopAppGenerationProgressHeartbeat(state)
+            state.isGeneratingApp = false
+            updateSessionLoadingIndicators()
         }
     }
 
-    private fun startAppGenerationProgressHeartbeat(htmlBuffer: StringBuilder) {
-        stopAppGenerationProgressHeartbeat()
-        appGenerationProgressJob = viewModelScope.launch {
+    private fun startAppGenerationProgressHeartbeat(
+        state: StreamingSessionState,
+        htmlBuffer: StringBuilder
+    ) {
+        stopAppGenerationProgressHeartbeat(state)
+        state.appGenerationProgressJob = viewModelScope.launch {
             val startedAt = System.currentTimeMillis()
             while (isActive) {
-                if (thinkingContent.isBlank()) {
+                if (state.thinkingContent.isBlank()) {
                     val elapsedSeconds = ((System.currentTimeMillis() - startedAt) / 1000).toInt()
                     updateStreamingThinking(
+                        state,
                         buildAppGenerationProgressText(
                             elapsedSeconds = elapsedSeconds,
                             receivedChars = htmlBuffer.length
@@ -338,9 +358,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun stopAppGenerationProgressHeartbeat() {
-        appGenerationProgressJob?.cancel()
-        appGenerationProgressJob = null
+    private fun stopAppGenerationProgressHeartbeat(state: StreamingSessionState) {
+        state.appGenerationProgressJob?.cancel()
+        state.appGenerationProgressJob = null
     }
 
     private fun buildAppGenerationProgressText(
@@ -362,104 +382,117 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return listOf(elapsedLine, stageLine, receivedLine).joinToString("\n")
     }
 
-    private fun addStreamingPlaceholder(status: String) {
-        lastStreamingContentUpdateAt = 0L
-        lastStreamingThinkingUpdateAt = 0L
-        val currentList = _messages.value?.toMutableList() ?: mutableListOf()
-        currentList.add(ChatMessage(
-            messageId = STREAMING_MESSAGE_ID,
+    private fun addStreamingPlaceholder(state: StreamingSessionState, status: String) {
+        state.lastStreamingContentUpdateAt = 0L
+        state.lastStreamingThinkingUpdateAt = 0L
+        state.placeholder = ChatMessage(
+            messageId = streamingMessageId(state.sessionId),
             role = ChatMessage.ROLE_ASSISTANT,
             content = status,
             isStreaming = true,
             thinking = null
-        ))
-        _messages.value = currentList
+        )
+        publishStreamingPlaceholder(state)
     }
 
-    private fun updateStreamingThinking(thinking: String, force: Boolean = false) {
-        if (!force && !shouldUpdateStreamingThinking()) return
-        val currentList = _messages.value?.toMutableList() ?: return
-        val index = currentList.indexOfFirst { it.messageId == STREAMING_MESSAGE_ID }
-        if (index >= 0 && currentList[index].isStreaming) {
-            currentList[index] = currentList[index].copy(thinking = thinking)
-            _messages.value = currentList
+    private fun updateStreamingThinking(
+        state: StreamingSessionState,
+        thinking: String,
+        force: Boolean = false
+    ) {
+        if (!force && !shouldUpdateStreamingThinking(state)) return
+        val placeholder = state.placeholder ?: return
+        if (placeholder.isStreaming) {
+            state.placeholder = placeholder.copy(thinking = thinking)
+            publishStreamingPlaceholder(state)
         }
     }
 
-    private fun updateStreamingMessage(content: String, force: Boolean = false) {
-        if (!force && !shouldUpdateStreamingContent()) return
-        val currentList = _messages.value?.toMutableList() ?: return
-        val index = currentList.indexOfFirst { it.messageId == STREAMING_MESSAGE_ID }
-        if (index >= 0) {
-            currentList[index] = currentList[index].copy(
-                content = content,
-                isStreaming = false
-            )
-            _messages.value = currentList
-        }
+    private fun updateStreamingMessage(
+        state: StreamingSessionState,
+        content: String,
+        force: Boolean = false
+    ) {
+        if (!force && !shouldUpdateStreamingContent(state)) return
+        val placeholder = state.placeholder ?: return
+        state.placeholder = placeholder.copy(
+            content = content,
+            isStreaming = false
+        )
+        publishStreamingPlaceholder(state)
     }
 
-    private fun shouldUpdateStreamingContent(): Boolean {
+    private fun shouldUpdateStreamingContent(state: StreamingSessionState): Boolean {
         val now = System.currentTimeMillis()
-        if (lastStreamingContentUpdateAt == 0L ||
-            now - lastStreamingContentUpdateAt >= STREAMING_UI_UPDATE_INTERVAL_MS) {
-            lastStreamingContentUpdateAt = now
+        if (state.lastStreamingContentUpdateAt == 0L ||
+            now - state.lastStreamingContentUpdateAt >= STREAMING_UI_UPDATE_INTERVAL_MS) {
+            state.lastStreamingContentUpdateAt = now
             return true
         }
         return false
     }
 
-    private fun shouldUpdateStreamingThinking(): Boolean {
+    private fun shouldUpdateStreamingThinking(state: StreamingSessionState): Boolean {
         val now = System.currentTimeMillis()
-        if (lastStreamingThinkingUpdateAt == 0L ||
-            now - lastStreamingThinkingUpdateAt >= STREAMING_UI_UPDATE_INTERVAL_MS) {
-            lastStreamingThinkingUpdateAt = now
+        if (state.lastStreamingThinkingUpdateAt == 0L ||
+            now - state.lastStreamingThinkingUpdateAt >= STREAMING_UI_UPDATE_INTERVAL_MS) {
+            state.lastStreamingThinkingUpdateAt = now
             return true
         }
         return false
     }
 
-    private fun removeStreamingPlaceholder() {
-        lastStreamingContentUpdateAt = 0L
-        lastStreamingThinkingUpdateAt = 0L
-        val currentList = _messages.value?.toMutableList() ?: return
-        currentList.removeAll { it.messageId == STREAMING_MESSAGE_ID }
+    private fun publishStreamingPlaceholder(state: StreamingSessionState) {
+        if (_currentSessionId.value != state.sessionId) return
+        val placeholder = state.placeholder ?: return
+        val currentList = _messages.value?.toMutableList() ?: mutableListOf()
+        currentList.removeAll { it.messageId == placeholder.messageId }
+        currentList.add(placeholder)
         _messages.value = currentList
     }
 
-    private fun updateStreamingStatusText(text: String) {
+    private fun removeStreamingPlaceholder(state: StreamingSessionState) {
+        val messageId = state.placeholder?.messageId ?: streamingMessageId(state.sessionId)
+        state.lastStreamingContentUpdateAt = 0L
+        state.lastStreamingThinkingUpdateAt = 0L
+        state.placeholder = null
+        if (_currentSessionId.value != state.sessionId) return
         val currentList = _messages.value?.toMutableList() ?: return
-        val index = currentList.indexOfFirst { it.messageId == STREAMING_MESSAGE_ID }
-        if (index >= 0) {
-            currentList[index] = currentList[index].copy(
-                content = text,
-                thinking = null,
-                isStreaming = true
-            )
-            _messages.value = currentList
-        }
+        currentList.removeAll { it.messageId == messageId }
+        _messages.value = currentList
+    }
+
+    private fun updateStreamingStatusText(state: StreamingSessionState, text: String) {
+        val placeholder = state.placeholder ?: return
+        state.placeholder = placeholder.copy(
+            content = text,
+            thinking = null,
+            isStreaming = true
+        )
+        publishStreamingPlaceholder(state)
     }
 
     private suspend fun handleApiError(
-        sessionId: Long,
+        state: StreamingSessionState,
         config: ChatCallConfig?,
         rawError: String,
         scene: String,
         partialContentToKeep: String? = null
     ) {
-        thinkingContent.clear()
-        streamingContent.clear()
+        val sessionId = state.sessionId
+        state.thinkingContent.clear()
+        state.streamingContent.clear()
 
-        val hasPlaceholder = _messages.value?.any { it.messageId == STREAMING_MESSAGE_ID } == true
+        val hasPlaceholder = state.placeholder != null
         if (hasPlaceholder) {
-            updateStreamingStatusText("出错了，馒头正在拼命分析…")
+            updateStreamingStatusText(state, "出错了，馒头正在拼命分析…")
         } else {
-            addStreamingPlaceholder("出错了，馒头正在拼命分析…")
+            addStreamingPlaceholder(state, "出错了，馒头正在拼命分析…")
         }
 
         val analyzed = config?.let { ErrorAnalyzer.analyze(it, rawError, scene) }
 
-        removeStreamingPlaceholder()
+        removeStreamingPlaceholder(state)
 
         partialContentToKeep?.takeIf { it.isNotEmpty() }?.let {
             repository.addAssistantMessage(sessionId, it)
@@ -470,22 +503,48 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopStreaming() {
-        cancelStreaming()
+        _currentSessionId.value?.let { cancelStreaming(it) }
     }
 
-    private fun cancelStreaming(resetLoading: Boolean = true) {
-        streamingJob?.cancel()
-        streamingJob = null
-        if (resetLoading) {
-            _isLoading.value = false
+    private fun cancelStreaming(sessionId: Long) {
+        val state = streamingStates.remove(sessionId) ?: return
+        state.job?.cancel()
+        state.job = null
+        stopAppGenerationProgressHeartbeat(state)
+        state.isGeneratingApp = false
+        state.streamingContent.clear()
+        state.thinkingContent.clear()
+        removeStreamingPlaceholder(state)
+        updateSessionLoadingIndicators()
+    }
+
+    private fun cancelAllStreaming() {
+        streamingStates.keys.toList().forEach { sessionId ->
+            cancelStreaming(sessionId)
         }
-        stopAppGenerationProgressHeartbeat()
-        _isGeneratingApp.value = false
-        lastStreamingContentUpdateAt = 0L
-        lastStreamingThinkingUpdateAt = 0L
-        streamingContent.clear()
-        thinkingContent.clear()
-        removeStreamingPlaceholder()
+    }
+
+    private fun finishStreamingState(state: StreamingSessionState) {
+        stopAppGenerationProgressHeartbeat(state)
+        state.isGeneratingApp = false
+        if (streamingStates[state.sessionId] === state) {
+            streamingStates.remove(state.sessionId)
+            state.streamingContent.clear()
+            state.thinkingContent.clear()
+            removeStreamingPlaceholder(state)
+            updateSessionLoadingIndicators()
+        }
+    }
+
+    private fun updateSessionLoadingIndicators() {
+        val runningIds = streamingStates.keys.toSet()
+        _runningSessionIds.value = runningIds
+        _isLoading.value = _currentSessionId.value?.let { it in runningIds } == true
+        _isGeneratingApp.value = streamingStates.values.any { it.isGeneratingApp }
+    }
+
+    private fun streamingMessageId(sessionId: Long): Long {
+        return -sessionId.coerceAtLeast(1L)
     }
 
     private fun createNewSessionAndSendMessage(content: String, imagePath: String?, imageUris: List<Uri>?) {
@@ -552,6 +611,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteSession(sessionId: Long) {
+        cancelStreaming(sessionId)
         viewModelScope.launch {
             repository.deleteSession(sessionId)
             if (_currentSessionId.value == sessionId) {
@@ -583,6 +643,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun deleteAllSessions() {
+        cancelAllStreaming()
         viewModelScope.launch {
             repository.deleteAllSessions()
             _currentSessionId.value = null
@@ -591,9 +652,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearCurrentSession() {
-        cancelStreaming()
+        _currentSessionId.value?.let { cancelStreaming(it) }
         _currentSessionId.value = null
         _messages.value = emptyList()
+        updateSessionLoadingIndicators()
     }
 
     fun clearError() {
@@ -610,10 +672,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
-        cancelStreaming()
+        cancelAllStreaming()
         messagesJob?.cancel()
     }
 }
+
+private data class StreamingSessionState(
+    val sessionId: Long,
+    var job: Job? = null,
+    var appGenerationProgressJob: Job? = null,
+    var placeholder: ChatMessage? = null,
+    val streamingContent: StringBuilder = StringBuilder(),
+    val thinkingContent: StringBuilder = StringBuilder(),
+    var isGeneratingApp: Boolean = false,
+    var lastStreamingContentUpdateAt: Long = 0L,
+    var lastStreamingThinkingUpdateAt: Long = 0L
+)
 
 private fun ChatMessageEntity.toChatMessage() = ChatMessage(
     messageId = messageId,

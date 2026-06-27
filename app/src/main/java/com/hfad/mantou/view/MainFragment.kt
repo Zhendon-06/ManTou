@@ -150,6 +150,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private var activeSessions: List<ChatSessionEntity> = emptyList()
     private var archivedSessions: List<ChatSessionEntity> = emptyList()
+    private var runningSessionIds: Set<Long> = emptySet()
     private var drawerSearchQuery: String = ""
     private var showArchivedSessions: Boolean = false
 
@@ -967,6 +968,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         archiveButton?.imageTintList = ColorStateList.valueOf(accentColor)
         archiveButton?.contentDescription = if (showArchivedSessions) "返回最近对话" else "查看归档"
 
+        sessionAdapter.setRunningSessionIds(runningSessionIds)
         sessionAdapter.submitList(visibleSessions)
     }
 
@@ -1312,6 +1314,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             updateSendButtonState(isLoading)
         }
 
+        viewModel.runningSessionIds.observe(viewLifecycleOwner) { sessionIds ->
+            runningSessionIds = sessionIds
+            if (::sessionAdapter.isInitialized) {
+                sessionAdapter.setRunningSessionIds(sessionIds)
+            }
+            val currentSessionId = viewModel.currentSessionId.value
+            updateSendButtonState(currentSessionId != null && currentSessionId in sessionIds)
+        }
+
         viewModel.isGeneratingApp.observe(viewLifecycleOwner) { isGeneratingApp ->
             setKeepScreenOn(isGeneratingApp)
         }
@@ -1328,6 +1339,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         viewModel.currentSessionId.observe(viewLifecycleOwner) { sessionId ->
             pendingMessagesWhileScrolling = null
             forceScrollToLatestMessage = true
+            updateSendButtonState(sessionId != null && sessionId in runningSessionIds)
             // 可以在这里更新 UI，显示当前会话信息
         }
 

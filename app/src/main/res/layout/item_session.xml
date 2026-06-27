@@ -19,9 +19,23 @@
         android:maxLines="1"
         android:ellipsize="end"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/progressSessionLoading"
         app:layout_constraintTop_toTopOf="parent"
         tools:text="你好，请介绍一下自己" />
+
+    <ProgressBar
+        android:id="@+id/progressSessionLoading"
+        style="?android:attr/progressBarStyleSmall"
+        android:layout_width="18dp"
+        android:layout_height="18dp"
+        android:layout_marginStart="10dp"
+        android:indeterminate="true"
+        android:indeterminateTint="@color/mt_primary"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@id/tvSessionTitle"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="@id/tvSessionTitle"
+        tools:visibility="visible" />
 
     <!-- 创建时间 -->
     <TextView
