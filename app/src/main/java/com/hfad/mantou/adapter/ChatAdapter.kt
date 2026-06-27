@@ -53,6 +53,11 @@ class ChatAdapter(
     private var appearanceSettings = AppearanceSettingsStore.Settings()
     private var autoTextColor: Int = android.graphics.Color.BLACK
 
+    init {
+        setHasStableIds(true)
+        stateRestorationPolicy = RecyclerView.Adapter.StateRestorationPolicy.PREVENT_WHEN_EMPTY
+    }
+
     fun updateAppearance(settings: AppearanceSettingsStore.Settings) {
         if (appearanceSettings == settings) return
         appearanceSettings = settings
@@ -75,6 +80,11 @@ class ChatAdapter(
             message.role == ChatMessage.ROLE_ASSISTANT -> VIEW_TYPE_ASSISTANT
             else -> VIEW_TYPE_ASSISTANT
         }
+    }
+
+    override fun getItemId(position: Int): Long {
+        val id = getItem(position).messageId
+        return if (id == RecyclerView.NO_ID) Long.MIN_VALUE else id
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
