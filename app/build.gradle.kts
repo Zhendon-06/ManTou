@@ -15,8 +15,8 @@ android {
         applicationId = "com.hfad.mantou"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "2.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
