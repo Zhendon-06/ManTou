@@ -181,11 +181,11 @@
 
                         <ImageButton
                             android:id="@+id/ivSend"
-                            android:layout_width="36dp"
-                            android:layout_height="36dp"
+                            android:layout_width="27dp"
+                            android:layout_height="27dp"
                             android:background="@drawable/bg_send_circle"
                             android:contentDescription="发送"
-                            android:padding="9dp"
+                            android:padding="5dp"
                             android:scaleType="centerInside"
                             android:src="@drawable/ic_send_up" />
                     </LinearLayout>

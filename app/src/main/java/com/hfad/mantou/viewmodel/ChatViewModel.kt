@@ -130,55 +130,56 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        cancelStreaming()
+        cancelStreaming(resetLoading = false)
 
         streamingJob = viewModelScope.launch {
             _isLoading.value = true
             _errorMessage.value = null
             streamingContent.clear()
-
-            withContext(Dispatchers.IO) {
-                AgentWorkspace.appendExplicitMemoryIfNeeded(getApplication(), content)
-            }
-
-            val config = resolveActiveChatConfig()
-            if (config == null) {
-                _noModelConfigured.value = true
-                _isLoading.value = false
-                return@launch
-            }
-
-            _activeModelName.value = config.model
-
-            val imageBase64List = mutableListOf<String>()
-            val finalImagePath = imagePath ?: imageUris?.firstOrNull()?.toString()
-
-            withContext(Dispatchers.IO) {
-                val urisToProcess = imageUris?.take(ApiConfig.MAX_IMAGE_COUNT)
-                    ?: listOfNotNull(imagePath?.let { Uri.parse(it) })
-
-                urisToProcess.forEach { uri ->
-                    ImageUtils.uriToBase64(getApplication(), uri)?.let { imageBase64List.add(it) }
+            try {
+                withContext(Dispatchers.IO) {
+                    AgentWorkspace.appendExplicitMemoryIfNeeded(getApplication(), content)
                 }
+
+                val config = resolveActiveChatConfig()
+                if (config == null) {
+                    _noModelConfigured.value = true
+                    return@launch
+                }
+
+                _activeModelName.value = config.model
+
+                val imageBase64List = mutableListOf<String>()
+                val finalImagePath = imagePath ?: imageUris?.firstOrNull()?.toString()
+
+                withContext(Dispatchers.IO) {
+                    val urisToProcess = imageUris?.take(ApiConfig.MAX_IMAGE_COUNT)
+                        ?: listOfNotNull(imagePath?.let { Uri.parse(it) })
+
+                    urisToProcess.forEach { uri ->
+                        ImageUtils.uriToBase64(getApplication(), uri)?.let { imageBase64List.add(it) }
+                    }
+                }
+
+                repository.sendUserMessage(sessionId, content, finalImagePath)
+
+                if (repository.getMessageCount(sessionId) == 1) {
+                    repository.updateSessionTitle(sessionId, content.ifEmpty { "[图片]" })
+                }
+
+                val isAppIntent = withContext(Dispatchers.IO) {
+                    AppIntentDetector.isAppGenerationIntent(config, content)
+                }
+
+                if (isAppIntent) {
+                    generateAppFlow(sessionId, config, content)
+                } else {
+                    normalChatFlow(sessionId, config, imageBase64List)
+                }
+
+            } finally {
+                _isLoading.value = false
             }
-
-            repository.sendUserMessage(sessionId, content, finalImagePath)
-
-            if (repository.getMessageCount(sessionId) == 1) {
-                repository.updateSessionTitle(sessionId, content.ifEmpty { "[图片]" })
-            }
-
-            val isAppIntent = withContext(Dispatchers.IO) {
-                AppIntentDetector.isAppGenerationIntent(config, content)
-            }
-
-            if (isAppIntent) {
-                generateAppFlow(sessionId, config, content)
-            } else {
-                normalChatFlow(sessionId, config, imageBase64List)
-            }
-
-            _isLoading.value = false
         }
     }
 
@@ -468,9 +469,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         repository.addAssistantMessage(sessionId, finalText)
     }
 
-    private fun cancelStreaming() {
+    fun stopStreaming() {
+        cancelStreaming()
+    }
+
+    private fun cancelStreaming(resetLoading: Boolean = true) {
         streamingJob?.cancel()
         streamingJob = null
+        if (resetLoading) {
+            _isLoading.value = false
+        }
         stopAppGenerationProgressHeartbeat()
         _isGeneratingApp.value = false
         lastStreamingContentUpdateAt = 0L

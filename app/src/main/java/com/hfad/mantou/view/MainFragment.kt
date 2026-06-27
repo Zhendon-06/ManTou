@@ -2573,23 +2573,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun updateSendButtonState(taskRunning: Boolean) {
         isTaskRunning = taskRunning
-        val enabled = !taskRunning
-        val backgroundColor = if (enabled) {
-            Color.rgb(44, 131, 216)
-        } else {
-            Color.rgb(209, 229, 255)
-        }
-        val iconColor = if (enabled) {
-            Color.WHITE
-        } else {
-            Color.argb(185, 255, 255, 255)
-        }
+        val backgroundColor = Color.rgb(44, 131, 216)
+        val iconRes = if (taskRunning) R.drawable.ic_stop_square else R.drawable.ic_send_up
 
-        chatBinding.ivSend.isEnabled = enabled
-        chatBinding.ivSend.isClickable = enabled
+        chatBinding.ivSend.isEnabled = true
+        chatBinding.ivSend.isClickable = true
         chatBinding.ivSend.backgroundTintList = ColorStateList.valueOf(backgroundColor)
-        chatBinding.ivSend.imageTintList = ColorStateList.valueOf(iconColor)
-        chatBinding.ivSend.contentDescription = if (enabled) "发送" else "正在处理，暂不可发送"
+        chatBinding.ivSend.setImageResource(iconRes)
+        chatBinding.ivSend.imageTintList = ColorStateList.valueOf(Color.WHITE)
+        chatBinding.ivSend.contentDescription = if (taskRunning) "停止请求" else "发送"
     }
 
     /**
@@ -2597,6 +2589,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
      */
     private fun sendMessage() {
         if (isTaskRunning) {
+            viewModel.stopStreaming()
             return
         }
         val text = chatBinding.etInput.text?.toString()?.trim() ?: ""
