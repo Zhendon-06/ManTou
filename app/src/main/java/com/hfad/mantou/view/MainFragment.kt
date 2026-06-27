@@ -356,7 +356,20 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val messageCount = chatAdapter.itemCount
         if (messageCount <= 0) return
         chatBinding.rvChat.post {
-            chatBinding.rvChat.scrollToPosition(messageCount - 1)
+            scrollChatByRemainingDistanceToBottom()
+            chatBinding.rvChat.post {
+                scrollChatByRemainingDistanceToBottom()
+            }
+        }
+    }
+
+    private fun scrollChatByRemainingDistanceToBottom() {
+        val rvChat = chatBinding.rvChat
+        val distanceToBottom = rvChat.computeVerticalScrollRange() -
+                rvChat.computeVerticalScrollOffset() -
+                rvChat.computeVerticalScrollExtent()
+        if (distanceToBottom > 0) {
+            rvChat.scrollBy(0, distanceToBottom)
         }
     }
 
@@ -400,14 +413,19 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val position = layoutManager.findFirstVisibleItemPosition()
         if (position == RecyclerView.NO_POSITION) return null
         val view = layoutManager.findViewByPosition(position) ?: return null
-        return ChatViewportAnchor(position, view.top - chatBinding.rvChat.paddingTop)
+        val messageId = chatAdapter.currentList.getOrNull(position)?.messageId
+        return ChatViewportAnchor(messageId, position, view.top - chatBinding.rvChat.paddingTop)
     }
 
     private fun restoreChatViewportAnchor(anchor: ChatViewportAnchor) {
         val layoutManager = chatBinding.rvChat.layoutManager as? LinearLayoutManager ?: return
         val lastPosition = (chatAdapter.itemCount - 1).coerceAtLeast(0)
+        val anchoredPosition = anchor.messageId
+            ?.let { messageId -> chatAdapter.currentList.indexOfFirst { it.messageId == messageId } }
+            ?.takeIf { it != -1 }
+            ?: anchor.position
         layoutManager.scrollToPositionWithOffset(
-            anchor.position.coerceAtMost(lastPosition),
+            anchoredPosition.coerceIn(0, lastPosition),
             anchor.topOffset
         )
     }
@@ -2663,6 +2681,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private data class ChatViewportAnchor(
+        val messageId: Long?,
         val position: Int,
         val topOffset: Int
     )
