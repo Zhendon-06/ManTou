@@ -113,6 +113,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var pagerCallback: ViewPager2.OnPageChangeCallback? = null
     private var inputContainerBasePaddingBottom = 0
     private var lastImeVisible = false
+    private var lastSystemBarBottomInset = 0
     private var lastAppliedBottomInset = Int.MIN_VALUE
     private var currentContextTokens = 0
     private var cachedChatSystemPrompt: String? = null
@@ -307,6 +308,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private fun initInsets() {
         inputContainerBasePaddingBottom = chatBinding.inputContainer.paddingBottom
 
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            applyChatInsets(insets)
+            insets
+        }
         ViewCompat.setWindowInsetsAnimationCallback(
             binding.root,
             object : WindowInsetsAnimationCompat.Callback(
@@ -328,10 +333,20 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val systemBarsInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars())
         val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
         val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
-        val bottomInset = if (imeVisible) {
-            (imeInsets.bottom - systemBarsInsets.bottom).coerceAtLeast(0)
+        val rawSystemBarBottomInset = systemBarsInsets.bottom
+        if (rawSystemBarBottomInset > 0) {
+            lastSystemBarBottomInset = rawSystemBarBottomInset
+        }
+        val systemBarBottomInset = if (rawSystemBarBottomInset > 0) {
+            rawSystemBarBottomInset
         } else {
-            systemBarsInsets.bottom
+            lastSystemBarBottomInset
+        }
+        val imeBottomInset = imeInsets.bottom
+        val bottomInset = if (imeVisible || imeBottomInset > systemBarBottomInset) {
+            (imeBottomInset - systemBarBottomInset).coerceAtLeast(systemBarBottomInset)
+        } else {
+            systemBarBottomInset
         }
         val targetPaddingBottom = inputContainerBasePaddingBottom + bottomInset
 
@@ -1151,7 +1166,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private fun showActionMenu(items: List<ActionMenuItem>) {
         if (items.isEmpty()) return
 
-        val dialog = Dialog(requireContext())
+        val dialog = Dialog(requireContext()).apply {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+        }
         val density = resources.displayMetrics.density
         val menu = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
@@ -1222,9 +1239,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
 
         dialog.setContentView(menu)
-        dialog.setOnShowListener {
-            dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            dialog.window?.setLayout(
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setWindowAnimations(R.style.MtDialogAnimation)
+            setLayout(
                 (resources.displayMetrics.widthPixels * 0.72f).toInt(),
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
@@ -1459,9 +1477,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(buildMimoVoiceKeyContent(dialog, startAfterActivation))
         dialog.setCanceledOnTouchOutside(true)
-        dialog.setOnShowListener {
-            configureModelPickerWindow(dialog)
-        }
+        configureModelPickerWindow(dialog)
         dialog.show()
     }
 
@@ -1631,9 +1647,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val loadingView = buildModelPickerLoadingView()
         dialog.setContentView(loadingView)
         dialog.setCanceledOnTouchOutside(true)
-        dialog.setOnShowListener {
-            configureModelPickerWindow(dialog)
-        }
+        configureModelPickerWindow(dialog)
         dialog.show()
 
         viewLifecycleOwner.lifecycleScope.launch {
@@ -1650,7 +1664,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                     onSelected = onSelected
                 )
             )
-            configureModelPickerWindow(dialog)
         }
     }
 
@@ -1689,6 +1702,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             gravity = Gravity.CENTER
             background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
             setPadding(dp(24), dp(34), dp(24), dp(34))
+            minimumHeight = modelPickerPanelHeight()
             addView(
                 TextView(requireContext()).apply {
                     text = "正在加载模型..."
@@ -1756,7 +1770,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             scroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                (resources.displayMetrics.heightPixels * 0.46f).toInt().coerceAtLeast(dp(260))
+                modelPickerListHeight()
             ).apply {
                 topMargin = dp(12)
             }
@@ -1934,6 +1948,14 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 )
             )
         }
+    }
+
+    private fun modelPickerListHeight(): Int {
+        return (resources.displayMetrics.heightPixels * 0.46f).toInt().coerceAtLeast(dp(260))
+    }
+
+    private fun modelPickerPanelHeight(): Int {
+        return dp(14) + dp(54) + dp(12) + modelPickerListHeight() + dp(12)
     }
 
     private fun buildEmptyProviderModelsRow(): View {

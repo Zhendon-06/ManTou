@@ -51,7 +51,7 @@
     <style name="ThemeOverlay.ManTou.GlassAlertDialog" parent="ThemeOverlay.ManTou.GlassAlertDialog.Base" />
 
     <style name="MtDialogAnimation" parent="">
-        <item name="android:windowEnterAnimation">@anim/dialog_slide_up_enter</item>
-        <item name="android:windowExitAnimation">@anim/dialog_slide_down_exit</item>
+        <item name="android:windowEnterAnimation">@anim/dialog_fade_in</item>
+        <item name="android:windowExitAnimation">@anim/dialog_fade_out</item>
     </style>
 </resources>

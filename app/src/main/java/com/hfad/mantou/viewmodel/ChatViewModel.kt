@@ -71,6 +71,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val streamingStates = mutableMapOf<Long, StreamingSessionState>()
     private val APP_GENERATION_PROGRESS_INTERVAL_MS = 1_500L
     private val STREAMING_UI_UPDATE_INTERVAL_MS = 120L
+    private val REQUEST_INTERRUPTED_FALLBACK = "请求已中止或发生错误，请稍后重试。"
 
     init {
         AgentWorkspace.ensureWorkspace(application)
@@ -128,7 +129,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        cancelStreaming(sessionId)
+        cancelStreaming(sessionId, persistFallback = true)
         val state = StreamingSessionState(sessionId)
         streamingStates[sessionId] = state
         updateSessionLoadingIndicators()
@@ -162,6 +163,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 repository.sendUserMessage(sessionId, content, finalImagePath)
+                state.userMessagePersisted = true
 
                 if (repository.getMessageCount(sessionId) == 1) {
                     repository.updateSessionTitle(sessionId, content.ifEmpty { "[图片]" })
@@ -224,7 +226,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         val finalContent = state.streamingContent.toString()
                         removeStreamingPlaceholder(state)
                         if (finalContent.isNotEmpty()) {
-                            repository.addAssistantMessage(sessionId, finalContent)
+                            addFinalAssistantMessage(state, finalContent)
                         }
                         state.streamingContent.clear()
                         state.thinkingContent.clear()
@@ -307,8 +309,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     }
                                     removeStreamingPlaceholder(state)
                                     state.thinkingContent.clear()
-                                    repository.addAssistantMessage(
-                                        sessionId,
+                                    addFinalAssistantMessage(
+                                        state,
                                         "已为你生成网页应用，点击下方预览或全屏查看 👇",
                                         appHtmlPath = file.absolutePath
                                     )
@@ -495,23 +497,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         removeStreamingPlaceholder(state)
 
         partialContentToKeep?.takeIf { it.isNotEmpty() }?.let {
-            repository.addAssistantMessage(sessionId, it)
+            addFinalAssistantMessage(state, it)
         }
 
         val finalText = analyzed ?: "出错了，请稍后重试。"
-        repository.addAssistantMessage(sessionId, finalText)
+        addFinalAssistantMessage(state, finalText)
     }
 
     fun stopStreaming() {
-        _currentSessionId.value?.let { cancelStreaming(it) }
+        _currentSessionId.value?.let { cancelStreaming(it, persistFallback = true) }
     }
 
-    private fun cancelStreaming(sessionId: Long) {
+    private fun cancelStreaming(sessionId: Long, persistFallback: Boolean = false) {
         val state = streamingStates.remove(sessionId) ?: return
         state.job?.cancel()
         state.job = null
         stopAppGenerationProgressHeartbeat(state)
         state.isGeneratingApp = false
+        if (persistFallback) {
+            viewModelScope.launch {
+                persistFallbackIfNeeded(state)
+            }
+        }
         state.streamingContent.clear()
         state.thinkingContent.clear()
         removeStreamingPlaceholder(state)
@@ -524,10 +531,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun finishStreamingState(state: StreamingSessionState) {
+    private suspend fun finishStreamingState(state: StreamingSessionState) {
         stopAppGenerationProgressHeartbeat(state)
         state.isGeneratingApp = false
         if (streamingStates[state.sessionId] === state) {
+            persistFallbackIfNeeded(state)
             streamingStates.remove(state.sessionId)
             state.streamingContent.clear()
             state.thinkingContent.clear()
@@ -541,6 +549,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _runningSessionIds.value = runningIds
         _isLoading.value = _currentSessionId.value?.let { it in runningIds } == true
         _isGeneratingApp.value = streamingStates.values.any { it.isGeneratingApp }
+    }
+
+    private suspend fun addFinalAssistantMessage(
+        state: StreamingSessionState,
+        content: String,
+        appHtmlPath: String? = null
+    ): Long {
+        state.hasFinalAssistantMessage = true
+        return repository.addAssistantMessage(state.sessionId, content, appHtmlPath)
+    }
+
+    private suspend fun persistFallbackIfNeeded(state: StreamingSessionState) {
+        if (!state.userMessagePersisted || state.hasFinalAssistantMessage) return
+        addFinalAssistantMessage(state, REQUEST_INTERRUPTED_FALLBACK)
     }
 
     private fun streamingMessageId(sessionId: Long): Long {
@@ -685,6 +707,8 @@ private data class StreamingSessionState(
     val streamingContent: StringBuilder = StringBuilder(),
     val thinkingContent: StringBuilder = StringBuilder(),
     var isGeneratingApp: Boolean = false,
+    var userMessagePersisted: Boolean = false,
+    var hasFinalAssistantMessage: Boolean = false,
     var lastStreamingContentUpdateAt: Long = 0L,
     var lastStreamingThinkingUpdateAt: Long = 0L
 )
