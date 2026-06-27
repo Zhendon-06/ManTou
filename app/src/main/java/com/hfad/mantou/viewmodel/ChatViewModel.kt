@@ -150,17 +150,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 _activeModelName.value = config.model
 
-                val imageBase64List = mutableListOf<String>()
                 val finalImagePath = imagePath ?: imageUris?.firstOrNull()?.toString()
-
-                withContext(Dispatchers.IO) {
-                    val urisToProcess = imageUris?.take(ApiConfig.MAX_IMAGE_COUNT)
-                        ?: listOfNotNull(imagePath?.let { Uri.parse(it) })
-
-                    urisToProcess.forEach { uri ->
-                        ImageUtils.uriToBase64(getApplication(), uri)?.let { imageBase64List.add(it) }
-                    }
-                }
+                val imageBase64List = loadImageBase64List(imagePath, imageUris)
 
                 repository.sendUserMessage(sessionId, content, finalImagePath)
                 state.userMessagePersisted = true
@@ -169,19 +160,42 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     repository.updateSessionTitle(sessionId, content.ifEmpty { "[图片]" })
                 }
 
-                val isAppIntent = withContext(Dispatchers.IO) {
-                    AppIntentDetector.isAppGenerationIntent(config, content)
-                }
-
-                if (isAppIntent) {
-                    generateAppFlow(state, config, content)
-                } else {
-                    normalChatFlow(state, config, imageBase64List)
-                }
+                generateResponseForPersistedUserMessage(state, config, content, imageBase64List)
 
             } finally {
                 finishStreamingState(state)
             }
+        }
+    }
+
+    private suspend fun loadImageBase64List(
+        imagePath: String? = null,
+        imageUris: List<Uri>? = null
+    ): List<String> = withContext(Dispatchers.IO) {
+        val imageBase64List = mutableListOf<String>()
+        val urisToProcess = imageUris?.take(ApiConfig.MAX_IMAGE_COUNT)
+            ?: listOfNotNull(imagePath?.let { Uri.parse(it) })
+
+        urisToProcess.forEach { uri ->
+            ImageUtils.uriToBase64(getApplication(), uri)?.let { imageBase64List.add(it) }
+        }
+        imageBase64List
+    }
+
+    private suspend fun generateResponseForPersistedUserMessage(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        content: String,
+        imageBase64List: List<String>
+    ) {
+        val isAppIntent = withContext(Dispatchers.IO) {
+            AppIntentDetector.isAppGenerationIntent(config, content)
+        }
+
+        if (isAppIntent) {
+            generateAppFlow(state, config, content)
+        } else {
+            normalChatFlow(state, config, imageBase64List)
         }
     }
 
@@ -661,6 +675,49 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (messageId <= 0 || content.isBlank()) return
         viewModelScope.launch {
             repository.updateMessageContent(messageId, content)
+        }
+    }
+
+    fun editUserMessageAndRegenerate(messageId: Long, content: String) {
+        if (messageId <= 0 || content.isBlank()) return
+        viewModelScope.launch {
+            val originalMessage = repository.getMessageById(messageId) ?: return@launch
+            if (originalMessage.role != ChatMessage.ROLE_USER) return@launch
+
+            cancelStreaming(originalMessage.sessionId)
+            val editedMessage = repository.updateMessageContentAndDeleteAfter(messageId, content)
+                ?: return@launch
+            if (repository.getMessageCount(editedMessage.sessionId) == 1) {
+                repository.updateSessionTitle(editedMessage.sessionId, content.ifEmpty { "[图片]" })
+            }
+
+            val state = StreamingSessionState(editedMessage.sessionId)
+            streamingStates[editedMessage.sessionId] = state
+            updateSessionLoadingIndicators()
+
+            state.job = viewModelScope.launch {
+                _errorMessage.value = null
+                state.streamingContent.clear()
+                try {
+                    withContext(Dispatchers.IO) {
+                        AgentWorkspace.appendExplicitMemoryIfNeeded(getApplication(), content)
+                    }
+
+                    val config = resolveActiveChatConfig()
+                    if (config == null) {
+                        _noModelConfigured.value = true
+                        return@launch
+                    }
+
+                    _activeModelName.value = config.model
+                    state.userMessagePersisted = true
+
+                    val imageBase64List = loadImageBase64List(imagePath = editedMessage.imagePath)
+                    generateResponseForPersistedUserMessage(state, config, content, imageBase64List)
+                } finally {
+                    finishStreamingState(state)
+                }
+            }
         }
     }
 

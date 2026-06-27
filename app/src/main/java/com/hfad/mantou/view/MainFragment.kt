@@ -1044,19 +1044,25 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun showMessageActions(message: ChatMessage) {
-        showActionMenu(
-            listOf(
-                ActionMenuItem("选字复制", R.drawable.ic_select_text) {
-                    showSelectableMessageText(message)
-                },
-                ActionMenuItem("删除", R.drawable.ic_delete_outline) {
-                    confirmDeleteMessage(message)
-                },
-                ActionMenuItem("修改", R.drawable.ic_edit_outline) {
-                    showEditMessageDialog(message)
-                }
-            )
-        )
+        val items = mutableListOf<ActionMenuItem>()
+
+        if (message.role != ChatMessage.ROLE_USER) {
+            items += ActionMenuItem("选字复制", R.drawable.ic_select_text) {
+                showSelectableMessageText(message)
+            }
+        }
+
+        items += ActionMenuItem("删除", R.drawable.ic_delete_outline) {
+            confirmDeleteMessage(message)
+        }
+
+        if (message.role == ChatMessage.ROLE_USER) {
+            items += ActionMenuItem("修改", R.drawable.ic_edit_outline) {
+                showEditMessageDialog(message)
+            }
+        }
+
+        showActionMenu(items)
     }
 
     private fun showSelectableMessageText(message: ChatMessage) {
@@ -1114,6 +1120,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             Toast.makeText(requireContext(), "该消息无法修改", Toast.LENGTH_SHORT).show()
             return
         }
+        if (message.role != ChatMessage.ROLE_USER) {
+            Toast.makeText(requireContext(), "只能修改用户请求", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         val editor = EditText(requireContext()).apply {
             setText(message.content)
@@ -1144,7 +1154,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             .setTitle("修改消息")
             .setView(editorContainer)
             .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
+            .setPositiveButton("重新发送", null)
             .create()
 
         dialog.setOnShowListener {
@@ -1155,8 +1165,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                         Toast.makeText(requireContext(), "消息不能为空", Toast.LENGTH_SHORT).show()
                         return@setOnClickListener
                     }
-                    viewModel.updateMessageContent(message.messageId, newContent)
-                    Toast.makeText(requireContext(), "已修改", Toast.LENGTH_SHORT).show()
+                    viewModel.editUserMessageAndRegenerate(message.messageId, newContent)
+                    Toast.makeText(requireContext(), "已重新发送", Toast.LENGTH_SHORT).show()
                     dialog.dismiss()
                 }
         }
