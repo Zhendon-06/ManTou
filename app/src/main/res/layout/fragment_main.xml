@@ -28,121 +28,140 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <LinearLayout
+    <FrameLayout
         android:id="@+id/topBar"
         android:layout_width="0dp"
-        android:layout_height="56dp"
-        android:background="@color/mt_surface"
-        android:elevation="4dp"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingHorizontal="16dp"
+        android:layout_height="72dp"
+        android:background="@android:color/transparent"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:elevation="10dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent">
 
-        <ImageView
-            android:id="@+id/ivMenu"
-            android:layout_width="26dp"
-            android:layout_height="26dp"
-            android:contentDescription="菜单"
-            android:src="@drawable/ic_menu" />
-
         <FrameLayout
-            android:id="@+id/titleSwitcher"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:clipChildren="true"
-            android:clipToPadding="true">
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:layout_gravity="top"
+            android:paddingHorizontal="12dp">
 
-            <LinearLayout
-                android:id="@+id/desktopTitleGroup"
+            <FrameLayout
+                android:id="@+id/titleSwitcher"
                 android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:alpha="0"
-                android:gravity="center"
-                android:orientation="vertical">
+                android:layout_height="44dp"
+                android:layout_gravity="center_vertical"
+                android:clipChildren="false"
+                android:clipToPadding="false">
 
-                <TextView
-                    android:id="@+id/tvDesktopTitle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="馒头桌面"
-                    android:textColor="@color/mt_text_primary"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
+                <FrameLayout
+                    android:id="@+id/appBarCapsule"
+                    android:layout_width="118dp"
+                    android:layout_height="38dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/bg_appbar_segment_container"
+                    android:clipChildren="false"
+                    android:clipToPadding="false"
+                    android:elevation="8dp"
+                    android:padding="3dp">
 
-            <LinearLayout
-                android:id="@+id/chatTitleGroup"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:gravity="center"
-                android:orientation="vertical">
+                    <View
+                        android:id="@+id/appBarSegmentIndicator"
+                        android:layout_width="39dp"
+                        android:layout_height="38dp"
+                        android:layout_gravity="start|center_vertical"
+                        android:background="@drawable/bg_appbar_segment_selected" />
 
-                <TextView
-                    android:id="@+id/tvChatTitle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="馒头"
-                    android:textColor="@color/mt_text_primary"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:gravity="center"
+                        android:orientation="horizontal">
 
-                <TextView
-                    android:id="@+id/tvChatSubtitle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="请配置你的模型"
-                    android:textColor="@color/mt_text_muted"
-                    android:textSize="12sp" />
-            </LinearLayout>
+                        <FrameLayout
+                            android:id="@+id/desktopTab"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:clickable="true"
+                            android:contentDescription="桌面"
+                            android:focusable="true">
 
-            <LinearLayout
-                android:id="@+id/workspaceTitleGroup"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:alpha="0"
-                android:gravity="center"
-                android:orientation="vertical">
+                            <ImageView
+                                android:id="@+id/ivDesktopTab"
+                                android:layout_width="22dp"
+                                android:layout_height="22dp"
+                                android:layout_gravity="center"
+                                android:contentDescription="@null"
+                                android:src="@drawable/ic_appbar_desktop" />
+                        </FrameLayout>
 
-                <TextView
-                    android:id="@+id/tvWorkspaceTitle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="文件架构"
-                    android:textColor="@color/mt_text_primary"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                        <FrameLayout
+                            android:id="@+id/chatTab"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:clickable="true"
+                            android:contentDescription="聊天机器人"
+                            android:focusable="true">
 
-                <TextView
-                    android:id="@+id/tvWorkspaceSubtitle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="agent | memory | webapp"
-                    android:textColor="@color/mt_text_secondary"
-                    android:textSize="12sp" />
-            </LinearLayout>
+                            <ImageView
+                                android:id="@+id/ivChatTab"
+                                android:layout_width="23dp"
+                                android:layout_height="23dp"
+                                android:layout_gravity="center"
+                                android:contentDescription="@null"
+                                android:src="@drawable/ic_appbar_bot" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/workspaceTab"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:clickable="true"
+                            android:contentDescription="工作区"
+                            android:focusable="true">
+
+                            <ImageView
+                                android:id="@+id/ivWorkspaceTab"
+                                android:layout_width="22dp"
+                                android:layout_height="22dp"
+                                android:layout_gravity="center"
+                                android:contentDescription="@null"
+                                android:src="@drawable/ic_appbar_workspace" />
+                        </FrameLayout>
+                    </LinearLayout>
+                </FrameLayout>
+            </FrameLayout>
+
+            <ImageButton
+                android:id="@+id/ivMenu"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:layout_gravity="start|center_vertical"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="菜单"
+                android:padding="10dp"
+                android:scaleType="center"
+                android:src="@drawable/ic_appbar_menu"
+                android:tint="@color/mt_text_secondary" />
+
+            <ImageButton
+                android:id="@+id/newChat"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:layout_gravity="end|center_vertical"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="新建会话"
+                android:padding="7dp"
+                android:scaleType="center"
+                android:src="@drawable/ic_appbar_new_chat"
+                android:tint="@color/input_action_blue" />
         </FrameLayout>
-
-        <ImageView
-            android:id="@+id/newChat"
-            android:layout_width="26dp"
-            android:layout_height="26dp"
-            android:contentDescription="新建会话"
-            android:src="@drawable/ic_topic" />
-    </LinearLayout>
-
-    <androidx.viewpager2.widget.ViewPager2
-        android:id="@+id/mainPager"
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:background="@color/mt_background"
-        android:overScrollMode="never"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/topBar" />
+    </FrameLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

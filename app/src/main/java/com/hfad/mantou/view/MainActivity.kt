@@ -19,22 +19,21 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isStatusBarContrastEnforced = false
             window.isNavigationBarContrastEnforced = false
         }
         setContentView(R.layout.activity_main)
 
         drawerLayout = findViewById(R.id.drawerLayout)
 
-        // 处理主内容区域的系统栏和键盘 padding
+        // 主内容保持 edge-to-edge，顶部状态栏 inset 由各页面自己的浮层处理。
         val mainView = findViewById<android.view.View>(R.id.main)
         ViewCompat.setOnApplyWindowInsetsListener(mainView) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            // 过滤 IME 弹起/收起瞬间系统短暂回报的 0 值，避免聊天框上下抖动
-            if (systemBars.top > 0) {
-                v.setPadding(systemBars.left, systemBars.top, systemBars.right, 0)
-            }
+            v.setPadding(systemBars.left, 0, systemBars.right, 0)
             insets
         }
 

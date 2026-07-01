@@ -38,6 +38,7 @@ import android.widget.TextView
 import android.widget.Toast
 import android.app.ActivityOptions
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.core.view.ViewCompat
@@ -111,6 +112,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var isInputActive = false
     private var currentPagerPage = PAGE_CHAT
     private var pagerCallback: ViewPager2.OnPageChangeCallback? = null
+    private lateinit var mainPager: ViewPager2
+    private var topBarBaseHeight = 0
     private var inputContainerBasePaddingBottom = 0
     private var lastImeVisible = false
     private var lastSystemBarBottomInset = 0
@@ -203,6 +206,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        mainPager = obtainMainPager()
         setupAppBar()
         setupMainPager()
         setupWorkspacePage()
@@ -305,10 +309,39 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     override fun requestCameraPhoto(callbackName: String?) {
         cameraPhotoHost.requestCameraPhoto(callbackName)
     }
+
+    private fun obtainMainPager(): ViewPager2 {
+        findMainPager(binding.root)?.let { return it }
+
+        return ViewPager2(requireContext()).apply {
+            id = View.generateViewId()
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.mt_background))
+            layoutParams = ConstraintLayout.LayoutParams(0, 0).apply {
+                startToStart = ConstraintLayout.LayoutParams.PARENT_ID
+                endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
+                topToBottom = binding.topBar.id
+                bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
+            }
+            binding.root.addView(this)
+        }
+    }
+
+    private fun findMainPager(view: View): ViewPager2? {
+        if (view is ViewPager2) return view
+        if (view !is ViewGroup) return null
+        for (index in 0 until view.childCount) {
+            findMainPager(view.getChildAt(index))?.let { return it }
+        }
+        return null
+    }
+
     private fun initInsets() {
+        topBarBaseHeight = binding.topBar.layoutParams.height.takeIf { it > 0 } ?: dp(72)
         inputContainerBasePaddingBottom = chatBinding.inputContainer.paddingBottom
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            applyAppBarInsets(insets)
             applyChatInsets(insets)
             insets
         }
@@ -321,12 +354,26 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                     insets: WindowInsetsCompat,
                     runningAnimations: MutableList<WindowInsetsAnimationCompat>
                 ): WindowInsetsCompat {
+                    applyAppBarInsets(insets)
                     applyChatInsets(insets)
                     return insets
                 }
             }
         )
         ViewCompat.requestApplyInsets(binding.root)
+    }
+
+    private fun applyAppBarInsets(insets: WindowInsetsCompat) {
+        val topInset = insets.getInsets(WindowInsetsCompat.Type.systemBars()).top
+        val targetHeight = topBarBaseHeight + topInset
+        val params = binding.topBar.layoutParams
+        if (params.height != targetHeight) {
+            params.height = targetHeight
+            binding.topBar.layoutParams = params
+        }
+        if (binding.topBar.paddingTop != topInset) {
+            binding.topBar.updatePadding(top = topInset)
+        }
     }
 
     private fun applyChatInsets(insets: WindowInsetsCompat) {
@@ -460,23 +507,35 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         binding.ivMenu.setOnClickListener {
             (activity as? MainActivity)?.openDrawer()
         }
+        binding.desktopTab.setOnClickListener {
+            mainPager.setCurrentItem(PAGE_DESKTOP, true)
+        }
+        binding.chatTab.setOnClickListener {
+            mainPager.setCurrentItem(PAGE_CHAT, true)
+        }
+        binding.workspaceTab.setOnClickListener {
+            mainPager.setCurrentItem(PAGE_WORKSPACE, true)
+        }
         binding.newChat.setOnClickListener {
             if (currentPagerPage == PAGE_CHAT) {
                 createNewSession()
             } else {
-                binding.mainPager.setCurrentItem(PAGE_CHAT, true)
+                mainPager.setCurrentItem(PAGE_CHAT, true)
             }
         }
         updateAppBarAction(PAGE_CHAT)
+        binding.appBarCapsule.post {
+            updateAppBarTitleSlide(PAGE_CHAT, 0f)
+        }
     }
 
     private fun setupMainPager() {
-        binding.mainPager.adapter = StaticPagerAdapter(
+        mainPager.adapter = StaticPagerAdapter(
             listOf(desktopBinding.root, chatBinding.root, workspaceBinding.root)
         )
-        binding.mainPager.offscreenPageLimit = 3
+        mainPager.offscreenPageLimit = 3
         // 初始页保持 chat（index = 1），桌面在左、workspace 在右
-        binding.mainPager.setCurrentItem(PAGE_CHAT, false)
+        mainPager.setCurrentItem(PAGE_CHAT, false)
         currentPagerPage = PAGE_CHAT
 
         pagerCallback = object : ViewPager2.OnPageChangeCallback() {
@@ -496,9 +555,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 }
             }
         }
-        binding.mainPager.registerOnPageChangeCallback(pagerCallback!!)
-        binding.titleSwitcher.post {
-            currentPagerPage = binding.mainPager.currentItem
+        mainPager.registerOnPageChangeCallback(pagerCallback!!)
+        binding.appBarCapsule.post {
+            currentPagerPage = mainPager.currentItem
             updateAppBarAction(currentPagerPage)
             updateAppBarTitleSlide(currentPagerPage, 0f)
         }
@@ -773,19 +832,55 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun updateAppBarTitleSlide(position: Int, positionOffset: Float) {
-        val width = binding.titleSwitcher.width
-        if (width == 0) return
-
         val globalProgress = (position + positionOffset).coerceIn(0f, 2f)
-        applyTitleGroup(binding.desktopTitleGroup, 0, globalProgress, width)
-        applyTitleGroup(binding.chatTitleGroup, 1, globalProgress, width)
-        applyTitleGroup(binding.workspaceTitleGroup, 2, globalProgress, width)
+        val availableTitleWidth = binding.titleSwitcher.width
+        if (availableTitleWidth <= 0) return
+
+        val capsuleParams = binding.appBarCapsule.layoutParams as FrameLayout.LayoutParams
+        val targetCapsuleWidth = dp(118).coerceAtMost(availableTitleWidth)
+        if (capsuleParams.width != targetCapsuleWidth) {
+            capsuleParams.width = targetCapsuleWidth
+            binding.appBarCapsule.layoutParams = capsuleParams
+            binding.appBarCapsule.post {
+                updateAppBarSegmentIndicator(globalProgress)
+            }
+            return
+        }
+
+        updateAppBarSegmentIndicator(globalProgress)
     }
 
-    private fun applyTitleGroup(view: View, index: Int, globalProgress: Float, width: Int) {
-        val delta = index - globalProgress
-        view.translationX = delta * width
-        view.alpha = (1f - kotlin.math.abs(delta)).coerceIn(0f, 1f)
+    private fun updateAppBarSegmentIndicator(globalProgress: Float) {
+        val capsule = binding.appBarCapsule
+        val availableWidth = capsule.width - capsule.paddingLeft - capsule.paddingRight
+        val availableHeight = capsule.height - capsule.paddingTop - capsule.paddingBottom
+        if (availableWidth <= 0 || availableHeight <= 0) return
+
+        val segmentWidth = availableWidth / 3f
+        val indicator = binding.appBarSegmentIndicator
+        val indicatorParams = indicator.layoutParams as FrameLayout.LayoutParams
+        val targetWidth = segmentWidth.roundToInt()
+        if (indicatorParams.width != targetWidth || indicatorParams.height != availableHeight) {
+            indicatorParams.width = targetWidth
+            indicatorParams.height = availableHeight
+            indicator.layoutParams = indicatorParams
+        }
+
+        indicator.translationX = segmentWidth * globalProgress
+        updateAppBarTabTint(globalProgress.roundToInt().coerceIn(PAGE_DESKTOP, PAGE_WORKSPACE))
+    }
+
+    private fun updateAppBarTabTint(selectedPage: Int) {
+        val selectedTint = ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.mt_on_primary))
+        val idleTint = ColorStateList.valueOf(Color.rgb(82, 96, 120))
+
+        binding.ivDesktopTab.imageTintList = if (selectedPage == PAGE_DESKTOP) selectedTint else idleTint
+        binding.ivChatTab.imageTintList = if (selectedPage == PAGE_CHAT) selectedTint else idleTint
+        binding.ivWorkspaceTab.imageTintList = if (selectedPage == PAGE_WORKSPACE) selectedTint else idleTint
+
+        binding.desktopTab.isSelected = selectedPage == PAGE_DESKTOP
+        binding.chatTab.isSelected = selectedPage == PAGE_CHAT
+        binding.workspaceTab.isSelected = selectedPage == PAGE_WORKSPACE
     }
 
     private fun updateAppBarAction(position: Int) {
@@ -815,7 +910,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 binding.wallpaperBackground.setRenderEffect(null)
             }
             binding.wallpaperMask.visibility = View.GONE
-            binding.mainPager.setBackgroundColor(defaultBackground)
+            mainPager.setBackgroundColor(defaultBackground)
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
             desktopBinding.root.setBackgroundColor(defaultBackground)
@@ -835,7 +930,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 binding.wallpaperBackground.setRenderEffect(null)
             }
             binding.wallpaperMask.visibility = View.GONE
-            binding.mainPager.setBackgroundColor(defaultBackground)
+            mainPager.setBackgroundColor(defaultBackground)
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
             desktopBinding.root.setBackgroundColor(defaultBackground)
@@ -855,7 +950,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
         binding.wallpaperMask.visibility = View.VISIBLE
         binding.wallpaperMask.setBackgroundColor(AppearanceSettingsStore.maskColor(appearanceSettings))
-        binding.mainPager.setBackgroundColor(Color.TRANSPARENT)
+        mainPager.setBackgroundColor(Color.TRANSPARENT)
         chatBinding.root.setBackgroundColor(Color.TRANSPARENT)
         workspaceBinding.root.setBackgroundColor(Color.TRANSPARENT)
         desktopBinding.root.setBackgroundColor(Color.TRANSPARENT)
@@ -1391,7 +1486,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         // 观察当前活跃模型名称
         viewModel.activeModelName.observe(viewLifecycleOwner) { modelName ->
-            binding.tvChatSubtitle.text = modelName ?: "请配置你的模型"
+            binding.chatTab.contentDescription = modelName
+                ?.let { "聊天机器人，当前模型 $it" }
+                ?: "聊天机器人，请配置模型"
         }
 
         // 观察未配置模型事件
@@ -2694,9 +2791,11 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         CameraPhotoBridge.detach(this)
         activeAppWebView = null
         setKeepScreenOn(false)
-        pagerCallback?.let { binding.mainPager.unregisterOnPageChangeCallback(it) }
+        if (::mainPager.isInitialized) {
+            pagerCallback?.let { mainPager.unregisterOnPageChangeCallback(it) }
+            mainPager.adapter = null
+        }
         pagerCallback = null
-        binding.mainPager.adapter = null
         _workspaceBinding = null
         _chatBinding = null
         _desktopBinding = null
