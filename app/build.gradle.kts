@@ -53,6 +53,9 @@ android {
         viewBinding = true
         buildConfig = true  // 启用 BuildConfig
     }
+    androidResources {
+        noCompress += "onnx"
+    }
 }
 
 // 编译期扫描 tool/impl/ 下的 @MantouTool 注解，生成 LLM 用的 Markdown 文档。
@@ -228,6 +231,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.lifecycle.livedata.ktx)
     implementation(libs.androidx.fragment.ktx)
+
+    // Local embedding inference
+    implementation(libs.onnxruntime.android)
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

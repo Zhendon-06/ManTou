@@ -1,5 +1,6 @@
 package com.hfad.mantou.utils
 
+import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.hfad.mantou.data.api.ApiEndpointResolver
@@ -36,8 +37,18 @@ object AppIntentDetector {
         return actionWords.any { lower.contains(it) } && appWords.any { lower.contains(it) }
     }
 
-    suspend fun isAppGenerationIntent(config: ChatCallConfig, userMessage: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun isAppGenerationIntent(
+        context: Context,
+        config: ChatCallConfig,
+        userMessage: String
+    ): Boolean = withContext(Dispatchers.IO) {
         if (isAppGenerationByKeywords(userMessage)) return@withContext true
+
+        when (LocalEmbeddingIntentDetector.detect(context, userMessage)) {
+            LocalEmbeddingIntentDetector.Decision.GenerateApp -> return@withContext true
+            LocalEmbeddingIntentDetector.Decision.Chat -> return@withContext false
+            LocalEmbeddingIntentDetector.Decision.Uncertain -> Unit
+        }
 
         try {
             val builder = buildIntentRequest(config, userMessage)
