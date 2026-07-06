@@ -88,6 +88,34 @@ generated_apps/
 <img width="300" height="669" alt="66451ba6de1e477f431bba8187f34a53" src="https://github.com/user-attachments/assets/441d8ed9-908f-40ae-8a9d-b192e3bfee3a" />
 <img width="300" height="669" alt="cd4567f5d5564541cd616c56963d24ae" src="https://github.com/user-attachments/assets/f8ff8549-dfa5-430d-8868-926241d1d7b9" />
 
+## 开发者构建与部署
+
+馒头使用端侧 embedding 做高频意图识别。开发者首次构建或更新部署前，需要先用 `uv` 下载并导出 `m3e-small` 模型资产，再运行 Android 构建。
+
+在项目根目录执行：
+
+```bash
+uv venv --python 3.11 .venv-m3e
+uv pip install --python .venv-m3e/bin/python -r scripts/m3e-small-requirements.txt
+.venv-m3e/bin/python scripts/export_m3e_small_onnx.py
+./gradlew :app:compileDebugKotlin
+```
+
+导出脚本会从 Hugging Face 下载 `moka-ai/m3e-small`，并生成：
+
+```text
+app/src/main/assets/embedding/m3e-small/model.onnx
+app/src/main/assets/embedding/m3e-small/vocab.txt
+```
+
+这两个文件位于 `assets`，会随 APK 一起打包。缺少模型文件时，应用会自动回落到云端 LLM 意图识别，但会失去端侧毫秒级路由优势。
+
+如果只想重新导出模型资产，可以重新执行：
+
+```bash
+.venv-m3e/bin/python scripts/export_m3e_small_onnx.py
+```
+
 ## Base URL 示例
 
 以下写法都可以：
