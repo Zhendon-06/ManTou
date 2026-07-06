@@ -188,11 +188,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         content: String,
         imageBase64List: List<String>
     ) {
-        addStreamingPlaceholder(state, "正在判断意图")
         val isAppIntent = withContext(Dispatchers.IO) {
             AppIntentDetector.isAppGenerationIntent(getApplication(), config, content)
         }
-        removeStreamingPlaceholder(state)
 
         if (isAppIntent) {
             generateAppFlow(state, config, content)

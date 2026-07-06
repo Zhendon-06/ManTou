@@ -1,6 +1,7 @@
 package com.hfad.mantou.utils
 
 import android.content.Context
+import android.util.Log
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
@@ -24,12 +25,14 @@ import kotlin.math.sqrt
  */
 object LocalEmbeddingIntentDetector {
 
+    private const val TAG = "LocalEmbeddingIntent"
     private const val MODEL_ASSET = "embedding/m3e-small/model.onnx"
     private const val VOCAB_ASSET = "embedding/m3e-small/vocab.txt"
     private const val MAX_LENGTH = 64
     private const val GENERATE_THRESHOLD = 0.66f
     private const val CHAT_THRESHOLD = 0.64f
-    private const val MARGIN_THRESHOLD = 0.035f
+    private const val GENERATE_MARGIN_THRESHOLD = 0.035f
+    private const val CHAT_MARGIN_THRESHOLD = 0.015f
 
     private val mutex = Mutex()
     private var engine: Engine? = null
@@ -44,31 +47,46 @@ object LocalEmbeddingIntentDetector {
     suspend fun detect(context: Context, userMessage: String): Decision = withContext(Dispatchers.IO) {
         if (userMessage.isBlank()) return@withContext Decision.Chat
 
-        val activeEngine = ensureEngine(context) ?: return@withContext Decision.Uncertain
-        runCatching {
+        val startMs = System.currentTimeMillis()
+        val activeEngine = ensureEngine(context)
+        if (activeEngine == null) {
+            Log.d(TAG, "detect result=Uncertain engine=null elapsed=${System.currentTimeMillis() - startMs}ms")
+            return@withContext Decision.Uncertain
+        }
+        val decision = runCatching {
             activeEngine.detect(userMessage)
         }.getOrDefault(Decision.Uncertain)
+        Log.d(TAG, "detect result=$decision elapsed=${System.currentTimeMillis() - startMs}ms")
+        decision
     }
 
     private suspend fun ensureEngine(context: Context): Engine? {
-        if (loadFailed) return null
+        if (loadFailed) {
+            Log.d(TAG, "load skipped previousFailure=true")
+            return null
+        }
         engine?.let { return it }
 
         return mutex.withLock {
             engine?.let { return@withLock it }
             if (loadFailed) return@withLock null
 
+            val startMs = System.currentTimeMillis()
             val loaded = runCatching {
                 if (!assetExists(context, MODEL_ASSET) || !assetExists(context, VOCAB_ASSET)) {
+                    Log.d(TAG, "load missingAssets=true elapsed=${System.currentTimeMillis() - startMs}ms")
                     return@runCatching null
                 }
                 Engine.create(context.applicationContext)
+            }.onFailure { e ->
+                Log.d(TAG, "load error=${e.javaClass.simpleName}:${e.message.orEmpty()} elapsed=${System.currentTimeMillis() - startMs}ms")
             }.getOrNull()
 
             if (loaded == null) {
                 loadFailed = true
             } else {
                 engine = loaded
+                Log.d(TAG, "load success elapsed=${System.currentTimeMillis() - startMs}ms")
             }
             loaded
         }
@@ -93,10 +111,15 @@ object LocalEmbeddingIntentDetector {
             val generateScore = cosine(vector, generateCentroid)
             val chatScore = cosine(vector, chatCentroid)
             val margin = generateScore - chatScore
+            Log.d(
+                TAG,
+                "scores generate=${formatScore(generateScore)} chat=${formatScore(chatScore)} margin=${formatScore(margin)}"
+            )
 
             return when {
-                generateScore >= GENERATE_THRESHOLD && margin >= MARGIN_THRESHOLD -> Decision.GenerateApp
-                chatScore >= CHAT_THRESHOLD && -margin >= MARGIN_THRESHOLD -> Decision.Chat
+                generateScore >= GENERATE_THRESHOLD && margin >= GENERATE_MARGIN_THRESHOLD -> Decision.GenerateApp
+                chatScore >= CHAT_THRESHOLD && -margin >= CHAT_MARGIN_THRESHOLD -> Decision.Chat
+                chatScore > generateScore -> Decision.Chat
                 else -> Decision.Uncertain
             }
         }
@@ -388,5 +411,9 @@ object LocalEmbeddingIntentDetector {
             vector[i] /= denominator
         }
         return vector
+    }
+
+    private fun formatScore(value: Float): String {
+        return String.format(Locale.US, "%.4f", value)
     }
 }
