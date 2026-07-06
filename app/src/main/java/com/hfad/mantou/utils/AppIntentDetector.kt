@@ -1,6 +1,7 @@
 package com.hfad.mantou.utils
 
 import android.content.Context
+import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.hfad.mantou.data.api.ApiEndpointResolver
@@ -12,11 +13,16 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 object AppIntentDetector {
 
+    private const val TAG = "AppIntentDetector"
     private const val ANTHROPIC_VERSION = "2023-06-01"
+    private const val INTENT_MAX_TOKENS = 20
     private const val INTENT_SYSTEM_PROMPT = """你是一个意图识别助手。判断用户的消息是否想要生成一个网页应用（app/小程序/网页/工具/计算器/游戏等）。
 用户意图是"生成网页应用"时返回JSON: {"intent":"generate_app"}
 用户意图是"普通聊天/提问"时返回JSON: {"intent":"chat"}
@@ -30,11 +36,26 @@ object AppIntentDetector {
         .addInterceptor(ApiLoggingInterceptor())
         .build()
 
+    private val createActionWords = listOf(
+        "生成", "做一个", "做个", "搞一个", "搞个", "来一个", "来个",
+        "弄一个", "弄个", "帮我做", "创建", "制作", "帮我生成",
+        "帮我创建", "写一个", "写个", "generate", "create", "make"
+    )
+    private val appTargetWords = listOf(
+        "app", "应用", "网页", "工具", "游戏", "小程序", "计算器", "todo",
+        "天气", "日历", "笔记", "时钟", "秒表", "website", "web app"
+    )
+    private val strongAppTargetWords = listOf(
+        "app", "应用", "网页", "工具", "游戏", "小程序", "website", "web app"
+    )
+    private val chatQuestionWords = listOf(
+        "吗", "呢", "怎么", "为什么", "是不是", "能不能", "可以", "解释",
+        "分析", "推荐", "区别", "报错", "问题", "what", "why", "how"
+    )
+
     private fun isAppGenerationByKeywords(message: String): Boolean {
-        val lower = message.lowercase()
-        val actionWords = listOf("生成", "做一个", "做个", "搞一个", "搞个", "来一个", "来个", "弄一个", "弄个", "帮我做", "创建", "制作", "帮我生成", "帮我创建", "写一个", "写个", "generate", "create", "make")
-        val appWords = listOf("app", "应用", "网页", "工具", "游戏", "小程序", "计算器", "todo", "天气", "日历", "笔记", "时钟", "秒表", "website", "web app")
-        return actionWords.any { lower.contains(it) } && appWords.any { lower.contains(it) }
+        val lower = message.lowercase(Locale.ROOT)
+        return createActionWords.any { lower.contains(it) } && appTargetWords.any { lower.contains(it) }
     }
 
     suspend fun isAppGenerationIntent(
@@ -42,27 +63,151 @@ object AppIntentDetector {
         config: ChatCallConfig,
         userMessage: String
     ): Boolean = withContext(Dispatchers.IO) {
-        if (isAppGenerationByKeywords(userMessage)) return@withContext true
+        val totalStartMs = System.currentTimeMillis()
+        Log.d(TAG, "start at=${formatTimestamp(totalStartMs)} message=${preview(userMessage)}")
 
-        when (LocalEmbeddingIntentDetector.detect(context, userMessage)) {
-            LocalEmbeddingIntentDetector.Decision.GenerateApp -> return@withContext true
-            LocalEmbeddingIntentDetector.Decision.Chat -> return@withContext false
-            LocalEmbeddingIntentDetector.Decision.Uncertain -> Unit
+        val keywordStartMs = System.currentTimeMillis()
+        val keywordResult = isAppGenerationByKeywords(userMessage)
+        Log.d(
+            TAG,
+            "keyword result=$keywordResult elapsed=${elapsedSince(keywordStartMs)}ms total=${elapsedSince(totalStartMs)}ms"
+        )
+        if (keywordResult) {
+            Log.d(TAG, "done result=generate_app source=keyword total=${elapsedSince(totalStartMs)}ms")
+            return@withContext true
+        }
+
+        val embeddingStartMs = System.currentTimeMillis()
+        when (val embeddingDecision = LocalEmbeddingIntentDetector.detect(context, userMessage)) {
+            LocalEmbeddingIntentDetector.Decision.GenerateApp -> {
+                Log.d(
+                    TAG,
+                    "embedding result=generate_app elapsed=${elapsedSince(embeddingStartMs)}ms total=${elapsedSince(totalStartMs)}ms"
+                )
+                Log.d(TAG, "done result=generate_app source=embedding total=${elapsedSince(totalStartMs)}ms")
+                return@withContext true
+            }
+            LocalEmbeddingIntentDetector.Decision.Chat -> {
+                Log.d(
+                    TAG,
+                    "embedding result=chat elapsed=${elapsedSince(embeddingStartMs)}ms total=${elapsedSince(totalStartMs)}ms"
+                )
+                Log.d(TAG, "done result=chat source=embedding total=${elapsedSince(totalStartMs)}ms")
+                return@withContext false
+            }
+            LocalEmbeddingIntentDetector.Decision.Uncertain -> {
+                Log.d(
+                    TAG,
+                    "embedding result=${embeddingDecision.name} elapsed=${elapsedSince(embeddingStartMs)}ms total=${elapsedSince(totalStartMs)}ms"
+                )
+                val localGate = shouldUseLlmFallback(userMessage)
+                Log.d(TAG, "localGate llmFallback=${localGate.useLlm} reason=${localGate.reason}")
+                if (!localGate.useLlm) {
+                    Log.d(TAG, "done result=chat source=local_chat_gate total=${elapsedSince(totalStartMs)}ms")
+                    return@withContext false
+                }
+            }
         }
 
         try {
+            val llmStartMs = System.currentTimeMillis()
             val builder = buildIntentRequest(config, userMessage)
             client.newCall(builder.build()).execute().use { response ->
-                val responseBody = response.body?.string() ?: return@withContext false
-                if (!response.isSuccessful) return@withContext false
+                val responseBody = response.body?.string()
+                if (responseBody == null) {
+                    Log.d(
+                        TAG,
+                        "llm body=null result=chat elapsed=${elapsedSince(llmStartMs)}ms total=${elapsedSince(totalStartMs)}ms"
+                    )
+                    Log.d(TAG, "done result=chat source=llm_empty_body total=${elapsedSince(totalStartMs)}ms")
+                    return@withContext false
+                }
+                if (!response.isSuccessful) {
+                    Log.d(
+                        TAG,
+                        "llm http=${response.code} result=chat elapsed=${elapsedSince(llmStartMs)}ms total=${elapsedSince(totalStartMs)}ms"
+                    )
+                    Log.d(TAG, "done result=chat source=llm_http_error total=${elapsedSince(totalStartMs)}ms")
+                    return@withContext false
+                }
 
                 val content = parseIntentContent(responseBody, config.isAnthropic)
-                    ?: return@withContext false
+                if (content == null) {
+                    Log.d(
+                        TAG,
+                        "llm parsed=null result=chat elapsed=${elapsedSince(llmStartMs)}ms total=${elapsedSince(totalStartMs)}ms"
+                    )
+                    Log.d(TAG, "done result=chat source=llm_parse_empty total=${elapsedSince(totalStartMs)}ms")
+                    return@withContext false
+                }
 
-                content.contains("\"generate_app\"")
+                val result = content.contains("\"generate_app\"")
+                Log.d(
+                    TAG,
+                    "llm result=${if (result) "generate_app" else "chat"} elapsed=${elapsedSince(llmStartMs)}ms total=${elapsedSince(totalStartMs)}ms"
+                )
+                Log.d(
+                    TAG,
+                    "done result=${if (result) "generate_app" else "chat"} source=llm total=${elapsedSince(totalStartMs)}ms"
+                )
+                result
             }
         } catch (e: Exception) {
-            isAppGenerationByKeywords(userMessage)
+            val fallback = isAppGenerationByKeywords(userMessage)
+            Log.d(
+                TAG,
+                "error=${e.javaClass.simpleName}:${e.message.orEmpty()} fallback=$fallback total=${elapsedSince(totalStartMs)}ms"
+            )
+            Log.d(TAG, "done result=${if (fallback) "generate_app" else "chat"} source=error_keyword_fallback total=${elapsedSince(totalStartMs)}ms")
+            fallback
+        }
+    }
+
+    private fun elapsedSince(startMs: Long): Long = System.currentTimeMillis() - startMs
+
+    private fun formatTimestamp(timestampMs: Long): String {
+        return SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date(timestampMs))
+    }
+
+    private fun preview(message: String): String {
+        val compact = message.replace(Regex("\\s+"), " ").take(48)
+        return "\"$compact\" len=${message.length}"
+    }
+
+    internal fun shouldUseLlmFallbackForTest(message: String): LocalGateResult = shouldUseLlmFallback(message)
+
+    private fun shouldUseLlmFallback(message: String): LocalGateResult {
+        val lower = message.lowercase(Locale.ROOT)
+        val hasCreateAction = createActionWords.any { lower.contains(it) }
+        val hasAppTarget = appTargetWords.any { lower.contains(it) }
+        val hasStrongAppTarget = strongAppTargetWords.any { lower.contains(it) }
+        val hasQuestionIntent = chatQuestionWords.any { lower.contains(it) }
+
+        return when {
+            hasQuestionIntent && !hasCreateAction -> LocalGateResult(
+                useLlm = false,
+                reason = "question_without_create_action"
+            )
+            hasCreateAction && hasAppTarget -> LocalGateResult(
+                useLlm = true,
+                reason = "create_action_and_app_target"
+            )
+            hasStrongAppTarget -> LocalGateResult(
+                useLlm = true,
+                reason = "strong_app_target_without_clear_action"
+            )
+            hasAppTarget -> LocalGateResult(
+                useLlm = false,
+                reason = "weak_app_target_without_create_action"
+            )
+            hasCreateAction -> LocalGateResult(
+                useLlm = false,
+                reason = "create_action_without_app_target"
+            )
+            else -> LocalGateResult(
+                useLlm = false,
+                reason = "plain_chat_default"
+            )
         }
     }
 
@@ -78,7 +223,7 @@ object AppIntentDetector {
                     mapOf("role" to "user", "content" to userMessage)
                 ),
                 "stream" to false,
-                "max_tokens" to 400
+                "max_tokens" to INTENT_MAX_TOKENS
             ))
         } else {
             gson.toJson(mapOf(
@@ -88,7 +233,7 @@ object AppIntentDetector {
                     mapOf("role" to "user", "content" to userMessage)
                 ),
                 "stream" to false,
-                "max_tokens" to 400
+                "max_tokens" to INTENT_MAX_TOKENS
             ))
         }
 
@@ -142,6 +287,11 @@ object AppIntentDetector {
 
     private data class ChatCompletionResponse(
         val choices: List<Choice>? = null
+    )
+
+    internal data class LocalGateResult(
+        val useLlm: Boolean,
+        val reason: String
     )
 
     private data class Choice(
