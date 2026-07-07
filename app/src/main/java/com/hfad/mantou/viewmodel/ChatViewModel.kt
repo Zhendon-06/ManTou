@@ -7,27 +7,37 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import com.hfad.mantou.data.ChatMessage
-import com.hfad.mantou.data.api.*
+import com.hfad.mantou.data.api.ApiConfig
+import com.hfad.mantou.data.api.ApiMessage
+import com.hfad.mantou.data.api.ChatCallConfig
+import com.hfad.mantou.data.api.ChatRequest
+import com.hfad.mantou.data.api.ContentPart
+import com.hfad.mantou.data.api.ImageUrl
+import com.hfad.mantou.data.api.StreamingApiService
 import com.hfad.mantou.data.database.AppDatabase
 import com.hfad.mantou.data.database.ChatMessageEntity
 import com.hfad.mantou.data.database.ChatSessionEntity
+import com.hfad.mantou.data.preferences.ContextLimitStore
 import com.hfad.mantou.data.repository.ChatRepository
-import com.hfad.mantou.utils.AppGenerator
 import com.hfad.mantou.utils.AgentWorkspace
-import com.hfad.mantou.utils.ImageUtils
+import com.hfad.mantou.utils.AppGenerator
 import com.hfad.mantou.utils.AppIntentDetector
 import com.hfad.mantou.utils.ChatContextFormatter
 import com.hfad.mantou.utils.ErrorAnalyzer
-import com.hfad.mantou.data.preferences.ContextLimitStore
+import com.hfad.mantou.utils.ImageUtils
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.ceil
+import kotlin.math.min
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -35,6 +45,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val providerRepository = com.hfad.mantou.data.repository.ProviderRepository(
         AppDatabase.getDatabase(application).providerDao()
     )
+    private val fallbackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _currentSessionId = MutableLiveData<Long?>()
     val currentSessionId: LiveData<Long?> = _currentSessionId
@@ -69,9 +80,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private var messagesJob: Job? = null
     private val streamingStates = mutableMapOf<Long, StreamingSessionState>()
-    private val APP_GENERATION_PROGRESS_INTERVAL_MS = 1_500L
-    private val STREAMING_UI_UPDATE_INTERVAL_MS = 120L
-    private val REQUEST_INTERRUPTED_FALLBACK = "请求已中止或发生错误，请稍后重试。"
+    private val appGenerationProgressIntervalMs = 1_500L
+    private val streamingUiUpdateIntervalMs = 120L
+    private val reconnectWindowMs = 5_000L
+    private val reconnectCountdownIntervalMs = 1_000L
+    private val requestInterruptedFallback = "出错了，请稍后重试。"
+    private val requestFailedSuffix = "\n\n出错了，请稍后重试。"
+    private val assistantStreamingPlaceholder = "\u200B"
 
     init {
         AgentWorkspace.ensureWorkspace(application)
@@ -161,7 +176,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 generateResponseForPersistedUserMessage(state, config, content, imageBase64List)
-
             } finally {
                 finishStreamingState(state)
             }
@@ -218,39 +232,154 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         state.thinkingContent.clear()
-        addStreamingPlaceholder(state, "正在思考")
+        state.reconnectPrefixPending = ""
+        addStreamingPlaceholder(state, status = "正在思考", useLoadingLayout = false)
 
-        StreamingApiService.streamChatCompletion(config, request)
-            .catch { e ->
-                if (e is CancellationException) throw e
-                handleApiError(state, config, e.message ?: "未知错误", "普通聊天")
-            }
-            .collect { event ->
-                when (event) {
-                    is StreamingApiService.StreamEvent.Start -> {}
-                    is StreamingApiService.StreamEvent.Thinking -> {
-                        state.thinkingContent.append(event.text)
-                        updateStreamingThinking(state, state.thinkingContent.toString())
-                    }
-                    is StreamingApiService.StreamEvent.Content -> {
-                        state.streamingContent.append(event.text)
-                        updateStreamingMessage(state, state.streamingContent.toString())
-                    }
-                    is StreamingApiService.StreamEvent.Done -> {
-                        val finalContent = state.streamingContent.toString()
-                        removeStreamingPlaceholder(state)
-                        if (finalContent.isNotEmpty()) {
-                            addFinalAssistantMessage(state, finalContent)
+        collectChatStreamWithReconnect(state, config, request)
+    }
+
+    private suspend fun collectChatStreamWithReconnect(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        request: ChatRequest
+    ) {
+        var reconnectDeadlineAt: Long? = null
+
+        while (true) {
+            var shouldRetry = false
+            var finished = false
+            var handledError = false
+
+            StreamingApiService.streamChatCompletion(config, request)
+                .catch { e ->
+                    if (e is CancellationException) throw e
+                    handledError = true
+                    handleApiError(
+                        state = state,
+                        config = config,
+                        rawError = e.message ?: "未知错误",
+                        scene = "普通聊天",
+                        partialContentToKeep = state.streamingContent.toString().trimEnd().ifEmpty { null }
+                    )
+                }
+                .collect { event ->
+                    when (event) {
+                        is StreamingApiService.StreamEvent.Start -> {
+                            if (reconnectDeadlineAt != null) {
+                                clearReconnectStatus(state)
+                            }
                         }
-                        state.streamingContent.clear()
-                        state.thinkingContent.clear()
-                    }
-                    is StreamingApiService.StreamEvent.Error -> {
-                        val partialContent = state.streamingContent.toString().ifEmpty { null }
-                        handleApiError(state, config, event.message, "普通聊天", partialContent)
+
+                        is StreamingApiService.StreamEvent.Thinking -> {
+                            if (state.streamingContent.isEmpty()) {
+                                state.thinkingContent.append(event.text)
+                                updateStreamingThinking(state, state.thinkingContent.toString())
+                            }
+                        }
+
+                        is StreamingApiService.StreamEvent.Content -> {
+                            val chunk = consumeReconnectChunk(state, event.text)
+                            if (chunk.isEmpty()) return@collect
+                            state.streamingContent.append(chunk)
+                            updateStreamingMessage(state, state.streamingContent.toString())
+                        }
+
+                        is StreamingApiService.StreamEvent.Done -> {
+                            clearReconnectStatus(state)
+                            val finalContent = state.streamingContent.toString().trimEnd()
+                            removeStreamingPlaceholder(state)
+                            if (finalContent.isNotEmpty()) {
+                                addFinalAssistantMessage(state, finalContent)
+                            }
+                            state.streamingContent.clear()
+                            state.thinkingContent.clear()
+                            state.reconnectPrefixPending = ""
+                            finished = true
+                        }
+
+                        is StreamingApiService.StreamEvent.Disconnected -> {
+                            val deadlineAt = reconnectDeadlineAt
+                                ?: (System.currentTimeMillis() + reconnectWindowMs).also {
+                                    reconnectDeadlineAt = it
+                                }
+                            val remainingMs = deadlineAt - System.currentTimeMillis()
+                            if (remainingMs <= 0L) {
+                                persistPartialContentWithError(state)
+                                finished = true
+                            } else {
+                                state.reconnectPrefixPending = state.streamingContent.toString()
+                                shouldRetry = true
+                                updateReconnectStatus(
+                                    state,
+                                    ceil(remainingMs / 1000.0).toInt().coerceAtLeast(1)
+                                )
+                            }
+                        }
+
+                        is StreamingApiService.StreamEvent.Error -> {
+                            handledError = true
+                            handleApiError(
+                                state = state,
+                                config = config,
+                                rawError = event.message,
+                                scene = "普通聊天",
+                                partialContentToKeep = state.streamingContent.toString().trimEnd().ifEmpty { null }
+                            )
+                        }
                     }
                 }
+
+            when {
+                finished || handledError -> return
+                shouldRetry -> {
+                    val deadlineAt = reconnectDeadlineAt ?: return
+                    val remainingMs = deadlineAt - System.currentTimeMillis()
+                    if (remainingMs <= 0L) {
+                        persistPartialContentWithError(state)
+                        return
+                    }
+                    delay(min(reconnectCountdownIntervalMs, remainingMs))
+                }
+
+                else -> return
             }
+        }
+    }
+
+    private fun consumeReconnectChunk(state: StreamingSessionState, rawChunk: String): String {
+        var chunk = rawChunk
+        var pendingPrefix = state.reconnectPrefixPending
+        if (pendingPrefix.isEmpty()) return chunk
+
+        val overlap = pendingPrefix.commonPrefixWith(chunk)
+        if (overlap.isNotEmpty()) {
+            pendingPrefix = pendingPrefix.removePrefix(overlap)
+            chunk = chunk.removePrefix(overlap)
+        }
+
+        if (chunk.isNotEmpty() && pendingPrefix.isNotEmpty() && chunk.startsWith(pendingPrefix)) {
+            chunk = chunk.removePrefix(pendingPrefix)
+            pendingPrefix = ""
+        }
+
+        state.reconnectPrefixPending = pendingPrefix
+        return chunk
+    }
+
+    private suspend fun persistPartialContentWithError(state: StreamingSessionState) {
+        val content = state.streamingContent.toString().trimEnd()
+        clearReconnectStatus(state)
+        removeStreamingPlaceholder(state)
+        state.streamingContent.clear()
+        state.thinkingContent.clear()
+        state.reconnectPrefixPending = ""
+        if (!state.userMessagePersisted || state.hasFinalAssistantMessage) return
+        val finalText = if (content.isNotEmpty()) {
+            content + requestFailedSuffix
+        } else {
+            requestInterruptedFallback
+        }
+        addFinalAssistantMessage(state, finalText)
     }
 
     private suspend fun generateAppFlow(
@@ -263,8 +392,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         updateSessionLoadingIndicators()
         try {
             state.thinkingContent.clear()
-            addStreamingPlaceholder(state, "正在生成应用")
-            updateStreamingThinking(state, buildAppGenerationProgressText(elapsedSeconds = 0, receivedChars = 0))
+            addStreamingPlaceholder(state, status = "正在生成应用", useLoadingLayout = true)
+            updateStreamingThinking(
+                state,
+                buildAppGenerationProgressText(elapsedSeconds = 0, receivedChars = 0)
+            )
 
             val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
             val apiMessages = buildApiMessages(
@@ -293,6 +425,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             state.thinkingContent.append(event.text)
                             updateStreamingThinking(state, state.thinkingContent.toString())
                         }
+
                         is StreamingApiService.StreamEvent.Content -> {
                             htmlBuffer.append(event.text)
                             if (state.thinkingContent.isBlank()) {
@@ -305,6 +438,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 )
                             }
                         }
+
                         is StreamingApiService.StreamEvent.Done -> {
                             stopAppGenerationProgressHeartbeat(state)
                             if (state.thinkingContent.isBlank()) {
@@ -330,18 +464,35 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     )
                                     _appGenerated.value = file.absolutePath
                                 } else {
-                                    handleApiError(state, config, "模型返回内容中未找到合法 HTML", "生成网页应用")
+                                    handleApiError(
+                                        state,
+                                        config,
+                                        "模型返回内容中未找到合法 HTML",
+                                        "生成网页应用"
+                                    )
                                 }
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
-                                handleApiError(state, config, e.message ?: "保存 HTML 时出错", "生成网页应用")
+                                handleApiError(
+                                    state,
+                                    config,
+                                    e.message ?: "保存 HTML 时出错",
+                                    "生成网页应用"
+                                )
                             }
                         }
+
+                        is StreamingApiService.StreamEvent.Disconnected -> {
+                            stopAppGenerationProgressHeartbeat(state)
+                            handleApiError(state, config, event.message, "生成网页应用")
+                        }
+
                         is StreamingApiService.StreamEvent.Error -> {
                             stopAppGenerationProgressHeartbeat(state)
                             handleApiError(state, config, event.message, "生成网页应用")
                         }
-                        else -> {}
+
+                        is StreamingApiService.StreamEvent.Start -> Unit
                     }
                 }
         } finally {
@@ -369,7 +520,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     )
                 }
-                delay(APP_GENERATION_PROGRESS_INTERVAL_MS)
+                delay(appGenerationProgressIntervalMs)
             }
         }
     }
@@ -398,15 +549,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return listOf(elapsedLine, stageLine, receivedLine).joinToString("\n")
     }
 
-    private fun addStreamingPlaceholder(state: StreamingSessionState, status: String) {
+    private fun addStreamingPlaceholder(
+        state: StreamingSessionState,
+        status: String,
+        useLoadingLayout: Boolean
+    ) {
         state.lastStreamingContentUpdateAt = 0L
         state.lastStreamingThinkingUpdateAt = 0L
         state.placeholder = ChatMessage(
             messageId = streamingMessageId(state.sessionId),
             role = ChatMessage.ROLE_ASSISTANT,
-            content = status,
+            content = if (useLoadingLayout) "" else assistantStreamingPlaceholder,
             isStreaming = true,
-            thinking = null
+            thinking = null,
+            statusText = status,
+            showStatusLoader = true
         )
         publishStreamingPlaceholder(state)
     }
@@ -433,7 +590,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val placeholder = state.placeholder ?: return
         state.placeholder = placeholder.copy(
             content = content,
-            isStreaming = false
+            isStreaming = true,
+            statusText = null,
+            showStatusLoader = false
         )
         publishStreamingPlaceholder(state)
     }
@@ -441,7 +600,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun shouldUpdateStreamingContent(state: StreamingSessionState): Boolean {
         val now = System.currentTimeMillis()
         if (state.lastStreamingContentUpdateAt == 0L ||
-            now - state.lastStreamingContentUpdateAt >= STREAMING_UI_UPDATE_INTERVAL_MS) {
+            now - state.lastStreamingContentUpdateAt >= streamingUiUpdateIntervalMs
+        ) {
             state.lastStreamingContentUpdateAt = now
             return true
         }
@@ -451,7 +611,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun shouldUpdateStreamingThinking(state: StreamingSessionState): Boolean {
         val now = System.currentTimeMillis()
         if (state.lastStreamingThinkingUpdateAt == 0L ||
-            now - state.lastStreamingThinkingUpdateAt >= STREAMING_UI_UPDATE_INTERVAL_MS) {
+            now - state.lastStreamingThinkingUpdateAt >= streamingUiUpdateIntervalMs
+        ) {
             state.lastStreamingThinkingUpdateAt = now
             return true
         }
@@ -481,11 +642,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun updateStreamingStatusText(state: StreamingSessionState, text: String) {
         val placeholder = state.placeholder ?: return
         state.placeholder = placeholder.copy(
-            content = text,
-            thinking = null,
+            statusText = text,
+            showStatusLoader = true,
             isStreaming = true
         )
         publishStreamingPlaceholder(state)
+    }
+
+    private fun updateReconnectStatus(state: StreamingSessionState, secondsRemaining: Int) {
+        updateStreamingStatusText(state, "网络状态出错，尝试重连 ${secondsRemaining}秒")
+    }
+
+    private fun clearReconnectStatus(state: StreamingSessionState) {
+        val placeholder = state.placeholder ?: return
+        val hasVisibleContent = hasVisibleStreamingContent(placeholder.content)
+        state.placeholder = placeholder.copy(
+            statusText = if (hasVisibleContent) null else "正在思考",
+            showStatusLoader = !hasVisibleContent,
+            isStreaming = true
+        )
+        publishStreamingPlaceholder(state)
+    }
+
+    private fun hasVisibleStreamingContent(content: String): Boolean {
+        return content.isNotBlank() && content != assistantStreamingPlaceholder
     }
 
     private suspend fun handleApiError(
@@ -495,15 +675,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         scene: String,
         partialContentToKeep: String? = null
     ) {
-        val sessionId = state.sessionId
         state.thinkingContent.clear()
         state.streamingContent.clear()
+        state.reconnectPrefixPending = ""
 
-        val hasPlaceholder = state.placeholder != null
-        if (hasPlaceholder) {
+        if (state.placeholder != null) {
             updateStreamingStatusText(state, "出错了，馒头正在拼命分析…")
         } else {
-            addStreamingPlaceholder(state, "出错了，馒头正在拼命分析…")
+            addStreamingPlaceholder(state, "出错了，馒头正在拼命分析…", useLoadingLayout = false)
         }
 
         val analyzed = config?.let { ErrorAnalyzer.analyze(it, rawError, scene) }
@@ -514,8 +693,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             addFinalAssistantMessage(state, it)
         }
 
-        val finalText = analyzed ?: "出错了，请稍后重试。"
-        addFinalAssistantMessage(state, finalText)
+        addFinalAssistantMessage(state, analyzed ?: requestInterruptedFallback)
     }
 
     fun stopStreaming() {
@@ -529,19 +707,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         stopAppGenerationProgressHeartbeat(state)
         state.isGeneratingApp = false
         if (persistFallback) {
-            viewModelScope.launch {
+            fallbackScope.launch {
                 persistFallbackIfNeeded(state)
             }
         }
         state.streamingContent.clear()
         state.thinkingContent.clear()
+        state.reconnectPrefixPending = ""
         removeStreamingPlaceholder(state)
         updateSessionLoadingIndicators()
     }
 
-    private fun cancelAllStreaming() {
+    private fun cancelAllStreaming(persistFallback: Boolean = false) {
         streamingStates.keys.toList().forEach { sessionId ->
-            cancelStreaming(sessionId)
+            cancelStreaming(sessionId, persistFallback = persistFallback)
         }
     }
 
@@ -553,6 +732,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             streamingStates.remove(state.sessionId)
             state.streamingContent.clear()
             state.thinkingContent.clear()
+            state.reconnectPrefixPending = ""
             removeStreamingPlaceholder(state)
             updateSessionLoadingIndicators()
         }
@@ -576,21 +756,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun persistFallbackIfNeeded(state: StreamingSessionState) {
         if (!state.userMessagePersisted || state.hasFinalAssistantMessage) return
-        addFinalAssistantMessage(state, REQUEST_INTERRUPTED_FALLBACK)
+        val partialContent = state.streamingContent.toString().trimEnd()
+        val fallback = if (partialContent.isNotEmpty()) {
+            partialContent + requestFailedSuffix
+        } else {
+            requestInterruptedFallback
+        }
+        addFinalAssistantMessage(state, fallback)
     }
 
     private fun streamingMessageId(sessionId: Long): Long {
         return -sessionId.coerceAtLeast(1L)
     }
 
-    private fun createNewSessionAndSendMessage(content: String, imagePath: String?, imageUris: List<Uri>?) {
+    private fun createNewSessionAndSendMessage(
+        content: String,
+        imagePath: String?,
+        imageUris: List<Uri>?
+    ) {
         messagesJob?.cancel()
         viewModelScope.launch {
             val sessionId = repository.createSession(content.ifEmpty { "[图片]" })
             _currentSessionId.value = sessionId
             _messages.value = emptyList()
             loadMessages(sessionId)
-            kotlinx.coroutines.delay(100)
+            delay(100)
             sendMessage(content, imagePath, imageUris)
         }
     }
@@ -620,10 +810,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     ): List<ApiMessage> {
         val messages = mutableListOf<ApiMessage>()
 
-        messages.add(ApiMessage(
-            role = "system",
-            content = systemPrompt
-        ))
+        messages.add(
+            ApiMessage(
+                role = "system",
+                content = systemPrompt
+            )
+        )
 
         historyMessages.forEachIndexed { index, entity ->
             val isLastUserMessage = index == historyMessages.lastIndex && entity.role == "user"
@@ -635,7 +827,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     contentParts.add(ContentPart(type = "text", text = contextContent))
                 }
                 currentImageBase64List.forEach { base64 ->
-                    contentParts.add(ContentPart(type = "image_url", imageUrl = ImageUrl(url = base64)))
+                    contentParts.add(
+                        ContentPart(
+                            type = "image_url",
+                            imageUrl = ImageUrl(url = base64)
+                        )
+                    )
                 }
                 messages.add(ApiMessage(role = entity.role, content = contentParts))
             } else {
@@ -663,7 +860,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** 删除单条消息（仅对持久化到 DB 的消息生效，流式占位 id=-1 会被忽略）。 */
     fun deleteMessage(messageId: Long) {
         if (messageId <= 0) return
         viewModelScope.launch {
@@ -684,7 +880,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val originalMessage = repository.getMessageById(messageId) ?: return@launch
             if (originalMessage.role != ChatMessage.ROLE_USER) return@launch
 
-            cancelStreaming(originalMessage.sessionId)
+            cancelStreaming(originalMessage.sessionId, persistFallback = true)
             val editedMessage = repository.updateMessageContentAndDeleteAfter(messageId, content)
                 ?: return@launch
             if (repository.getMessageCount(editedMessage.sessionId) == 1) {
@@ -731,7 +927,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearCurrentSession() {
-        _currentSessionId.value?.let { cancelStreaming(it) }
+        _currentSessionId.value?.let { cancelStreaming(it, persistFallback = true) }
         _currentSessionId.value = null
         _messages.value = emptyList()
         updateSessionLoadingIndicators()
@@ -750,9 +946,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        super.onCleared()
-        cancelAllStreaming()
+        cancelAllStreaming(persistFallback = true)
         messagesJob?.cancel()
+        super.onCleared()
     }
 }
 
@@ -767,7 +963,8 @@ private data class StreamingSessionState(
     var userMessagePersisted: Boolean = false,
     var hasFinalAssistantMessage: Boolean = false,
     var lastStreamingContentUpdateAt: Long = 0L,
-    var lastStreamingThinkingUpdateAt: Long = 0L
+    var lastStreamingThinkingUpdateAt: Long = 0L,
+    var reconnectPrefixPending: String = ""
 )
 
 private fun ChatMessageEntity.toChatMessage() = ChatMessage(
@@ -777,5 +974,7 @@ private fun ChatMessageEntity.toChatMessage() = ChatMessage(
     imagePath = imagePath,
     timestamp = timestamp,
     isStreaming = false,
-    appHtmlPath = appHtmlPath
+    appHtmlPath = appHtmlPath,
+    statusText = null,
+    showStatusLoader = false
 )
