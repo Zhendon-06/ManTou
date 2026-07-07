@@ -9,23 +9,20 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
-import okhttp3.*
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.MediaType.Companion.toMediaType
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
-/**
- * 流式 API 服务 - 支持 SSE (Server-Sent Events) 流式输出
- *
- * 两种调用入口：
- *  - streamChatCompletion(request)          : 旧路径，沿用 ApiConfig 写死的 DeepSeek/SiliconFlow
- *  - streamChatCompletionDynamic(config,..) : 新路径，根据 ChatCallConfig 动态切换 baseUrl/apiKey/model 与 OpenAI / Anthropic 格式
- */
 object StreamingApiService {
 
-    private const val ANTHROPIC_VERSION = "2023-06-01"
-    private const val JSON_MEDIA_TYPE = "application/json; charset=utf-8"
+    private const val anthropicVersion = "2023-06-01"
+    private const val jsonMediaType = "application/json; charset=utf-8"
 
     private val gson = Gson()
 
@@ -57,8 +54,8 @@ object StreamingApiService {
             return@callbackFlow
         }
         val streamRequest = request.copy(model = config.model, stream = true)
-        val jsonBody = gson.toJson(streamRequest)
-        val requestBody = jsonBody.toRequestBody(JSON_MEDIA_TYPE.toMediaType())
+        val requestBody = gson.toJson(streamRequest)
+            .toRequestBody(jsonMediaType.toMediaType())
 
         val builder = Request.Builder()
             .url(url)
@@ -70,32 +67,12 @@ object StreamingApiService {
         }
 
         val call = client.newCall(builder.build())
-        call.enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                trySend(StreamEvent.Error("网络错误: ${e.message}"))
-                close()
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                if (!response.isSuccessful) {
-                    val errBody = response.body?.string().orEmpty().take(200)
-                    trySend(StreamEvent.Error("请求失败 (${response.code}) $errBody"))
-                    close()
-                    return
-                }
-                trySend(StreamEvent.Start)
-                response.body?.charStream()?.buffered()?.useLines { lines ->
-                    lines.forEach { line ->
-                        processOpenAiLine(line)?.let { event ->
-                            trySend(event)
-                            if (event is StreamEvent.Done) return@useLines
-                        }
-                    }
-                }
-                response.close()
-                close()
-            }
-        })
+        call.enqueue(
+            createStreamingCallback(
+                call = call,
+                onEachLine = ::processOpenAiLine
+            )
+        )
         awaitClose { call.cancel() }
     }.flowOn(Dispatchers.IO)
 
@@ -110,13 +87,13 @@ object StreamingApiService {
             close()
             return@callbackFlow
         }
-        val bodyJson = buildAnthropicBody(config.model, request)
-        val requestBody = bodyJson.toString()
-            .toRequestBody(JSON_MEDIA_TYPE.toMediaType())
+        val requestBody = buildAnthropicBody(config.model, request)
+            .toString()
+            .toRequestBody(jsonMediaType.toMediaType())
 
         val builder = Request.Builder()
             .url(url)
-            .addHeader("anthropic-version", ANTHROPIC_VERSION)
+            .addHeader("anthropic-version", anthropicVersion)
             .addHeader("Content-Type", "application/json")
             .addHeader("Accept", "text/event-stream")
             .post(requestBody)
@@ -125,9 +102,36 @@ object StreamingApiService {
         }
 
         val call = client.newCall(builder.build())
-        call.enqueue(object : Callback {
+        call.enqueue(
+            createStreamingCallback(
+                call = call,
+                onEachLine = ::processAnthropicLine
+            )
+        )
+        awaitClose { call.cancel() }
+    }.flowOn(Dispatchers.IO)
+
+    private fun kotlinx.coroutines.channels.ProducerScope<StreamEvent>.createStreamingCallback(
+        call: Call,
+        onEachLine: (String) -> StreamEvent?
+    ): Callback {
+        return object : Callback {
+            private var streamStarted = false
+            private var sawDone = false
+            private var disconnectionReported = false
+
             override fun onFailure(call: Call, e: IOException) {
-                trySend(StreamEvent.Error("网络错误: ${e.message}"))
+                if (call.isCanceled()) {
+                    close()
+                    return
+                }
+
+                val message = "网络状态出错: ${e.message ?: "连接已断开"}"
+                if (streamStarted) {
+                    trySend(StreamEvent.Disconnected(message))
+                } else {
+                    trySend(StreamEvent.Error(message))
+                }
                 close()
             }
 
@@ -135,28 +139,46 @@ object StreamingApiService {
                 if (!response.isSuccessful) {
                     val errBody = response.body?.string().orEmpty().take(200)
                     trySend(StreamEvent.Error("请求失败 (${response.code}) $errBody"))
+                    response.close()
                     close()
                     return
                 }
+
+                streamStarted = true
                 trySend(StreamEvent.Start)
-                response.body?.charStream()?.buffered()?.useLines { lines ->
-                    lines.forEach { line ->
-                        processAnthropicLine(line)?.let { event ->
+
+                try {
+                    response.body?.charStream()?.buffered()?.useLines { lines ->
+                        lines.forEach { line ->
+                            val event = onEachLine(line) ?: return@forEach
+                            if (event is StreamEvent.Done) {
+                                sawDone = true
+                            }
                             trySend(event)
-                            if (event is StreamEvent.Done) return@useLines
+                            if (event is StreamEvent.Done) {
+                                return@useLines
+                            }
                         }
                     }
+                } catch (e: IOException) {
+                    if (!call.isCanceled()) {
+                        disconnectionReported = true
+                        trySend(
+                            StreamEvent.Disconnected(
+                                "网络状态出错: ${e.message ?: "连接已断开"}"
+                            )
+                        )
+                    }
+                } finally {
+                    response.close()
+                    if (!call.isCanceled() && streamStarted && !sawDone && !disconnectionReported) {
+                        trySend(StreamEvent.Disconnected("网络状态出错: 连接已断开"))
+                    }
+                    close()
                 }
-                response.close()
-                close()
             }
-        })
-        awaitClose { call.cancel() }
-    }.flowOn(Dispatchers.IO)
-
-    // ===================================================================
-    // Anthropic body 构造
-    // ===================================================================
+        }
+    }
 
     private fun buildAnthropicBody(model: String, request: ChatRequest): JsonObject {
         val root = JsonObject()
@@ -173,12 +195,15 @@ object StreamingApiService {
                 "system" -> {
                     extractText(msg.content)?.let { systemTexts.add(it) }
                 }
+
                 "user", "assistant" -> {
                     messagesArr.add(convertAnthropicMessage(msg))
                 }
             }
         }
-        if (systemTexts.isNotEmpty()) root.addProperty("system", systemTexts.joinToString("\n\n"))
+        if (systemTexts.isNotEmpty()) {
+            root.addProperty("system", systemTexts.joinToString("\n\n"))
+        }
         root.add("messages", messagesArr)
         return root
     }
@@ -195,15 +220,18 @@ object StreamingApiService {
                 if (part is ContentPart) {
                     when (part.type) {
                         "text" -> {
-                            val b = JsonObject()
-                            b.addProperty("type", "text")
-                            b.addProperty("text", part.text.orEmpty())
-                            blocks.add(b)
+                            val block = JsonObject()
+                            block.addProperty("type", "text")
+                            block.addProperty("text", part.text.orEmpty())
+                            blocks.add(block)
                         }
+
                         "image_url" -> {
                             val rawUrl = part.imageUrl?.url.orEmpty()
-                            val b = anthropicImageBlock(rawUrl)
-                            if (b != null) blocks.add(b)
+                            val block = anthropicImageBlock(rawUrl)
+                            if (block != null) {
+                                blocks.add(block)
+                            }
                         }
                     }
                 }
@@ -215,22 +243,21 @@ object StreamingApiService {
         return obj
     }
 
-    /** OpenAI 的 image_url 通常是 data:image/jpeg;base64,xxx，转成 Anthropic 的 image block。 */
     private fun anthropicImageBlock(rawUrl: String): JsonObject? {
         if (!rawUrl.startsWith("data:")) return null
-        val commaIdx = rawUrl.indexOf(',')
-        if (commaIdx <= 5) return null
-        val meta = rawUrl.substring(5, commaIdx)
+        val commaIndex = rawUrl.indexOf(',')
+        if (commaIndex <= 5) return null
+        val meta = rawUrl.substring(5, commaIndex)
         val mediaType = meta.substringBefore(';').ifEmpty { "image/jpeg" }
-        val data = rawUrl.substring(commaIdx + 1)
-        val b = JsonObject()
-        b.addProperty("type", "image")
-        val src = JsonObject()
-        src.addProperty("type", "base64")
-        src.addProperty("media_type", mediaType)
-        src.addProperty("data", data)
-        b.add("source", src)
-        return b
+        val data = rawUrl.substring(commaIndex + 1)
+        val block = JsonObject()
+        block.addProperty("type", "image")
+        val source = JsonObject()
+        source.addProperty("type", "base64")
+        source.addProperty("media_type", mediaType)
+        source.addProperty("data", data)
+        block.add("source", source)
+        return block
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -242,15 +269,11 @@ object StreamingApiService {
                 .mapNotNull { it.text }
                 .joinToString("\n")
                 .ifEmpty { null }
+
             else -> null
         }
     }
 
-    // ===================================================================
-    // SSE 解析
-    // ===================================================================
-
-    /** OpenAI 兼容: 行格式 "data: {json}" 或 "data: [DONE]" */
     private fun processOpenAiLine(line: String): StreamEvent? {
         if (line.isBlank() || line.startsWith(":") || !line.startsWith("data:")) return null
         val data = line.removePrefix("data:").trim()
@@ -260,15 +283,11 @@ object StreamingApiService {
             val delta = chunk.choices?.firstOrNull()?.delta ?: return null
             delta.reasoningContent?.let { return StreamEvent.Thinking(it) }
             delta.content?.let { StreamEvent.Content(it) }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
 
-    /**
-     * Anthropic: 行格式 "event: xxx" 与 "data: {json}" 交替。
-     * 我们只需要解析 data 行，按 json 的 type 字段判断。
-     */
     private fun processAnthropicLine(line: String): StreamEvent? {
         if (line.isBlank() || !line.startsWith("data:")) return null
         val data = line.removePrefix("data:").trim()
@@ -280,28 +299,33 @@ object StreamingApiService {
                     val delta = obj.getAsJsonObject("delta") ?: return null
                     when (delta.get("type")?.asString) {
                         "text_delta" -> delta.get("text")?.asString?.let { StreamEvent.Content(it) }
-                        "thinking_delta" -> delta.get("thinking")?.asString?.let { StreamEvent.Thinking(it) }
+                        "thinking_delta" -> {
+                            delta.get("thinking")?.asString?.let { StreamEvent.Thinking(it) }
+                        }
+
                         else -> null
                     }
                 }
+
                 "message_stop" -> StreamEvent.Done
                 "error" -> {
-                    val msg = obj.getAsJsonObject("error")?.get("message")?.asString
-                    StreamEvent.Error(msg ?: "Anthropic 流式错误")
+                    val message = obj.getAsJsonObject("error")?.get("message")?.asString
+                    StreamEvent.Error(message ?: "Anthropic 流式错误")
                 }
+
                 else -> null
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             null
         }
     }
 
-    /** 流式事件 */
     sealed class StreamEvent {
         object Start : StreamEvent()
         data class Thinking(val text: String) : StreamEvent()
         data class Content(val text: String) : StreamEvent()
         object Done : StreamEvent()
+        data class Disconnected(val message: String) : StreamEvent()
         data class Error(val message: String) : StreamEvent()
     }
 }
