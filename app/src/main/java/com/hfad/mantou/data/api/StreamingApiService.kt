@@ -3,6 +3,7 @@ package com.hfad.mantou.data.api
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.hfad.mantou.data.logging.ApiLoggingInterceptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -32,6 +33,7 @@ object StreamingApiService {
         .connectTimeout(60, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
+        .addInterceptor(ApiLoggingInterceptor())
         .build()
 
     fun streamChatCompletion(

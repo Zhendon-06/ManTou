@@ -263,6 +263,10 @@ class ChatRepository(private val chatDao: ChatDao) {
         return chatDao.getMessagesBySessionIdOnce(sessionId)
     }
 
+    suspend fun getMessageById(messageId: Long): ChatMessageEntity? {
+        return chatDao.getMessageById(messageId)
+    }
+
     /**
      * 获取某个会话的消息数量
      * 
@@ -288,5 +292,12 @@ class ChatRepository(private val chatDao: ChatDao) {
     /** 更新单条消息内容（长按菜单调用）。 */
     suspend fun updateMessageContent(messageId: Long, content: String) {
         chatDao.updateMessageContent(messageId, content)
+    }
+
+    suspend fun updateMessageContentAndDeleteAfter(messageId: Long, content: String): ChatMessageEntity? {
+        val message = chatDao.getMessageById(messageId) ?: return null
+        chatDao.updateMessageContent(messageId, content)
+        chatDao.deleteMessagesAfter(message.sessionId, message.timestamp, message.messageId)
+        return message.copy(content = content)
     }
 }

@@ -1,6 +1,7 @@
 package com.hfad.mantou.adapter
 
 import android.view.LayoutInflater
+import android.view.View
 import android.view.ViewGroup
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
@@ -18,6 +19,19 @@ class SessionAdapter(
     private val onSessionClick: (ChatSessionEntity) -> Unit,
     private val onSessionLongClick: (ChatSessionEntity) -> Unit
 ) : ListAdapter<ChatSessionEntity, SessionAdapter.SessionViewHolder>(SessionDiffCallback()) {
+
+    private var runningSessionIds: Set<Long> = emptySet()
+
+    fun setRunningSessionIds(sessionIds: Set<Long>) {
+        if (runningSessionIds == sessionIds) return
+        val changedSessionIds = runningSessionIds.union(sessionIds) - runningSessionIds.intersect(sessionIds)
+        runningSessionIds = sessionIds
+        currentList.forEachIndexed { index, session ->
+            if (session.sessionId in changedSessionIds) {
+                notifyItemChanged(index)
+            }
+        }
+    }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): SessionViewHolder {
         val binding = ItemSessionBinding.inflate(
@@ -59,6 +73,8 @@ class SessionAdapter(
             // 显示会话标题（第一个用户问题），只显示一行
             binding.tvSessionTitle.text = session.title
             binding.tvSessionTitle.maxLines = 1
+            binding.progressSessionLoading.visibility =
+                if (session.sessionId in runningSessionIds) View.VISIBLE else View.GONE
 
             // 显示创建时间
             val dateFormat = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault())

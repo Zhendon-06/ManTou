@@ -90,6 +90,12 @@ interface ChatDao {
      */
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY timestamp ASC")
     suspend fun getMessagesBySessionIdOnce(sessionId: Long): List<ChatMessageEntity>
+
+    /**
+     * 根据 messageId 查询单条消息
+     */
+    @Query("SELECT * FROM chat_messages WHERE messageId = :messageId LIMIT 1")
+    suspend fun getMessageById(messageId: Long): ChatMessageEntity?
     
     /**
      * 查询某个会话的消息数量
@@ -108,6 +114,21 @@ interface ChatDao {
      */
     @Query("UPDATE chat_messages SET content = :content WHERE messageId = :messageId")
     suspend fun updateMessageContent(messageId: Long, content: String)
+
+    /**
+     * 删除同一会话中位于某条消息之后的所有消息，用于编辑用户请求后重新生成分支
+     */
+    @Query(
+        """
+        DELETE FROM chat_messages
+        WHERE sessionId = :sessionId
+          AND (
+            timestamp > :timestamp
+            OR (timestamp = :timestamp AND messageId > :messageId)
+          )
+        """
+    )
+    suspend fun deleteMessagesAfter(sessionId: Long, timestamp: Long, messageId: Long)
     
     /**
      * 删除某个会话的所有消息

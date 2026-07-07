@@ -7,7 +7,9 @@
       "Bash(./gradlew :app:generateToolsDoc)",
       "Bash(./gradlew :app:generateToolsDoc --rerun-tasks)",
       "Bash(grep *)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(dir D:\\\\AndroidProject\\\\ManTou\\\\app\\\\src\\\\main\\\\res\\\\drawable)",
+      "Bash(findstr /i \"webappicon ic_topic ic_menu\")"
     ]
   }
 }

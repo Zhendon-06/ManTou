@@ -2,6 +2,7 @@ package com.hfad.mantou.data.api
 
 import com.google.gson.JsonParser
 import com.hfad.mantou.data.database.ProviderEntity
+import com.hfad.mantou.data.logging.ApiLoggingInterceptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -24,6 +25,7 @@ object ModelListApiService {
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .addInterceptor(ApiLoggingInterceptor())
         .build()
 
     suspend fun fetchModels(
