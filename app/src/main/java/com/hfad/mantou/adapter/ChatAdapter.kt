@@ -1,4 +1,4 @@
-package com.hfad.mantou.adapter
+﻿package com.hfad.mantou.adapter
 
 import android.animation.AnimatorInflater
 import android.animation.AnimatorSet
@@ -20,11 +20,11 @@ import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import com.bumptech.glide.Glide
 import com.bumptech.glide.load.DataSource
 import com.bumptech.glide.load.engine.GlideException
 import com.bumptech.glide.request.RequestListener
 import com.bumptech.glide.request.target.Target
-import com.bumptech.glide.Glide
 import com.hfad.mantou.R
 import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.data.preferences.AppearanceSettingsStore
@@ -51,7 +51,7 @@ class ChatAdapter(
     }
 
     private var appearanceSettings = AppearanceSettingsStore.Settings()
-    private var autoTextColor: Int = android.graphics.Color.BLACK
+    private var autoTextColor: Int = Color.BLACK
 
     init {
         setHasStableIds(true)
@@ -75,9 +75,8 @@ class ChatAdapter(
     override fun getItemViewType(position: Int): Int {
         val message = getItem(position)
         return when {
-            message.isStreaming -> VIEW_TYPE_LOADING
+            message.isStreaming && message.content.isBlank() -> VIEW_TYPE_LOADING
             message.role == ChatMessage.ROLE_USER -> VIEW_TYPE_USER
-            message.role == ChatMessage.ROLE_ASSISTANT -> VIEW_TYPE_ASSISTANT
             else -> VIEW_TYPE_ASSISTANT
         }
     }
@@ -89,30 +88,15 @@ class ChatAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
-            VIEW_TYPE_USER -> {
-                val binding = ItemChatUserBinding.inflate(
-                    LayoutInflater.from(parent.context),
-                    parent,
-                    false
-                )
-                UserMessageViewHolder(binding)
-            }
-            VIEW_TYPE_ASSISTANT -> {
-                val binding = ItemChatAssistantBinding.inflate(
-                    LayoutInflater.from(parent.context),
-                    parent,
-                    false
-                )
-                AssistantMessageViewHolder(binding)
-            }
-            VIEW_TYPE_LOADING -> {
-                val binding = ItemChatLoadingBinding.inflate(
-                    LayoutInflater.from(parent.context),
-                    parent,
-                    false
-                )
-                LoadingViewHolder(binding)
-            }
+            VIEW_TYPE_USER -> UserMessageViewHolder(
+                ItemChatUserBinding.inflate(LayoutInflater.from(parent.context), parent, false)
+            )
+            VIEW_TYPE_ASSISTANT -> AssistantMessageViewHolder(
+                ItemChatAssistantBinding.inflate(LayoutInflater.from(parent.context), parent, false)
+            )
+            VIEW_TYPE_LOADING -> LoadingViewHolder(
+                ItemChatLoadingBinding.inflate(LayoutInflater.from(parent.context), parent, false)
+            )
             else -> throw IllegalArgumentException("未知的视图类型: $viewType")
         }
     }
@@ -135,25 +119,16 @@ class ChatAdapter(
             val message = getItem(position)
             when (holder) {
                 is UserMessageViewHolder -> {
-                    if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) {
-                        holder.bind(message)
-                    } else {
-                        super.onBindViewHolder(holder, position, payloads)
-                    }
+                    if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) holder.bind(message)
+                    else super.onBindViewHolder(holder, position, payloads)
                 }
                 is AssistantMessageViewHolder -> {
-                    if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) {
-                        holder.bind(message)
-                    } else {
-                        holder.updateContent(message.content)
-                    }
+                    if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) holder.bind(message)
+                    else holder.updateContent(message)
                 }
                 is LoadingViewHolder -> {
-                    if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) {
-                        holder.bind(message)
-                    } else {
-                        holder.updateThinking(message.thinking)
-                    }
+                    if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) holder.bind(message)
+                    else holder.updateThinking(message.thinking)
                 }
                 else -> super.onBindViewHolder(holder, position, payloads)
             }
@@ -202,6 +177,7 @@ class ChatAdapter(
         private val binding: ItemChatAssistantBinding
     ) : RecyclerView.ViewHolder(binding.root) {
         private var appWebView: WebView? = null
+        private var statusAnimatorSet: AnimatorSet? = null
 
         init {
             binding.root.setOnLongClickListener {
@@ -216,13 +192,14 @@ class ChatAdapter(
         fun bind(message: ChatMessage) {
             bindRichText(binding.tvMessage, message.content, RichTextRole.ASSISTANT)
             bindImage(binding.ivImage, message.imagePath)
+            bindStatus(message)
 
             if (!message.appHtmlPath.isNullOrEmpty()) {
                 binding.webViewContainer.visibility = View.VISIBLE
                 setupWebView(message.appHtmlPath)
             } else {
                 binding.webViewContainer.visibility = View.GONE
-                clearWebView()
+                clearWebViewOnly()
             }
         }
 
@@ -269,14 +246,54 @@ class ChatAdapter(
         }
 
         fun clearWebView() {
+            statusAnimatorSet?.cancel()
+            statusAnimatorSet = null
+            clearWebViewOnly()
+        }
+
+        private fun clearWebViewOnly() {
             appWebView?.let { webView ->
                 onWebViewReleased?.invoke(webView)
                 webView.loadUrl("about:blank")
             }
         }
 
-        fun updateContent(content: String) {
-            bindRichText(binding.tvMessage, content, RichTextRole.ASSISTANT)
+        fun updateContent(message: ChatMessage) {
+            bindRichText(binding.tvMessage, message.content, RichTextRole.ASSISTANT)
+            bindStatus(message)
+        }
+
+        private fun bindStatus(message: ChatMessage) {
+            val statusText = message.statusText
+            if (statusText.isNullOrBlank()) {
+                binding.statusContainer.visibility = View.GONE
+                statusAnimatorSet?.cancel()
+                statusAnimatorSet = null
+                return
+            }
+
+            binding.statusContainer.visibility = View.VISIBLE
+            binding.tvStatus.text = statusText
+            binding.tvStatus.textSize = (appearanceSettings.chatTextSizeSp - 3f).coerceAtLeast(12f)
+            binding.tvStatus.setTextColor(
+                ContextCompat.getColor(binding.root.context, R.color.mt_text_secondary)
+            )
+
+            val dotVisibility = if (message.showStatusLoader) View.VISIBLE else View.GONE
+            binding.dot1.visibility = dotVisibility
+            binding.dot2.visibility = dotVisibility
+            binding.dot3.visibility = dotVisibility
+
+            statusAnimatorSet?.cancel()
+            statusAnimatorSet = null
+            if (message.showStatusLoader) {
+                val animator = AnimatorInflater.loadAnimator(binding.root.context, R.animator.loading_animation)
+                if (animator is AnimatorSet) {
+                    statusAnimatorSet = animator
+                    statusAnimatorSet?.setTarget(binding.statusContainer)
+                    statusAnimatorSet?.start()
+                }
+            }
         }
     }
 
@@ -288,7 +305,7 @@ class ChatAdapter(
 
         fun bind(message: ChatMessage) {
             val context = binding.root.context
-            binding.tvThinkingTitle.text = message.content.ifBlank { "正在处理" }
+            binding.tvThinkingTitle.text = message.statusText ?: message.content.ifBlank { "正在处理" }
             binding.tvThinkingTitle.textSize = appearanceSettings.chatTextSizeSp
             binding.tvThinkingTitle.setTextColor(
                 ContextCompat.getColor(context, R.color.mt_text_primary)
@@ -309,10 +326,7 @@ class ChatAdapter(
             }
             binding.thinkingPanel.visibility = View.VISIBLE
             bindRichText(binding.tvThinking, thinking, RichTextRole.THINKING)
-            val sv = binding.svThinking
-            sv.post {
-                sv.fullScroll(View.FOCUS_DOWN)
-            }
+            binding.svThinking.post { binding.svThinking.fullScroll(View.FOCUS_DOWN) }
         }
 
         fun unbind() {
@@ -472,9 +486,11 @@ class ChatMessageDiffCallback : DiffUtil.ItemCallback<ChatMessage>() {
 
     override fun getChangePayload(oldItem: ChatMessage, newItem: ChatMessage): Any? {
         if (oldItem.messageId == newItem.messageId &&
-            oldItem.content != newItem.content &&
             oldItem.role == newItem.role &&
-            !oldItem.isStreaming && !newItem.isStreaming) {
+            (oldItem.content != newItem.content ||
+                oldItem.statusText != newItem.statusText ||
+                oldItem.showStatusLoader != newItem.showStatusLoader) &&
+            oldItem.role == ChatMessage.ROLE_ASSISTANT) {
             return "content_changed"
         }
 

@@ -78,7 +78,51 @@
             android:textColor="@color/mt_text_primary"
             android:textIsSelectable="true"
             android:textSize="16sp"
-            tools:text="我已经查看了工作区的结构：\n\n根目录：只有一个 `.omnibot` 配置目录\n\n- `agent` - Agent 配置目录\n- `attachments` - 附件存储\n- `browser` - 浏览器相关" />
+            tools:text="我已经查看了工作区的结构。" />
+
+        <LinearLayout
+            android:id="@+id/statusContainer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone"
+            tools:visibility="visible">
+
+            <View
+                android:id="@+id/dot1"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_marginEnd="4dp"
+                android:alpha="0.3"
+                android:background="@drawable/loading_dot" />
+
+            <View
+                android:id="@+id/dot2"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_marginEnd="4dp"
+                android:alpha="0.6"
+                android:background="@drawable/loading_dot" />
+
+            <View
+                android:id="@+id/dot3"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:layout_marginEnd="8dp"
+                android:alpha="1.0"
+                android:background="@drawable/loading_dot" />
+
+            <TextView
+                android:id="@+id/tvStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="13sp"
+                tools:text="网络状态出错，尝试重连 5秒" />
+
+        </LinearLayout>
 
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/webViewContainer"
