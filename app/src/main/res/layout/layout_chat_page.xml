@@ -53,6 +53,46 @@
                 android:text="今天有什么可以帮您?"
                 android:textColor="@color/mt_text_primary"
                 android:textSize="20sp" />
+
+            <com.google.android.material.chip.ChipGroup
+                android:id="@+id/greetingActionChipGroup"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="center"
+                app:chipSpacingHorizontal="10dp"
+                app:singleLine="true">
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipStartTask"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minHeight="40dp"
+                    android:text="开始任务"
+                    android:textColor="@color/mt_primary_dark"
+                    android:textSize="14sp"
+                    app:chipBackgroundColor="@color/mt_surface_blue"
+                    app:chipMinHeight="40dp"
+                    app:chipStrokeColor="@color/mt_primary_soft"
+                    app:chipStrokeWidth="1dp"
+                    app:ensureMinTouchTargetSize="false"
+                    app:rippleColor="@color/mt_primary_soft" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipWriteResume"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:minHeight="40dp"
+                    android:text="编写简历"
+                    android:textColor="@color/mt_primary_dark"
+                    android:textSize="14sp"
+                    app:chipBackgroundColor="@color/mt_surface_blue"
+                    app:chipMinHeight="40dp"
+                    app:chipStrokeColor="@color/mt_primary_soft"
+                    app:chipStrokeWidth="1dp"
+                    app:ensureMinTouchTargetSize="false"
+                    app:rippleColor="@color/mt_primary_soft" />
+            </com.google.android.material.chip.ChipGroup>
         </LinearLayout>
 
     </FrameLayout>
