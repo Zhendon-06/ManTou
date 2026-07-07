@@ -15,8 +15,8 @@ android {
         applicationId = "com.hfad.mantou"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "2.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         
@@ -52,6 +52,9 @@ android {
     buildFeatures {
         viewBinding = true
         buildConfig = true  // 启用 BuildConfig
+    }
+    androidResources {
+        noCompress += "onnx"
     }
 }
 
@@ -228,6 +231,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.lifecycle.livedata.ktx)
     implementation(libs.androidx.fragment.ktx)
+
+    // Local embedding inference
+    implementation(libs.onnxruntime.android)
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

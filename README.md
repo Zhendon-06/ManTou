@@ -1,4 +1,4 @@
-# 馒头 AI (ManTou AI)
+当前版本：**v2.0.1**
 
 馒头 AI 是一个 Android 智能体应用。它支持多轮聊天、图片对话、模型自定义配置，也可以根据一句话生成可运行的网页 App，并在应用内直接预览、全屏使用和持久化数据。
 
@@ -11,10 +11,16 @@
 
 - 支持多轮上下文对话
 - 支持流式输出
-- 支持图片对话
+- 支持图片对话，可查看聊天中的图片
 - 支持历史会话管理、归档和搜索
+- 支持多会话同时请求，互不阻塞
+- 支持请求中途停止
 - 支持消息复制、删除、编辑等长按操作
+- 支持编辑用户消息后重新发送
 - 支持上下文阈值配置
+- 支持语音输入（适配mimo，输入apikey之后自动连接）
+- 请求失败时由 LLM 给出问题分析与解决方案，而非原始报错
+- 详细请求日志查看页，便于排查接口问题
 
 ### 一句话生成网页 App
 
@@ -25,6 +31,7 @@
 - 支持分享生成的 HTML；非馒头环境打开时会提示使用馒头 App
 - 每个网页 App 自动绑定一个同名 JSON 数据文件，用于持久化待办、笔记、设置、进度等数据
 - `generated_apps` 目录按项目分组：一个项目一个二级目录，HTML 和关联 JSON 放在同一个目录中
+示例：<img width="300" height="669" alt="c249d138e3ea57e4dd90c5872294ee3e" src="https://github.com/user-attachments/assets/359fda27-2463-4942-975b-8c363cf1ec64" />
 
 示例结构：
 
@@ -46,12 +53,20 @@ generated_apps/
   - `SOUL.md`：Agent 灵魂/身份
   - `CHAT.md`：纯聊天系统提示词
   - `MEMORY.md`：长期记忆
+示例：<img width="300" height="669" alt="44e27f3fd2723c3aa21ebf28019b8a82" src="https://github.com/user-attachments/assets/2af757b4-43c5-48b8-8b11-96985225deef" />
+
+### 虚拟桌面
+
+- 提供独立的"桌面"入口，集中展示所有已生成的网页 App
+- 点击图标即可全屏运行对应 App，类似系统应用抽屉
+示例：<img width="300" height="669" alt="002be394cfb7bcd16f1037fb9c22f180" src="https://github.com/user-attachments/assets/aef72467-9578-424c-ad66-679f8914d63f" />
 
 ### 设置与外观
 
 - 侧边栏设置按钮进入统一设置页
 - 模型配置、外观设置、Workspace 记忆设置集中管理
 - 外观设置支持选择聊天和 Workspace 背景壁纸，并可恢复默认背景
+- 文字颜色根据壁纸亮度自动反色，保证可读性
 
 ### 模型配置
 
@@ -69,6 +84,39 @@ generated_apps/
 3. 填写名称、Base URL、API Key 和接口格式。
 4. 点击拉取模型列表，选择要使用的模型。
 5. 回到聊天页，直接发送消息、图片，或描述想生成的网页 App。
+<img width="300" height="669" alt="ed43d748ac0ad99432e66f15ec8ca302" src="https://github.com/user-attachments/assets/c0238adc-684e-410b-8121-08c17b145343" />
+<img width="300" height="669" alt="848d75669c2027f50d7cdf1688e53ffa" src="https://github.com/user-attachments/assets/78b06b75-03e7-4a8b-a8fa-198dc86cbbdf" />
+<img width="300" height="669" alt="1dc9f11ad87a2c67ba1e80df2de6ffaf" src="https://github.com/user-attachments/assets/0a6b9da1-6acd-438a-a11a-dad5f0cfd140" />
+<img width="300" height="669" alt="66451ba6de1e477f431bba8187f34a53" src="https://github.com/user-attachments/assets/441d8ed9-908f-40ae-8a9d-b192e3bfee3a" />
+<img width="300" height="669" alt="cd4567f5d5564541cd616c56963d24ae" src="https://github.com/user-attachments/assets/f8ff8549-dfa5-430d-8868-926241d1d7b9" />
+
+## 开发者构建与部署
+
+馒头使用端侧 embedding 做高频意图识别。开发者首次构建或更新部署前，需要先用 `uv` 下载并导出 `m3e-small` 模型资产，再运行 Android 构建。
+
+在项目根目录执行：
+
+```bash
+uv venv --python 3.11 .venv-m3e
+uv pip install --python .venv-m3e/bin/python -r scripts/m3e-small-requirements.txt
+.venv-m3e/bin/python scripts/export_m3e_small_onnx.py
+./gradlew :app:compileDebugKotlin
+```
+
+导出脚本会从 Hugging Face 下载 `moka-ai/m3e-small`，并生成：
+
+```text
+app/src/main/assets/embedding/m3e-small/model.onnx
+app/src/main/assets/embedding/m3e-small/vocab.txt
+```
+
+这两个文件位于 `assets`，会随 APK 一起打包。缺少模型文件时，应用会自动回落到云端 LLM 意图识别，但会失去端侧毫秒级路由优势。
+
+如果只想重新导出模型资产，可以重新执行：
+
+```bash
+.venv-m3e/bin/python scripts/export_m3e_small_onnx.py
+```
 
 ## Base URL 示例
 
@@ -188,7 +236,7 @@ app/src/main/java/com/hfad/mantou/tool/
 | --- | --- |
 | `alarm` | 打开系统闹钟、设置单次/重复闹钟、启动倒计时 |
 | `calendar` | 打开系统日历、预填日程和提醒 |
-| `camera` | 打开系统相机、拍照、录像 |
+| `camera` | 打开系统相机、拍照、录像，并可将照片回调到网页 App 显示 |
 | `clipboard` | 读取、写入、清空系统剪贴板 |
 | `flashlight` | 打开、关闭、切换手电筒 |
 | `toast` | 弹出 Android 原生 Toast 提示 |
@@ -402,46 +450,3 @@ Windows：
 - 错误信息写给用户和 LLM 都能理解
 - 需要用户确认的系统操作，优先跳系统页面而不是静默执行
 - 对平台版本差异进行兼容，例如 Android 版本不支持时返回明确错误
-
-## 开发运行
-
-- 语言：Kotlin
-- 平台：Android
-- 最低 SDK：26
-- 目标 SDK：36
-- 构建：Gradle / Android Gradle Plugin
-
-使用 Android Studio 打开项目，等待 Gradle Sync 完成后运行即可。
-
-## 功能清单
-
-- [x] 自定义 Provider / 模型配置
-- [x] OpenAI / Anthropic 双接口格式
-- [x] 模型列表自动拉取
-- [x] 当前模型动态切换
-- [x] 多轮聊天
-- [x] 流式输出
-- [x] 图片对话
-- [x] 会话管理、归档、搜索
-- [x] 消息长按操作
-- [x] 上下文阈值设置
-- [x] 一句话生成网页 App
-- [x] 生成 App 进度提示
-- [x] 聊天内 WebView 预览
-- [x] 全屏 WebView 使用
-- [x] Web App 分享保护
-- [x] Web App JSON 持久化
-- [x] JSON 富文本查看器
-- [x] `generated_apps` 项目化目录结构
-- [x] Workspace 文件结构页
-- [x] Workspace 记忆编辑
-- [x] 设置总页
-- [x] 背景壁纸设置
-- [x] Android Tool 桥接系统
-- [x] Tool 文档自动生成
-- [x] 相机拍照
-- [x] 相册图片选择
-
-## License
-
-请根据你的开源计划补充 License。

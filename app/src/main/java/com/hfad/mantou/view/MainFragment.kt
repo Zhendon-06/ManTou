@@ -36,8 +36,11 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.app.ActivityOptions
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.GridLayoutManager
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
@@ -53,6 +56,7 @@ import com.google.android.material.chip.Chip
 import com.google.android.material.slider.Slider
 import com.hfad.mantou.R
 import com.hfad.mantou.adapter.ChatAdapter
+import com.hfad.mantou.adapter.DesktopAppAdapter
 import com.hfad.mantou.adapter.SessionAdapter
 import com.hfad.mantou.adapter.WorkspaceFileAdapter
 import com.hfad.mantou.data.ChatMessage
@@ -69,12 +73,15 @@ import com.hfad.mantou.data.preferences.VoiceInputModelStore
 import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
+import com.hfad.mantou.databinding.LayoutDesktopPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
 import com.hfad.mantou.data.repository.ProviderRepository
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
 import com.hfad.mantou.tool.impl.CameraPhotoHost
 import com.hfad.mantou.utils.AgentWorkspace
+import com.hfad.mantou.utils.AutoContrastColor
 import com.hfad.mantou.utils.ContextTokenCounter
+import com.hfad.mantou.utils.DesktopAppScanner
 import com.hfad.mantou.utils.WorkspaceNode
 import com.hfad.mantou.viewmodel.ChatViewModel
 import kotlinx.coroutines.Dispatchers
@@ -87,17 +94,29 @@ import kotlin.math.roundToInt
 
 class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
+    private companion object {
+        const val PAGE_DESKTOP = 0
+        const val PAGE_CHAT = 1
+        const val PAGE_WORKSPACE = 2
+    }
+
+
     private var _binding: FragmentMainBinding? = null
     private val binding get() = _binding!!
     private var _chatBinding: LayoutChatPageBinding? = null
     private val chatBinding get() = _chatBinding!!
     private var _workspaceBinding: LayoutWorkspacePageBinding? = null
     private val workspaceBinding get() = _workspaceBinding!!
+    private var _desktopBinding: LayoutDesktopPageBinding? = null
+    private val desktopBinding get() = _desktopBinding!!
     private var isInputActive = false
-    private var currentPagerPage = 0
+    private var currentPagerPage = PAGE_CHAT
     private var pagerCallback: ViewPager2.OnPageChangeCallback? = null
+    private lateinit var mainPager: ViewPager2
+    private var topBarBaseHeight = 0
     private var inputContainerBasePaddingBottom = 0
     private var lastImeVisible = false
+    private var lastSystemBarBottomInset = 0
     private var lastAppliedBottomInset = Int.MIN_VALUE
     private var currentContextTokens = 0
     private var cachedChatSystemPrompt: String? = null
@@ -130,8 +149,12 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     // workspace 文件树适配器
     private lateinit var workspaceFileAdapter: WorkspaceFileAdapter
 
+    // 桌面应用适配器
+    private lateinit var desktopAppAdapter: DesktopAppAdapter
+
     private var activeSessions: List<ChatSessionEntity> = emptyList()
     private var archivedSessions: List<ChatSessionEntity> = emptyList()
+    private var runningSessionIds: Set<Long> = emptySet()
     private var drawerSearchQuery: String = ""
     private var showArchivedSessions: Boolean = false
 
@@ -176,15 +199,18 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         _binding = FragmentMainBinding.inflate(inflater, container, false)
         _chatBinding = LayoutChatPageBinding.inflate(inflater)
         _workspaceBinding = LayoutWorkspacePageBinding.inflate(inflater)
+        _desktopBinding = LayoutDesktopPageBinding.inflate(inflater)
         return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        mainPager = obtainMainPager()
         setupAppBar()
         setupMainPager()
         setupWorkspacePage()
+        setupDesktopPage()
         
         // 初始化聊天 RecyclerView
         setupChatRecyclerView()
@@ -283,9 +309,42 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     override fun requestCameraPhoto(callbackName: String?) {
         cameraPhotoHost.requestCameraPhoto(callbackName)
     }
+
+    private fun obtainMainPager(): ViewPager2 {
+        findMainPager(binding.root)?.let { return it }
+
+        return ViewPager2(requireContext()).apply {
+            id = View.generateViewId()
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.mt_background))
+            layoutParams = ConstraintLayout.LayoutParams(0, 0).apply {
+                startToStart = ConstraintLayout.LayoutParams.PARENT_ID
+                endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
+                topToBottom = binding.topBar.id
+                bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
+            }
+            binding.root.addView(this)
+        }
+    }
+
+    private fun findMainPager(view: View): ViewPager2? {
+        if (view is ViewPager2) return view
+        if (view !is ViewGroup) return null
+        for (index in 0 until view.childCount) {
+            findMainPager(view.getChildAt(index))?.let { return it }
+        }
+        return null
+    }
+
     private fun initInsets() {
+        topBarBaseHeight = binding.topBar.layoutParams.height.takeIf { it > 0 } ?: dp(72)
         inputContainerBasePaddingBottom = chatBinding.inputContainer.paddingBottom
 
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            applyAppBarInsets(insets)
+            applyChatInsets(insets)
+            insets
+        }
         ViewCompat.setWindowInsetsAnimationCallback(
             binding.root,
             object : WindowInsetsAnimationCompat.Callback(
@@ -295,6 +354,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                     insets: WindowInsetsCompat,
                     runningAnimations: MutableList<WindowInsetsAnimationCompat>
                 ): WindowInsetsCompat {
+                    applyAppBarInsets(insets)
                     applyChatInsets(insets)
                     return insets
                 }
@@ -303,14 +363,37 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         ViewCompat.requestApplyInsets(binding.root)
     }
 
+    private fun applyAppBarInsets(insets: WindowInsetsCompat) {
+        val topInset = insets.getInsets(WindowInsetsCompat.Type.systemBars()).top
+        val targetHeight = topBarBaseHeight + topInset
+        val params = binding.topBar.layoutParams
+        if (params.height != targetHeight) {
+            params.height = targetHeight
+            binding.topBar.layoutParams = params
+        }
+        if (binding.topBar.paddingTop != topInset) {
+            binding.topBar.updatePadding(top = topInset)
+        }
+    }
+
     private fun applyChatInsets(insets: WindowInsetsCompat) {
         val systemBarsInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars())
         val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
         val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
-        val bottomInset = if (imeVisible) {
-            (imeInsets.bottom - systemBarsInsets.bottom).coerceAtLeast(0)
+        val rawSystemBarBottomInset = systemBarsInsets.bottom
+        if (rawSystemBarBottomInset > 0) {
+            lastSystemBarBottomInset = rawSystemBarBottomInset
+        }
+        val systemBarBottomInset = if (rawSystemBarBottomInset > 0) {
+            rawSystemBarBottomInset
         } else {
-            systemBarsInsets.bottom
+            lastSystemBarBottomInset
+        }
+        val imeBottomInset = imeInsets.bottom
+        val bottomInset = if (imeVisible || imeBottomInset > systemBarBottomInset) {
+            (imeBottomInset - systemBarBottomInset).coerceAtLeast(systemBarBottomInset)
+        } else {
+            systemBarBottomInset
         }
         val targetPaddingBottom = inputContainerBasePaddingBottom + bottomInset
 
@@ -335,7 +418,20 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val messageCount = chatAdapter.itemCount
         if (messageCount <= 0) return
         chatBinding.rvChat.post {
-            chatBinding.rvChat.scrollToPosition(messageCount - 1)
+            scrollChatByRemainingDistanceToBottom()
+            chatBinding.rvChat.post {
+                scrollChatByRemainingDistanceToBottom()
+            }
+        }
+    }
+
+    private fun scrollChatByRemainingDistanceToBottom() {
+        val rvChat = chatBinding.rvChat
+        val distanceToBottom = rvChat.computeVerticalScrollRange() -
+                rvChat.computeVerticalScrollOffset() -
+                rvChat.computeVerticalScrollExtent()
+        if (distanceToBottom > 0) {
+            rvChat.scrollBy(0, distanceToBottom)
         }
     }
 
@@ -379,14 +475,19 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val position = layoutManager.findFirstVisibleItemPosition()
         if (position == RecyclerView.NO_POSITION) return null
         val view = layoutManager.findViewByPosition(position) ?: return null
-        return ChatViewportAnchor(position, view.top - chatBinding.rvChat.paddingTop)
+        val messageId = chatAdapter.currentList.getOrNull(position)?.messageId
+        return ChatViewportAnchor(messageId, position, view.top - chatBinding.rvChat.paddingTop)
     }
 
     private fun restoreChatViewportAnchor(anchor: ChatViewportAnchor) {
         val layoutManager = chatBinding.rvChat.layoutManager as? LinearLayoutManager ?: return
         val lastPosition = (chatAdapter.itemCount - 1).coerceAtLeast(0)
+        val anchoredPosition = anchor.messageId
+            ?.let { messageId -> chatAdapter.currentList.indexOfFirst { it.messageId == messageId } }
+            ?.takeIf { it != -1 }
+            ?: anchor.position
         layoutManager.scrollToPositionWithOffset(
-            anchor.position.coerceAtMost(lastPosition),
+            anchoredPosition.coerceIn(0, lastPosition),
             anchor.topOffset
         )
     }
@@ -406,21 +507,36 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         binding.ivMenu.setOnClickListener {
             (activity as? MainActivity)?.openDrawer()
         }
+        binding.desktopTab.setOnClickListener {
+            mainPager.setCurrentItem(PAGE_DESKTOP, true)
+        }
+        binding.chatTab.setOnClickListener {
+            mainPager.setCurrentItem(PAGE_CHAT, true)
+        }
+        binding.workspaceTab.setOnClickListener {
+            mainPager.setCurrentItem(PAGE_WORKSPACE, true)
+        }
         binding.newChat.setOnClickListener {
-            if (currentPagerPage == 0) {
+            if (currentPagerPage == PAGE_CHAT) {
                 createNewSession()
             } else {
-                binding.mainPager.setCurrentItem(0, true)
+                mainPager.setCurrentItem(PAGE_CHAT, true)
             }
         }
-        updateAppBarAction(0)
+        updateAppBarAction(PAGE_CHAT)
+        binding.appBarCapsule.post {
+            updateAppBarTitleSlide(PAGE_CHAT, 0f)
+        }
     }
 
     private fun setupMainPager() {
-        binding.mainPager.adapter = StaticPagerAdapter(
-            listOf(chatBinding.root, workspaceBinding.root)
+        mainPager.adapter = StaticPagerAdapter(
+            listOf(desktopBinding.root, chatBinding.root, workspaceBinding.root)
         )
-        binding.mainPager.offscreenPageLimit = 2
+        mainPager.offscreenPageLimit = 3
+        // 初始页保持 chat（index = 1），桌面在左、workspace 在右
+        mainPager.setCurrentItem(PAGE_CHAT, false)
+        currentPagerPage = PAGE_CHAT
 
         pagerCallback = object : ViewPager2.OnPageChangeCallback() {
             override fun onPageScrolled(
@@ -434,14 +550,61 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             override fun onPageSelected(position: Int) {
                 currentPagerPage = position
                 updateAppBarAction(position)
+                if (position == PAGE_DESKTOP) {
+                    refreshDesktopApps()
+                }
             }
         }
-        binding.mainPager.registerOnPageChangeCallback(pagerCallback!!)
-        binding.titleSwitcher.post {
-            currentPagerPage = binding.mainPager.currentItem
+        mainPager.registerOnPageChangeCallback(pagerCallback!!)
+        binding.appBarCapsule.post {
+            currentPagerPage = mainPager.currentItem
             updateAppBarAction(currentPagerPage)
             updateAppBarTitleSlide(currentPagerPage, 0f)
         }
+    }
+
+    private fun setupDesktopPage() {
+        desktopAppAdapter = DesktopAppAdapter { item, sourceView ->
+            openWebAppWithAnimation(item.htmlPath, sourceView)
+        }
+        desktopBinding.rvDesktopApps.apply {
+            layoutManager = GridLayoutManager(requireContext(), 4)
+            adapter = desktopAppAdapter
+            itemAnimator = null
+            setHasFixedSize(false)
+        }
+        refreshDesktopApps()
+    }
+
+    private fun refreshDesktopApps() {
+        if (!::desktopAppAdapter.isInitialized) return
+        val items = DesktopAppScanner.loadDesktopApps(requireContext())
+        desktopAppAdapter.submit(items)
+        if (_desktopBinding != null) {
+            desktopBinding.tvDesktopEmpty.visibility =
+                if (items.isEmpty()) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun openWebAppWithAnimation(htmlPath: String, sourceView: View) {
+        val file = File(htmlPath)
+        if (!file.exists()) {
+            Toast.makeText(requireContext(), "文件不存在", Toast.LENGTH_SHORT).show()
+            refreshDesktopApps()
+            return
+        }
+
+        val intent = Intent(requireContext(), VirtualAppActivity::class.java).apply {
+            putExtra(VirtualAppActivity.EXTRA_HTML_PATH, file.absolutePath)
+        }
+        val options = ActivityOptions.makeScaleUpAnimation(
+            sourceView,
+            0,
+            0,
+            sourceView.width,
+            sourceView.height
+        )
+        startActivity(intent, options.toBundle())
     }
 
     private fun setupWorkspacePage() {
@@ -669,25 +832,61 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun updateAppBarTitleSlide(position: Int, positionOffset: Float) {
-        val width = binding.titleSwitcher.width
-        if (width == 0) return
+        val globalProgress = (position + positionOffset).coerceIn(0f, 2f)
+        val availableTitleWidth = binding.titleSwitcher.width
+        if (availableTitleWidth <= 0) return
 
-        val progress = when {
-            position <= 0 -> positionOffset
-            else -> 1f
-        }.coerceIn(0f, 1f)
+        val capsuleParams = binding.appBarCapsule.layoutParams as FrameLayout.LayoutParams
+        val targetCapsuleWidth = dp(118).coerceAtMost(availableTitleWidth)
+        if (capsuleParams.width != targetCapsuleWidth) {
+            capsuleParams.width = targetCapsuleWidth
+            binding.appBarCapsule.layoutParams = capsuleParams
+            binding.appBarCapsule.post {
+                updateAppBarSegmentIndicator(globalProgress)
+            }
+            return
+        }
 
-        binding.chatTitleGroup.translationX = -progress * width
-        binding.chatTitleGroup.alpha = 1f - progress
-        binding.workspaceTitleGroup.translationX = (1f - progress) * width
-        binding.workspaceTitleGroup.alpha = progress
+        updateAppBarSegmentIndicator(globalProgress)
+    }
+
+    private fun updateAppBarSegmentIndicator(globalProgress: Float) {
+        val capsule = binding.appBarCapsule
+        val availableWidth = capsule.width - capsule.paddingLeft - capsule.paddingRight
+        val availableHeight = capsule.height - capsule.paddingTop - capsule.paddingBottom
+        if (availableWidth <= 0 || availableHeight <= 0) return
+
+        val segmentWidth = availableWidth / 3f
+        val indicator = binding.appBarSegmentIndicator
+        val indicatorParams = indicator.layoutParams as FrameLayout.LayoutParams
+        val targetWidth = segmentWidth.roundToInt()
+        if (indicatorParams.width != targetWidth || indicatorParams.height != availableHeight) {
+            indicatorParams.width = targetWidth
+            indicatorParams.height = availableHeight
+            indicator.layoutParams = indicatorParams
+        }
+
+        indicator.translationX = segmentWidth * globalProgress
+        updateAppBarTabTint(globalProgress.roundToInt().coerceIn(PAGE_DESKTOP, PAGE_WORKSPACE))
+    }
+
+    private fun updateAppBarTabTint(selectedPage: Int) {
+        val selectedTint = ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.mt_on_primary))
+        val idleTint = ColorStateList.valueOf(Color.rgb(82, 96, 120))
+
+        binding.ivDesktopTab.imageTintList = if (selectedPage == PAGE_DESKTOP) selectedTint else idleTint
+        binding.ivChatTab.imageTintList = if (selectedPage == PAGE_CHAT) selectedTint else idleTint
+        binding.ivWorkspaceTab.imageTintList = if (selectedPage == PAGE_WORKSPACE) selectedTint else idleTint
+
+        binding.desktopTab.isSelected = selectedPage == PAGE_DESKTOP
+        binding.chatTab.isSelected = selectedPage == PAGE_CHAT
+        binding.workspaceTab.isSelected = selectedPage == PAGE_WORKSPACE
     }
 
     private fun updateAppBarAction(position: Int) {
-        binding.newChat.contentDescription = if (position == 0) {
-            "新建会话"
-        } else {
-            "返回聊天"
+        binding.newChat.contentDescription = when (position) {
+            PAGE_CHAT -> "新建会话"
+            else -> "返回聊天"
         }
     }
 
@@ -711,9 +910,11 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 binding.wallpaperBackground.setRenderEffect(null)
             }
             binding.wallpaperMask.visibility = View.GONE
-            binding.mainPager.setBackgroundColor(defaultBackground)
+            mainPager.setBackgroundColor(defaultBackground)
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
+            desktopBinding.root.setBackgroundColor(defaultBackground)
+            dispatchAutoTextColor(appearanceSettings, null)
             return
         }
 
@@ -729,9 +930,11 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 binding.wallpaperBackground.setRenderEffect(null)
             }
             binding.wallpaperMask.visibility = View.GONE
-            binding.mainPager.setBackgroundColor(defaultBackground)
+            mainPager.setBackgroundColor(defaultBackground)
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
+            desktopBinding.root.setBackgroundColor(defaultBackground)
+            dispatchAutoTextColor(appearanceSettings, null)
             Toast.makeText(requireContext(), "壁纸读取失败，已恢复默认背景", Toast.LENGTH_SHORT).show()
             return
         }
@@ -747,9 +950,25 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
         binding.wallpaperMask.visibility = View.VISIBLE
         binding.wallpaperMask.setBackgroundColor(AppearanceSettingsStore.maskColor(appearanceSettings))
-        binding.mainPager.setBackgroundColor(Color.TRANSPARENT)
+        mainPager.setBackgroundColor(Color.TRANSPARENT)
         chatBinding.root.setBackgroundColor(Color.TRANSPARENT)
         workspaceBinding.root.setBackgroundColor(Color.TRANSPARENT)
+        desktopBinding.root.setBackgroundColor(Color.TRANSPARENT)
+        dispatchAutoTextColor(appearanceSettings, binding.wallpaperBackground.drawable)
+    }
+
+    private fun dispatchAutoTextColor(
+        settings: AppearanceSettingsStore.Settings,
+        wallpaperDrawable: android.graphics.drawable.Drawable?
+    ) {
+        val autoColor = AutoContrastColor.resolve(requireContext(), settings, wallpaperDrawable)
+        val effective = if (settings.hasFixedTextColor) settings.chatTextColor else autoColor
+        if (::chatAdapter.isInitialized) {
+            chatAdapter.updateAutoTextColor(autoColor)
+        }
+        if (::desktopAppAdapter.isInitialized) {
+            desktopAppAdapter.updateTextColor(effective)
+        }
     }
 
     /**
@@ -877,6 +1096,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         archiveButton?.imageTintList = ColorStateList.valueOf(accentColor)
         archiveButton?.contentDescription = if (showArchivedSessions) "返回最近对话" else "查看归档"
 
+        sessionAdapter.setRunningSessionIds(runningSessionIds)
         sessionAdapter.submitList(visibleSessions)
     }
 
@@ -919,19 +1139,25 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun showMessageActions(message: ChatMessage) {
-        showActionMenu(
-            listOf(
-                ActionMenuItem("选字复制", R.drawable.ic_select_text) {
-                    showSelectableMessageText(message)
-                },
-                ActionMenuItem("删除", R.drawable.ic_delete_outline) {
-                    confirmDeleteMessage(message)
-                },
-                ActionMenuItem("修改", R.drawable.ic_edit_outline) {
-                    showEditMessageDialog(message)
-                }
-            )
-        )
+        val items = mutableListOf<ActionMenuItem>()
+
+        if (message.role != ChatMessage.ROLE_USER) {
+            items += ActionMenuItem("选字复制", R.drawable.ic_select_text) {
+                showSelectableMessageText(message)
+            }
+        }
+
+        items += ActionMenuItem("删除", R.drawable.ic_delete_outline) {
+            confirmDeleteMessage(message)
+        }
+
+        if (message.role == ChatMessage.ROLE_USER) {
+            items += ActionMenuItem("修改", R.drawable.ic_edit_outline) {
+                showEditMessageDialog(message)
+            }
+        }
+
+        showActionMenu(items)
     }
 
     private fun showSelectableMessageText(message: ChatMessage) {
@@ -989,6 +1215,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             Toast.makeText(requireContext(), "该消息无法修改", Toast.LENGTH_SHORT).show()
             return
         }
+        if (message.role != ChatMessage.ROLE_USER) {
+            Toast.makeText(requireContext(), "只能修改用户请求", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         val editor = EditText(requireContext()).apply {
             setText(message.content)
@@ -1019,7 +1249,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             .setTitle("修改消息")
             .setView(editorContainer)
             .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
+            .setPositiveButton("重新发送", null)
             .create()
 
         dialog.setOnShowListener {
@@ -1030,8 +1260,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                         Toast.makeText(requireContext(), "消息不能为空", Toast.LENGTH_SHORT).show()
                         return@setOnClickListener
                     }
-                    viewModel.updateMessageContent(message.messageId, newContent)
-                    Toast.makeText(requireContext(), "已修改", Toast.LENGTH_SHORT).show()
+                    viewModel.editUserMessageAndRegenerate(message.messageId, newContent)
+                    Toast.makeText(requireContext(), "已重新发送", Toast.LENGTH_SHORT).show()
                     dialog.dismiss()
                 }
         }
@@ -1041,7 +1271,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private fun showActionMenu(items: List<ActionMenuItem>) {
         if (items.isEmpty()) return
 
-        val dialog = Dialog(requireContext())
+        val dialog = Dialog(requireContext()).apply {
+            requestWindowFeature(Window.FEATURE_NO_TITLE)
+        }
         val density = resources.displayMetrics.density
         val menu = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
@@ -1112,9 +1344,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
 
         dialog.setContentView(menu)
-        dialog.setOnShowListener {
-            dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            dialog.window?.setLayout(
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setWindowAnimations(R.style.MtDialogAnimation)
+            setLayout(
                 (resources.displayMetrics.widthPixels * 0.72f).toInt(),
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
@@ -1222,6 +1455,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             updateSendButtonState(isLoading)
         }
 
+        viewModel.runningSessionIds.observe(viewLifecycleOwner) { sessionIds ->
+            runningSessionIds = sessionIds
+            if (::sessionAdapter.isInitialized) {
+                sessionAdapter.setRunningSessionIds(sessionIds)
+            }
+            val currentSessionId = viewModel.currentSessionId.value
+            updateSendButtonState(currentSessionId != null && currentSessionId in sessionIds)
+        }
+
         viewModel.isGeneratingApp.observe(viewLifecycleOwner) { isGeneratingApp ->
             setKeepScreenOn(isGeneratingApp)
         }
@@ -1238,12 +1480,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         viewModel.currentSessionId.observe(viewLifecycleOwner) { sessionId ->
             pendingMessagesWhileScrolling = null
             forceScrollToLatestMessage = true
+            updateSendButtonState(sessionId != null && sessionId in runningSessionIds)
             // 可以在这里更新 UI，显示当前会话信息
         }
 
         // 观察当前活跃模型名称
         viewModel.activeModelName.observe(viewLifecycleOwner) { modelName ->
-            binding.tvChatSubtitle.text = modelName ?: "请配置你的模型"
+            binding.chatTab.contentDescription = modelName
+                ?.let { "聊天机器人，当前模型 $it" }
+                ?: "聊天机器人，请配置模型"
         }
 
         // 观察未配置模型事件
@@ -1339,9 +1584,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(buildMimoVoiceKeyContent(dialog, startAfterActivation))
         dialog.setCanceledOnTouchOutside(true)
-        dialog.setOnShowListener {
-            configureModelPickerWindow(dialog)
-        }
+        configureModelPickerWindow(dialog)
         dialog.show()
     }
 
@@ -1511,9 +1754,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val loadingView = buildModelPickerLoadingView()
         dialog.setContentView(loadingView)
         dialog.setCanceledOnTouchOutside(true)
-        dialog.setOnShowListener {
-            configureModelPickerWindow(dialog)
-        }
+        configureModelPickerWindow(dialog)
         dialog.show()
 
         viewLifecycleOwner.lifecycleScope.launch {
@@ -1530,7 +1771,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                     onSelected = onSelected
                 )
             )
-            configureModelPickerWindow(dialog)
         }
     }
 
@@ -1551,6 +1791,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0f)
+            setWindowAnimations(R.style.MtDialogAnimation)
             setLayout(
                 (resources.displayMetrics.widthPixels - dp(40)).coerceAtLeast(dp(280)),
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1568,6 +1809,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             gravity = Gravity.CENTER
             background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
             setPadding(dp(24), dp(34), dp(24), dp(34))
+            minimumHeight = modelPickerPanelHeight()
             addView(
                 TextView(requireContext()).apply {
                     text = "正在加载模型..."
@@ -1635,7 +1877,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             scroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                (resources.displayMetrics.heightPixels * 0.46f).toInt().coerceAtLeast(dp(260))
+                modelPickerListHeight()
             ).apply {
                 topMargin = dp(12)
             }
@@ -1813,6 +2055,14 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 )
             )
         }
+    }
+
+    private fun modelPickerListHeight(): Int {
+        return (resources.displayMetrics.heightPixels * 0.46f).toInt().coerceAtLeast(dp(260))
+    }
+
+    private fun modelPickerPanelHeight(): Int {
+        return dp(14) + dp(54) + dp(12) + modelPickerListHeight() + dp(12)
     }
 
     private fun buildEmptyProviderModelsRow(): View {
@@ -2482,23 +2732,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun updateSendButtonState(taskRunning: Boolean) {
         isTaskRunning = taskRunning
-        val enabled = !taskRunning
-        val backgroundColor = if (enabled) {
-            Color.rgb(44, 131, 216)
-        } else {
-            Color.rgb(209, 229, 255)
-        }
-        val iconColor = if (enabled) {
-            Color.WHITE
-        } else {
-            Color.argb(185, 255, 255, 255)
-        }
+        val backgroundColor = Color.rgb(44, 131, 216)
+        val iconRes = if (taskRunning) R.drawable.ic_stop_square else R.drawable.ic_send_up
 
-        chatBinding.ivSend.isEnabled = enabled
-        chatBinding.ivSend.isClickable = enabled
+        chatBinding.ivSend.isEnabled = true
+        chatBinding.ivSend.isClickable = true
         chatBinding.ivSend.backgroundTintList = ColorStateList.valueOf(backgroundColor)
-        chatBinding.ivSend.imageTintList = ColorStateList.valueOf(iconColor)
-        chatBinding.ivSend.contentDescription = if (enabled) "发送" else "正在处理，暂不可发送"
+        chatBinding.ivSend.setImageResource(iconRes)
+        chatBinding.ivSend.imageTintList = ColorStateList.valueOf(Color.WHITE)
+        chatBinding.ivSend.contentDescription = if (taskRunning) "停止请求" else "发送"
     }
 
     /**
@@ -2506,6 +2748,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
      */
     private fun sendMessage() {
         if (isTaskRunning) {
+            viewModel.stopStreaming()
             return
         }
         val text = chatBinding.etInput.text?.toString()?.trim() ?: ""
@@ -2538,6 +2781,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         super.onResume()
         viewModel.refreshActiveModel()
         refreshWorkspaceTree()
+        refreshDesktopApps()
         applyWallpaper()
     }
 
@@ -2547,11 +2791,14 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         CameraPhotoBridge.detach(this)
         activeAppWebView = null
         setKeepScreenOn(false)
-        pagerCallback?.let { binding.mainPager.unregisterOnPageChangeCallback(it) }
+        if (::mainPager.isInitialized) {
+            pagerCallback?.let { mainPager.unregisterOnPageChangeCallback(it) }
+            mainPager.adapter = null
+        }
         pagerCallback = null
-        binding.mainPager.adapter = null
         _workspaceBinding = null
         _chatBinding = null
+        _desktopBinding = null
         _binding = null
     }
 
@@ -2565,6 +2812,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private data class ChatViewportAnchor(
+        val messageId: Long?,
         val position: Int,
         val topOffset: Int
     )
