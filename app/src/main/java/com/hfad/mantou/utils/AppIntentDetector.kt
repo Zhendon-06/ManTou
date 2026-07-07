@@ -42,7 +42,7 @@ object AppIntentDetector {
         "帮我创建", "写一个", "写个", "generate", "create", "make"
     )
     private val appTargetWords = listOf(
-        "app", "应用", "网页", "工具", "游戏", "小程序", "计算器", "todo",
+        "app", "应用", "网页", "工具", "游戏", "小程序", "计算器", "t odo",
         "天气", "日历", "笔记", "时钟", "秒表", "website", "web app"
     )
     private val strongAppTargetWords = listOf(

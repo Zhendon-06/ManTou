@@ -264,6 +264,14 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             true
         }
 
+        chatBinding.chipStartTask.setOnClickListener {
+            fillInputWithAppPrompt()
+        }
+
+        chatBinding.chipWriteResume.setOnClickListener {
+            startActivity(Intent(requireContext(), ResumeActivity::class.java))
+        }
+
         chatBinding.rvChat.setOnClickListener {
             chatBinding.etInput.clearFocus()
         }
@@ -1486,6 +1494,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         // 观察当前活跃模型名称
         viewModel.activeModelName.observe(viewLifecycleOwner) { modelName ->
+            chatBinding.etInput.hint = modelName
+                ?.takeIf { it.isNotBlank() }
+                ?.let { "当前使用${it}模型提供服务" }
+                ?: "请先配置模型"
             binding.chatTab.contentDescription = modelName
                 ?.let { "聊天机器人，当前模型 $it" }
                 ?: "聊天机器人，请配置模型"
@@ -1509,6 +1521,13 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun openImagePicker() {
         imagePickerLauncher.launch(arrayOf("image/*"))
+    }
+
+    private fun fillInputWithAppPrompt() {
+        val prompt = "生成一个应用："
+        chatBinding.etInput.setText(prompt)
+        chatBinding.etInput.setSelection(prompt.length)
+        switchToActiveState()
     }
 
     private fun onImagesSelectedFromPicker(uris: List<Uri>) {
