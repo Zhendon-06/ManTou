@@ -1,7 +1,8 @@
 ﻿package com.hfad.mantou.data
 
 /**
- * 鑱婂ぉ娑堟伅 UI 鏁版嵁绫? */
+ * 聊天消息 UI 数据类
+ */
 data class ChatMessage(
     val messageId: Long = 0,
     val role: String,
