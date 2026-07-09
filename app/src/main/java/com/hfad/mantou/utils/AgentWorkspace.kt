@@ -13,6 +13,7 @@ object AgentWorkspace {
     private const val MEMORY_DIR = "memory"
     private const val SOUL_FILE = "SOUL.md"
     private const val CHAT_FILE = "CHAT.md"
+    private const val RECONNECT_RESUME_FILE = "RECONNECT_RESUME.md"
     private const val MEMORY_FILE = "MEMORY.md"
 
     fun ensureWorkspace(context: Context) {
@@ -23,6 +24,7 @@ object AgentWorkspace {
 
         writeIfMissing(soulFile(context), DEFAULT_SOUL)
         writeIfMissing(chatFile(context), DEFAULT_CHAT)
+        writeIfMissing(reconnectResumeFile(context), DEFAULT_RECONNECT_RESUME)
         writeIfMissing(memoryFile(context), DEFAULT_MEMORY)
     }
 
@@ -43,8 +45,18 @@ object AgentWorkspace {
         return listOf(
             WorkspaceMemoryDocument(SOUL_FILE, "Agent 灵魂", soulFile(context)),
             WorkspaceMemoryDocument(CHAT_FILE, "纯聊天系统提示词", chatFile(context)),
+            WorkspaceMemoryDocument(RECONNECT_RESUME_FILE, "断线续写提示词", reconnectResumeFile(context)),
             WorkspaceMemoryDocument(MEMORY_FILE, "长期记忆", memoryFile(context))
         )
+    }
+
+    fun buildReconnectResumePrompt(
+        context: Context,
+        partialContent: String
+    ): String {
+        ensureWorkspace(context)
+        val template = reconnectResumeFile(context).readText().trim()
+        return template.replace("{{PARTIAL_ANSWER}}", partialContent.trim())
     }
 
     fun appendExplicitMemoryIfNeeded(context: Context, userMessage: String): Boolean {
@@ -192,6 +204,7 @@ object AgentWorkspace {
     private fun memoryDir(context: Context) = File(context.filesDir, MEMORY_DIR)
     private fun soulFile(context: Context) = File(agentDir(context), SOUL_FILE)
     private fun chatFile(context: Context) = File(agentDir(context), CHAT_FILE)
+    private fun reconnectResumeFile(context: Context) = File(agentDir(context), RECONNECT_RESUME_FILE)
     private fun memoryFile(context: Context) = File(memoryDir(context), MEMORY_FILE)
 
     private fun writeIfMissing(file: File, content: String) {
@@ -302,6 +315,25 @@ object AgentWorkspace {
         只有适合长期使用、低敏感度、对未来对话有帮助的信息才应该被记录。
 
         ## 已记录记忆
+    """
+
+    private val DEFAULT_RECONNECT_RESUME = """
+        你正在继续一段因为网络中断而暂时停止的回答。
+
+        用户已经看过下面这段内容，请严格遵守：
+        1. 不要重复下面已经输出过的内容。
+        2. 不要改写、总结、解释或重新开头。
+        3. 直接从它结束的位置自然续写。
+        4. 如果最后一句停在半句，请按原语义继续，不要另起话题。
+        5. 续写内容保持与前文一致的语言、格式和结构。
+        6.你可以关联前面的对话和问题，确定本次要回答的问题
+
+        已经输出给用户的内容如下：
+        <<<
+        {{PARTIAL_ANSWER}}
+        >>>
+
+        请直接续写后续内容，不要重复上文，不要添加“继续如下”“接着说”等说明。
     """
 }
 
