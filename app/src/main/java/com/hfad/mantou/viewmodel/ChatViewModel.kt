@@ -244,13 +244,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         request: ChatRequest
     ) {
         var reconnectDeadlineAt: Long? = null
+        var activeRequest = request
 
         while (true) {
             var shouldRetry = false
             var finished = false
             var handledError = false
 
-            StreamingApiService.streamChatCompletion(config, request)
+            StreamingApiService.streamChatCompletion(config, activeRequest)
                 .catch { e ->
                     if (e is CancellationException) throw e
                     handledError = true
@@ -338,12 +339,47 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         persistPartialContentWithError(state)
                         return
                     }
+                    activeRequest = buildReconnectRequest(
+                        baseRequest = request,
+                        partialContent = state.streamingContent.toString().trimEnd()
+                    )
                     delay(min(reconnectCountdownIntervalMs, remainingMs))
                 }
 
                 else -> return
             }
         }
+    }
+
+    private fun buildReconnectRequest(
+        baseRequest: ChatRequest,
+        partialContent: String
+    ): ChatRequest {
+        if (partialContent.isBlank()) {
+            return baseRequest
+        }
+
+        val reconnectPrompt = AgentWorkspace.buildReconnectResumePrompt(
+            context = getApplication(),
+            partialContent = partialContent
+        )
+
+        val reconnectMessages = baseRequest.messages.toMutableList().apply {
+            add(
+                ApiMessage(
+                    role = ChatMessage.ROLE_ASSISTANT,
+                    content = partialContent
+                )
+            )
+            add(
+                ApiMessage(
+                    role = ChatMessage.ROLE_USER,
+                    content = reconnectPrompt
+                )
+            )
+        }
+
+        return baseRequest.copy(messages = reconnectMessages)
     }
 
     private fun consumeReconnectChunk(state: StreamingSessionState, rawChunk: String): String {
