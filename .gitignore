@@ -21,3 +21,5 @@ Thumbs.db
 # 其他
 .cxx/
 leetcode/
+__pycache__/
+*.pyc

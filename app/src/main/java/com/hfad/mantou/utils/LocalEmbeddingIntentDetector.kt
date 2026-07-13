@@ -5,6 +5,8 @@ import android.util.Log
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import com.google.gson.Gson
+import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -28,11 +30,11 @@ object LocalEmbeddingIntentDetector {
     private const val TAG = "LocalEmbeddingIntent"
     private const val MODEL_ASSET = "embedding/m3e-small/model.onnx"
     private const val VOCAB_ASSET = "embedding/m3e-small/vocab.txt"
+    private const val VECTOR_INDEX_ASSET = "embedding/m3e-small/intent_vectors.json"
+    private const val VECTOR_INDEX_SCHEMA_VERSION = 1
+    private const val VECTOR_INDEX_MODEL = "moka-ai/m3e-small"
+    private const val VECTOR_INDEX_MODEL_REVISION = "44c696631b2a8c200220aaaad5f987f096e986df"
     private const val MAX_LENGTH = 64
-    private const val GENERATE_THRESHOLD = 0.66f
-    private const val CHAT_THRESHOLD = 0.64f
-    private const val GENERATE_MARGIN_THRESHOLD = 0.035f
-    private const val CHAT_MARGIN_THRESHOLD = 0.015f
 
     private val mutex = Mutex()
     private var engine: Engine? = null
@@ -73,7 +75,11 @@ object LocalEmbeddingIntentDetector {
 
             val startMs = System.currentTimeMillis()
             val loaded = runCatching {
-                if (!assetExists(context, MODEL_ASSET) || !assetExists(context, VOCAB_ASSET)) {
+                if (
+                    !assetExists(context, MODEL_ASSET) ||
+                    !assetExists(context, VOCAB_ASSET) ||
+                    !assetExists(context, VECTOR_INDEX_ASSET)
+                ) {
                     Log.d(TAG, "load missingAssets=true elapsed=${System.currentTimeMillis() - startMs}ms")
                     return@runCatching null
                 }
@@ -102,25 +108,23 @@ object LocalEmbeddingIntentDetector {
         private val env: OrtEnvironment,
         private val session: OrtSession,
         private val tokenizer: WordPieceTokenizer,
-        private val generateCentroid: FloatArray,
-        private val chatCentroid: FloatArray,
+        private val generateVectors: List<FloatArray>,
+        private val chatVectors: List<FloatArray>,
     ) {
 
         fun detect(text: String): Decision {
             val vector = embed(text)
-            val generateScore = cosine(vector, generateCentroid)
-            val chatScore = cosine(vector, chatCentroid)
-            val margin = generateScore - chatScore
+            val result = PrototypeIntentScorer.score(vector, generateVectors, chatVectors)
             Log.d(
                 TAG,
-                "scores generate=${formatScore(generateScore)} chat=${formatScore(chatScore)} margin=${formatScore(margin)}"
+                "scores generate=${formatScore(result.generateScore)} " +
+                    "chat=${formatScore(result.chatScore)} margin=${formatScore(result.margin)}"
             )
 
-            return when {
-                generateScore >= GENERATE_THRESHOLD && margin >= GENERATE_MARGIN_THRESHOLD -> Decision.GenerateApp
-                chatScore >= CHAT_THRESHOLD && -margin >= CHAT_MARGIN_THRESHOLD -> Decision.Chat
-                chatScore > generateScore -> Decision.Chat
-                else -> Decision.Uncertain
+            return when (result.decision) {
+                PrototypeIntentScorer.Decision.GenerateApp -> Decision.GenerateApp
+                PrototypeIntentScorer.Decision.Chat -> Decision.Chat
+                PrototypeIntentScorer.Decision.Uncertain -> Decision.Uncertain
             }
         }
 
@@ -168,34 +172,62 @@ object LocalEmbeddingIntentDetector {
 
         companion object {
             fun create(context: Context): Engine {
+                val index = loadVectorIndex(context)
                 val env = OrtEnvironment.getEnvironment()
                 val modelFile = copyAssetToCache(context, MODEL_ASSET)
                 val options = OrtSession.SessionOptions()
                 val session = env.createSession(modelFile.absolutePath, options)
                 val tokenizer = WordPieceTokenizer.fromAssets(context, VOCAB_ASSET)
 
-                val warmupEngine = Engine(
-                    env = env,
-                    session = session,
-                    tokenizer = tokenizer,
-                    generateCentroid = FloatArray(0),
-                    chatCentroid = FloatArray(0),
-                )
-
-                val generateVectors = generateSamples.map { warmupEngine.embed(it) }
-                val chatVectors = chatSamples.map { warmupEngine.embed(it) }
-
                 return Engine(
                     env = env,
                     session = session,
                     tokenizer = tokenizer,
-                    generateCentroid = centroid(generateVectors),
-                    chatCentroid = centroid(chatVectors),
+                    generateVectors = index.generateApp.map { normalize(it.vector) },
+                    chatVectors = index.chat.map { normalize(it.vector) },
                 )
             }
 
+            private fun loadVectorIndex(context: Context): VectorIndexAsset {
+                val index = context.assets.open(VECTOR_INDEX_ASSET).bufferedReader().use { reader ->
+                    Gson().fromJson(reader, VectorIndexAsset::class.java)
+                }
+                require(index.schemaVersion == VECTOR_INDEX_SCHEMA_VERSION) {
+                    "Unsupported intent vector schema ${index.schemaVersion}"
+                }
+                require(index.model == VECTOR_INDEX_MODEL) {
+                    "Intent vector model ${index.model} does not match $VECTOR_INDEX_MODEL"
+                }
+                require(index.modelRevision == VECTOR_INDEX_MODEL_REVISION) {
+                    "Intent vector revision ${index.modelRevision} does not match model assets"
+                }
+                require(index.dimension > 0) { "Intent vector dimension must be positive" }
+                validateVectors("generate_app", index.generateApp, index.dimension)
+                validateVectors("chat", index.chat, index.dimension)
+                return index
+            }
+
+            private fun validateVectors(
+                intent: String,
+                records: List<VectorRecord>,
+                dimension: Int,
+            ) {
+                require(records.size >= PrototypeIntentScorer.TOP_K) {
+                    "Intent index needs at least ${PrototypeIntentScorer.TOP_K} $intent vectors"
+                }
+                records.forEach { record ->
+                    require(record.text.isNotBlank() && record.category.isNotBlank()) {
+                        "Intent index contains an unlabeled $intent vector"
+                    }
+                    require(record.vector.size == dimension && record.vector.all { it.isFinite() }) {
+                        "Invalid $intent vector for ${record.text}"
+                    }
+                }
+            }
+
             private fun copyAssetToCache(context: Context, assetPath: String): File {
-                val outFile = File(context.cacheDir, assetPath.replace('/', '_'))
+                val revision = VECTOR_INDEX_MODEL_REVISION.take(12)
+                val outFile = File(context.cacheDir, "m3e-small_${revision}_model.onnx")
                 if (outFile.exists() && outFile.length() > 0L) return outFile
 
                 context.assets.open(assetPath).use { input ->
@@ -206,47 +238,23 @@ object LocalEmbeddingIntentDetector {
                 return outFile
             }
 
-            private fun centroid(vectors: List<FloatArray>): FloatArray {
-                val dim = vectors.firstOrNull()?.size ?: return FloatArray(0)
-                val sum = FloatArray(dim)
-                vectors.forEach { vector ->
-                    for (i in 0 until dim) {
-                        sum[i] += vector[i]
-                    }
-                }
-                for (i in 0 until dim) {
-                    sum[i] /= vectors.size.toFloat()
-                }
-                return normalize(sum)
-            }
-
-            private val generateSamples = listOf(
-                "帮我生成一个番茄钟网页应用",
-                "做个可以记账的小工具",
-                "写一个计算器 app",
-                "创建一个待办事项小程序",
-                "来个贪吃蛇小游戏",
-                "帮我做一个天气查询网页",
-                "生成一个抽奖转盘工具",
-                "做一个日历提醒应用",
-                "写个单词背诵 web app",
-                "制作一个 Markdown 编辑器",
-            )
-
-            private val chatSamples = listOf(
-                "解释一下这段代码是什么意思",
-                "这个报错怎么解决",
-                "帮我分析一下这个方案",
-                "推荐几个学习 Kotlin 的方法",
-                "为什么页面会卡顿",
-                "这两个模型有什么区别",
-                "帮我润色这段文字",
-                "总结一下上面的内容",
-                "我应该怎么设计这个功能",
-                "请回答我的问题",
-            )
         }
     }
+
+    private data class VectorIndexAsset(
+        @SerializedName("schema_version") val schemaVersion: Int = 0,
+        val model: String = "",
+        @SerializedName("model_revision") val modelRevision: String = "",
+        val dimension: Int = 0,
+        @SerializedName("generate_app") val generateApp: List<VectorRecord> = emptyList(),
+        val chat: List<VectorRecord> = emptyList(),
+    )
+
+    private data class VectorRecord(
+        val category: String = "",
+        val text: String = "",
+        val vector: FloatArray = FloatArray(0),
+    )
 
     private data class EncodedInput(
         val inputIds: LongArray,
@@ -265,7 +273,7 @@ object LocalEmbeddingIntentDetector {
         fun encode(text: String, maxLength: Int): EncodedInput {
             val tokenIds = mutableListOf<Long>()
             tokenIds += clsId
-            tokenIds += tokenize(text).take(maxLength - 2).map { token ->
+            tokenIds += truncatePreservingTail(tokenize(text), maxLength - 2).map { token ->
                 (vocab[token] ?: unkId).toLong()
             }
             tokenIds += sepId
@@ -280,6 +288,12 @@ object LocalEmbeddingIntentDetector {
             }
 
             return EncodedInput(inputIds, attentionMask, tokenTypeIds)
+        }
+
+        private fun truncatePreservingTail(tokens: List<String>, limit: Int): List<String> {
+            if (tokens.size <= limit) return tokens
+            val headSize = limit / 2
+            return tokens.take(headSize) + tokens.takeLast(limit - headSize)
         }
 
         private fun tokenize(text: String): List<String> {
@@ -384,20 +398,6 @@ object LocalEmbeddingIntentDetector {
             type == Character.INITIAL_QUOTE_PUNCTUATION.toInt() ||
             type == Character.FINAL_QUOTE_PUNCTUATION.toInt() ||
             type == Character.OTHER_PUNCTUATION.toInt()
-    }
-
-    private fun cosine(a: FloatArray, b: FloatArray): Float {
-        if (a.isEmpty() || b.isEmpty() || a.size != b.size) return 0f
-        var dot = 0f
-        var normA = 0f
-        var normB = 0f
-        for (i in a.indices) {
-            dot += a[i] * b[i]
-            normA += a[i] * a[i]
-            normB += b[i] * b[i]
-        }
-        val denominator = sqrt(normA.toDouble()).toFloat() * sqrt(normB.toDouble()).toFloat()
-        return if (denominator == 0f) 0f else dot / denominator
     }
 
     private fun normalize(vector: FloatArray): FloatArray {

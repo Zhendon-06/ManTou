@@ -203,7 +203,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         imageBase64List: List<String>
     ) {
         val isAppIntent = withContext(Dispatchers.IO) {
-            AppIntentDetector.isAppGenerationIntent(getApplication(), config, content)
+            val latestAssistantMessage = repository.getMessagesBySessionIdOnce(state.sessionId)
+                .asReversed()
+                .firstOrNull { it.role == ChatMessage.ROLE_ASSISTANT }
+            val hasGeneratedAppInSession = !latestAssistantMessage?.appHtmlPath.isNullOrBlank()
+            AppIntentDetector.isAppGenerationIntent(
+                context = getApplication(),
+                config = config,
+                userMessage = content,
+                hasGeneratedAppInSession = hasGeneratedAppInSession,
+            )
         }
 
         if (isAppIntent) {

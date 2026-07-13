@@ -92,7 +92,7 @@ generated_apps/
 
 ## 开发者构建与部署
 
-馒头使用端侧 embedding 做高频意图识别。开发者首次构建或更新部署前，需要先用 `uv` 下载并导出 `m3e-small` 模型资产，再运行 Android 构建。
+馒头使用端侧 embedding 和预计算的示例向量索引做高频意图识别。开发者首次构建或更新模型部署前，需要先用 `uv` 下载并导出 `m3e-small` 模型资产，再运行 Android 构建。
 
 在项目根目录执行：
 
@@ -108,14 +108,21 @@ uv pip install --python .venv-m3e/bin/python -r scripts/m3e-small-requirements.t
 ```text
 app/src/main/assets/embedding/m3e-small/model.onnx
 app/src/main/assets/embedding/m3e-small/vocab.txt
+app/src/main/assets/embedding/m3e-small/intent_vectors.json
 ```
 
-这两个文件位于 `assets`，会随 APK 一起打包。缺少模型文件时，应用会自动回落到云端 LLM 意图识别，但会失去端侧毫秒级路由优势。
+这些文件位于 `assets`，会随 APK 一起打包。`intent_vectors.json` 由 `scripts/intent_samples.json` 中的分层样例预计算生成，运行时使用 top-k 原型相似度判定，不会在首个请求时重复计算全部样例。缺少任一资产时，应用会回落到本地高精度规则，并在有必要时调用云端 LLM 识别。
 
 如果只想重新导出模型资产，可以重新执行：
 
 ```bash
 .venv-m3e/bin/python scripts/export_m3e_small_onnx.py
+```
+
+如果只修改了 `scripts/intent_samples.json`，可以仅重新生成示例向量索引：
+
+```bash
+.venv-m3e/bin/python scripts/export_m3e_small_onnx.py --vectors-only
 ```
 
 ## Base URL 示例
