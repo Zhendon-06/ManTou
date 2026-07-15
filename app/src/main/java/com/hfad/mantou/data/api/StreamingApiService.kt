@@ -6,6 +6,7 @@ import com.google.gson.JsonParser
 import com.hfad.mantou.data.logging.ApiLoggingInterceptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
@@ -23,12 +24,13 @@ object StreamingApiService {
 
     private const val anthropicVersion = "2023-06-01"
     private const val jsonMediaType = "application/json; charset=utf-8"
+    internal const val STREAM_READ_TIMEOUT_SECONDS = 0L
 
     private val gson = Gson()
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(STREAM_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .addInterceptor(ApiLoggingInterceptor())
         .build()
@@ -42,6 +44,16 @@ object StreamingApiService {
         streamOpenAi(config, request)
     }
 
+    internal fun isRetryableNetworkFailure(message: String): Boolean {
+        val normalized = message.lowercase()
+        return message.contains("网络状态出错") ||
+                message.contains("连接已断开") ||
+                normalized.contains("timeout") ||
+                normalized.contains("timed out") ||
+                normalized.contains("connection reset") ||
+                normalized.contains("unexpected end of stream")
+    }
+
     private fun streamOpenAi(
         config: ChatCallConfig,
         request: ChatRequest
@@ -49,7 +61,7 @@ object StreamingApiService {
         val url = runCatching {
             ApiEndpointResolver.openAiChatCompletionsUrl(config.baseUrl)
         }.getOrElse {
-            trySend(StreamEvent.Error(it.message ?: "Base URL 无效"))
+            trySendBlocking(StreamEvent.Error(it.message ?: "Base URL 无效"))
             close()
             return@callbackFlow
         }
@@ -83,7 +95,7 @@ object StreamingApiService {
         val url = runCatching {
             ApiEndpointResolver.anthropicMessagesUrl(config.baseUrl)
         }.getOrElse {
-            trySend(StreamEvent.Error(it.message ?: "Base URL 无效"))
+            trySendBlocking(StreamEvent.Error(it.message ?: "Base URL 无效"))
             close()
             return@callbackFlow
         }
@@ -128,9 +140,9 @@ object StreamingApiService {
 
                 val message = "网络状态出错: ${e.message ?: "连接已断开"}"
                 if (streamStarted) {
-                    trySend(StreamEvent.Disconnected(message))
+                    trySendBlocking(StreamEvent.Disconnected(message))
                 } else {
-                    trySend(StreamEvent.Error(message))
+                    trySendBlocking(StreamEvent.Error(message))
                 }
                 close()
             }
@@ -138,14 +150,14 @@ object StreamingApiService {
             override fun onResponse(call: Call, response: Response) {
                 if (!response.isSuccessful) {
                     val errBody = response.body?.string().orEmpty().take(200)
-                    trySend(StreamEvent.Error("请求失败 (${response.code}) $errBody"))
+                    trySendBlocking(StreamEvent.Error("请求失败 (${response.code}) $errBody"))
                     response.close()
                     close()
                     return
                 }
 
                 streamStarted = true
-                trySend(StreamEvent.Start)
+                trySendBlocking(StreamEvent.Start)
 
                 try {
                     response.body?.charStream()?.buffered()?.useLines { lines ->
@@ -154,7 +166,7 @@ object StreamingApiService {
                             if (event is StreamEvent.Done) {
                                 sawDone = true
                             }
-                            trySend(event)
+                            trySendBlocking(event)
                             if (event is StreamEvent.Done) {
                                 return@useLines
                             }
@@ -163,7 +175,7 @@ object StreamingApiService {
                 } catch (e: IOException) {
                     if (!call.isCanceled()) {
                         disconnectionReported = true
-                        trySend(
+                        trySendBlocking(
                             StreamEvent.Disconnected(
                                 "网络状态出错: ${e.message ?: "连接已断开"}"
                             )
@@ -172,7 +184,7 @@ object StreamingApiService {
                 } finally {
                     response.close()
                     if (!call.isCanceled() && streamStarted && !sawDone && !disconnectionReported) {
-                        trySend(StreamEvent.Disconnected("网络状态出错: 连接已断开"))
+                        trySendBlocking(StreamEvent.Disconnected("网络状态出错: 连接已断开"))
                     }
                     close()
                 }

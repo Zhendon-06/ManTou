@@ -15,7 +15,7 @@
             android:paddingTop="10dp"
             android:paddingBottom="8dp"
             app:layout_constraintTop_toTopOf="parent"
-            app:layout_constraintBottom_toTopOf="@id/inputContainer"
+            app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
@@ -79,11 +79,11 @@
                     app:rippleColor="@color/mt_primary_soft" />
 
                 <com.google.android.material.chip.Chip
-                    android:id="@+id/chipWriteResume"
+                    android:id="@+id/chipLongTermMemory"
                     android:layout_width="wrap_content"
                     android:layout_height="40dp"
                     android:minHeight="40dp"
-                    android:text="编写简历"
+                    android:text="长期记忆"
                     android:textColor="@color/mt_primary_dark"
                     android:textSize="14sp"
                     app:chipBackgroundColor="@color/mt_surface_blue"
@@ -97,11 +97,110 @@
 
     </FrameLayout>
 
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/generateCodeCard"
+        android:layout_width="147dp"
+        android:layout_height="75dp"
+        android:layout_marginStart="18dp"
+        android:layout_marginBottom="8dp"
+        android:clickable="true"
+        android:contentDescription="打开生成代码编辑器"
+        android:elevation="8dp"
+        android:focusable="true"
+        android:visibility="gone"
+        app:cardBackgroundColor="@color/mt_generate_surface"
+        app:cardCornerRadius="11dp"
+        app:cardElevation="8dp"
+        app:layout_constraintBottom_toTopOf="@id/inputContainer"
+        app:layout_constraintStart_toStartOf="parent"
+        app:rippleColor="@color/mt_generate_surface_soft">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:paddingStart="8dp"
+            android:paddingTop="7dp"
+            android:paddingEnd="7dp"
+            android:paddingBottom="7dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <ProgressBar
+                    android:id="@+id/generateCodeProgress"
+                    style="?android:attr/progressBarStyleSmall"
+                    android:layout_width="10dp"
+                    android:layout_height="10dp"
+                    android:indeterminate="true"
+                    android:indeterminateTint="@color/mt_generate_accent" />
+
+                <TextView
+                    android:id="@+id/tvGenerateCodeTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="5dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:text="正在写入 HTML"
+                    android:textColor="@color/mt_generate_text"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvGenerateCodeLanguage"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_generate_language_badge"
+                    android:paddingStart="5dp"
+                    android:paddingTop="1dp"
+                    android:paddingEnd="5dp"
+                    android:paddingBottom="1dp"
+                    android:text="HTML"
+                    android:textColor="@color/mt_generate_accent"
+                    android:textSize="8sp"
+                    android:textStyle="bold" />
+
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvGenerateCodePreview"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="4dp"
+                android:layout_weight="1"
+                android:ellipsize="end"
+                android:fontFamily="monospace"
+                android:gravity="bottom"
+                android:includeFontPadding="false"
+                android:maxLines="3"
+                android:textColor="@color/mt_generate_code"
+                android:textSize="8sp" />
+
+            <TextView
+                android:id="@+id/tvGenerateCodeStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@color/mt_generate_line"
+                android:textSize="8sp" />
+
+        </LinearLayout>
+
+    </com.google.android.material.card.MaterialCardView>
+
     <androidx.constraintlayout.widget.ConstraintLayout
             android:id="@+id/inputContainer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:background="@android:color/transparent"
+            android:clipChildren="false"
+            android:clipToPadding="false"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent">
@@ -134,8 +233,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginHorizontal="18dp"
                 android:layout_marginBottom="16dp"
-                android:background="@drawable/bg_chat_input_card"
-                app:layout_constraintBottom_toBottomOf="parent"
+                android:background="@drawable/bg_chat_input_card" app:layout_constraintBottom_toBottomOf="parent"
                 app:layout_constraintTop_toBottomOf="@id/selectedImageChipScroll"
                 app:layout_constraintStart_toStartOf="parent"
                 app:layout_constraintEnd_toEndOf="parent">

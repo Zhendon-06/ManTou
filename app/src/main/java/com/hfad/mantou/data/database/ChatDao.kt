@@ -57,6 +57,20 @@ interface ChatDao {
      */
     @Query("UPDATE chat_sessions SET isArchived = :isArchived WHERE sessionId = :sessionId")
     suspend fun setSessionArchived(sessionId: Long, isArchived: Boolean)
+
+    @Query(
+        """
+        UPDATE chat_sessions
+        SET taskType = :taskType,
+            appHtmlPath = :appHtmlPath
+        WHERE sessionId = :sessionId
+        """
+    )
+    suspend fun updateSessionTask(
+        sessionId: Long,
+        taskType: String,
+        appHtmlPath: String?
+    )
     
     /**
      * 删除所有会话
@@ -150,7 +164,6 @@ interface ChatDao {
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY timestamp DESC LIMIT 1")
     suspend fun getLastMessage(sessionId: Long): ChatMessageEntity?
 }
-
 
 
 

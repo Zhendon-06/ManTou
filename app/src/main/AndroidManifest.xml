@@ -25,9 +25,6 @@
             android:name=".view.ModelSettingActivity"
             android:exported="false" />
         <activity
-            android:name=".view.ResumeActivity"
-            android:exported="false" />
-        <activity
             android:name=".view.JsonViewerActivity"
             android:exported="false" />
         <activity

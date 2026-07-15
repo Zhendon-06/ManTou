@@ -21,4 +21,10 @@
     <color name="mt_code_text">#35506E</color>
     <color name="input_action_blue">#2C83D8</color>
     <color name="input_send_bg">@color/mt_primary_soft</color>
+    <color name="mt_generate_surface">#151923</color>
+    <color name="mt_generate_surface_soft">#202635</color>
+    <color name="mt_generate_code">#C7F9CC</color>
+    <color name="mt_generate_line">#687386</color>
+    <color name="mt_generate_text">#F4F7FB</color>
+    <color name="mt_generate_accent">#63B3FF</color>
 </resources>

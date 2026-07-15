@@ -362,8 +362,12 @@ class ChatAdapter(
         }
         textView.textSize = appearanceSettings.chatTextSizeSp
         textView.setTextColor(palette.textColor)
+        textView.setText(
+            RichTextFormatter.format(content, palette),
+            TextView.BufferType.SPANNABLE
+        )
         textView.setTextIsSelectable(true)
-        textView.text = RichTextFormatter.format(content, palette)
+        textView.isLongClickable = true
     }
 
     private fun bindImage(imageView: ImageView, imagePath: String?) {

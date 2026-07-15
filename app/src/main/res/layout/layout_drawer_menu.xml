@@ -132,7 +132,6 @@
                 android:layout_height="40dp"
                 android:background="@drawable/bg_drawer_action_circle"
                 android:contentDescription="设置"
-                android:elevation="3dp"
                 android:padding="8dp"
                 android:src="@drawable/setting" />
 
@@ -161,7 +160,6 @@
                 android:layout_height="40dp"
                 android:background="@drawable/bg_drawer_action_circle"
                 android:contentDescription="清空对话"
-                android:elevation="3dp"
                 android:padding="8dp"
                 android:src="@drawable/ic_delete_outline"
                 app:tint="@color/mt_error" />
