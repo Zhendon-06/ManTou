@@ -60,6 +60,7 @@ import com.hfad.mantou.adapter.DesktopAppAdapter
 import com.hfad.mantou.adapter.SessionAdapter
 import com.hfad.mantou.adapter.WorkspaceFileAdapter
 import com.hfad.mantou.data.ChatMessage
+import com.hfad.mantou.data.GenerateTaskState
 import com.hfad.mantou.data.api.VoiceInputConfig
 import com.hfad.mantou.data.api.VoiceTranscriptionApiService
 import com.hfad.mantou.data.api.WavAudioRecorder
@@ -72,6 +73,7 @@ import com.hfad.mantou.data.preferences.ContextLimitStore
 import com.hfad.mantou.data.preferences.VoiceInputModelStore
 import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
+import com.hfad.mantou.databinding.DialogGenerateCodeEditorBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
 import com.hfad.mantou.databinding.LayoutDesktopPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
@@ -155,6 +157,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var activeSessions: List<ChatSessionEntity> = emptyList()
     private var archivedSessions: List<ChatSessionEntity> = emptyList()
     private var runningSessionIds: Set<Long> = emptySet()
+    private var generateTaskStates: Map<Long, GenerateTaskState> = emptyMap()
+    private var currentGenerateTaskState: GenerateTaskState? = null
+    private var codeEditorDialog: Dialog? = null
+    private var codeEditorBinding: DialogGenerateCodeEditorBinding? = null
     private var drawerSearchQuery: String = ""
     private var showArchivedSessions: Boolean = false
 
@@ -207,6 +213,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         super.onViewCreated(view, savedInstanceState)
 
         mainPager = obtainMainPager()
+        binding.topBar.bringToFront()
         setupAppBar()
         setupMainPager()
         setupWorkspacePage()
@@ -264,12 +271,16 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             true
         }
 
+        chatBinding.generateCodeCard.setOnClickListener {
+            showGenerateCodeEditor()
+        }
+
         chatBinding.chipStartTask.setOnClickListener {
             fillInputWithAppPrompt()
         }
 
-        chatBinding.chipWriteResume.setOnClickListener {
-            startActivity(Intent(requireContext(), ResumeActivity::class.java))
+        chatBinding.chipLongTermMemory.setOnClickListener {
+            fillInputWithMemoryPrompt()
         }
 
         chatBinding.rvChat.setOnClickListener {
@@ -328,7 +339,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             layoutParams = ConstraintLayout.LayoutParams(0, 0).apply {
                 startToStart = ConstraintLayout.LayoutParams.PARENT_ID
                 endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
-                topToBottom = binding.topBar.id
+                topToTop = ConstraintLayout.LayoutParams.PARENT_ID
                 bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
             }
             binding.root.addView(this)
@@ -347,6 +358,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private fun initInsets() {
         topBarBaseHeight = binding.topBar.layoutParams.height.takeIf { it > 0 } ?: dp(72)
         inputContainerBasePaddingBottom = chatBinding.inputContainer.paddingBottom
+        updatePageTopScrollBoundaries(topBarBaseHeight)
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
             applyAppBarInsets(insets)
@@ -382,6 +394,26 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         if (binding.topBar.paddingTop != topInset) {
             binding.topBar.updatePadding(top = topInset)
         }
+        updatePageTopScrollBoundaries(targetHeight)
+    }
+
+    private fun updatePageTopScrollBoundaries(topBarHeight: Int) {
+        val chatPaddingTop = topBarHeight + dp(10)
+        if (chatBinding.rvChat.paddingTop != chatPaddingTop) {
+            chatBinding.rvChat.updatePadding(top = chatPaddingTop)
+        }
+
+        val desktopPaddingTop = topBarHeight + dp(16)
+        if (desktopBinding.rvDesktopApps.paddingTop != desktopPaddingTop) {
+            desktopBinding.rvDesktopApps.updatePadding(top = desktopPaddingTop)
+        }
+
+        val workspacePathParams = workspaceBinding.workspacePathBar.layoutParams as ConstraintLayout.LayoutParams
+        val workspaceMarginTop = topBarHeight + dp(20)
+        if (workspacePathParams.topMargin != workspaceMarginTop) {
+            workspacePathParams.topMargin = workspaceMarginTop
+            workspaceBinding.workspacePathBar.layoutParams = workspacePathParams
+        }
     }
 
     private fun applyChatInsets(insets: WindowInsetsCompat) {
@@ -408,10 +440,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         if (chatBinding.inputContainer.paddingBottom != targetPaddingBottom) {
             chatBinding.inputContainer.updatePadding(bottom = targetPaddingBottom)
         }
-        val targetListPaddingBottom = dp(8) + bottomInset
-        if (chatBinding.rvChat.paddingBottom != targetListPaddingBottom) {
-            chatBinding.rvChat.updatePadding(bottom = targetListPaddingBottom)
-        }
+        updateChatListScrollBoundary()
 
         if (imeVisible && (!lastImeVisible || lastAppliedBottomInset != bottomInset)) {
             scrollChatToBottom()
@@ -419,6 +448,21 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         lastImeVisible = imeVisible
         lastAppliedBottomInset = bottomInset
+    }
+
+    private fun updateChatListScrollBoundary() {
+        val generateCardInset = if (currentGenerateTaskState != null) {
+            val layoutParams = chatBinding.generateCodeCard.layoutParams as? ViewGroup.MarginLayoutParams
+            val cardHeight = layoutParams?.height?.takeIf { it > 0 }
+                ?: chatBinding.generateCodeCard.height
+            cardHeight + (layoutParams?.bottomMargin ?: 0)
+        } else {
+            0
+        }
+        val targetPaddingBottom = dp(8) + chatBinding.inputContainer.height + generateCardInset
+        if (chatBinding.rvChat.paddingBottom != targetPaddingBottom) {
+            chatBinding.rvChat.updatePadding(bottom = targetPaddingBottom)
+        }
     }
 
     private fun scrollChatToBottom() {
@@ -1430,6 +1474,13 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             // 设置 item 动画（可选）
             itemAnimator = null  // 禁用动画以避免闪烁，或使用自定义动画
         }
+        chatBinding.inputContainer.addOnLayoutChangeListener {
+            _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top == oldBottom - oldTop) return@addOnLayoutChangeListener
+            val shouldKeepLatestMessageVisible = shouldFollowNewMessages()
+            updateChatListScrollBoundary()
+            if (shouldKeepLatestMessageVisible) scrollChatToBottom()
+        }
         chatAdapter.updateAppearance(AppearanceSettingsStore.getSettings(requireContext()))
     }
 
@@ -1476,6 +1527,11 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             setKeepScreenOn(isGeneratingApp)
         }
 
+        viewModel.generateTaskStates.observe(viewLifecycleOwner) { states ->
+            generateTaskStates = states
+            renderGenerateTaskState(states[viewModel.currentSessionId.value])
+        }
+
         // 观察错误消息
         viewModel.errorMessage.observe(viewLifecycleOwner) { error ->
             error?.let {
@@ -1489,6 +1545,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             pendingMessagesWhileScrolling = null
             forceScrollToLatestMessage = true
             updateSendButtonState(sessionId != null && sessionId in runningSessionIds)
+            renderGenerateTaskState(sessionId?.let(generateTaskStates::get))
             // 可以在这里更新 UI，显示当前会话信息
         }
 
@@ -1519,12 +1576,122 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
     }
 
+    private fun renderGenerateTaskState(taskState: GenerateTaskState?) {
+        val visibilityChanged = (currentGenerateTaskState != null) != (taskState != null)
+        val shouldKeepLatestMessageVisible = visibilityChanged &&
+            ::chatAdapter.isInitialized && shouldFollowNewMessages()
+        currentGenerateTaskState = taskState
+        if (visibilityChanged) {
+            updateChatListScrollBoundary()
+        }
+        if (taskState == null) {
+            chatBinding.generateCodeCard.visibility = View.GONE
+            codeEditorDialog?.dismiss()
+            if (shouldKeepLatestMessageVisible) scrollChatToBottom()
+            return
+        }
+
+        chatBinding.generateCodeCard.visibility = View.VISIBLE
+        chatBinding.generateCodeProgress.visibility =
+            if (taskState.isRunning) View.VISIBLE else View.GONE
+        chatBinding.tvGenerateCodeLanguage.text = taskState.languageLabel
+        chatBinding.tvGenerateCodeTitle.text = when (taskState.phase) {
+            GenerateTaskState.Phase.PREPARING -> "正在准备代码"
+            GenerateTaskState.Phase.WRITING_INITIAL -> "正在写入 HTML"
+            GenerateTaskState.Phase.WRITING_DIFF -> "正在写入 DIFF"
+            GenerateTaskState.Phase.APPLYING_DIFF -> "正在应用修改"
+            GenerateTaskState.Phase.COMPLETED -> if (taskState.isModification) "应用源码已更新" else "应用源码"
+            GenerateTaskState.Phase.ERROR -> "生成任务出错"
+        }
+        chatBinding.tvGenerateCodeStatus.text = taskState.status
+        chatBinding.tvGenerateCodePreview.text = buildGenerateCodePreview(taskState)
+        updateGenerateCodeEditor(taskState)
+        if (shouldKeepLatestMessageVisible) scrollChatToBottom()
+    }
+
+    private fun buildGenerateCodePreview(taskState: GenerateTaskState): String {
+        if (taskState.code.isBlank()) {
+            return "\$ ${taskState.languageLabel.lowercase(Locale.ROOT)} -- waiting"
+        }
+        return taskState.code
+            .lineSequence()
+            .filter { it.isNotBlank() }
+            .takeLastLines(3)
+            .joinToString("\n")
+    }
+
+    private fun Sequence<String>.takeLastLines(count: Int): List<String> {
+        val lines = ArrayDeque<String>(count)
+        forEach { line ->
+            if (lines.size == count) lines.removeFirst()
+            lines.addLast(line)
+        }
+        return lines.toList()
+    }
+
+    private fun showGenerateCodeEditor() {
+        val taskState = currentGenerateTaskState ?: return
+        if (codeEditorDialog?.isShowing == true) {
+            updateGenerateCodeEditor(taskState)
+            return
+        }
+
+        val editorBinding = DialogGenerateCodeEditorBinding.inflate(layoutInflater)
+        val dialog = Dialog(requireContext(), android.R.style.Theme_Material_NoActionBar_Fullscreen)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setContentView(editorBinding.root)
+        editorBinding.btnCloseCodeEditor.setOnClickListener { dialog.dismiss() }
+        dialog.setOnDismissListener {
+            codeEditorBinding = null
+            codeEditorDialog = null
+        }
+        codeEditorBinding = editorBinding
+        codeEditorDialog = dialog
+        dialog.show()
+        dialog.window?.apply {
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            statusBarColor = ContextCompat.getColor(requireContext(), R.color.mt_generate_surface)
+            navigationBarColor = ContextCompat.getColor(requireContext(), R.color.mt_generate_surface)
+        }
+        updateGenerateCodeEditor(taskState)
+    }
+
+    private fun updateGenerateCodeEditor(taskState: GenerateTaskState) {
+        val editorBinding = codeEditorBinding ?: return
+        if (codeEditorDialog?.isShowing != true) return
+
+        val title = taskState.filePath
+            ?.let(::File)
+            ?.name
+            ?.takeIf(String::isNotBlank)
+            ?: if (taskState.isModification) "应用修改.diff" else "生成应用.html"
+        editorBinding.tvCodeEditorTitle.text = title
+        editorBinding.tvCodeEditorStatus.text = taskState.status
+        editorBinding.tvCodeEditorLanguage.text = taskState.languageLabel
+        editorBinding.tvCodeEditorContent.text = taskState.code
+
+        val lineCount = taskState.code.count { it == '\n' } + 1
+        editorBinding.tvCodeEditorLines.text = (1..lineCount).joinToString("\n")
+        if (taskState.isRunning) {
+            editorBinding.codeEditorVerticalScroll.post {
+                editorBinding.codeEditorVerticalScroll.fullScroll(View.FOCUS_DOWN)
+            }
+        }
+    }
+
     private fun openImagePicker() {
         imagePickerLauncher.launch(arrayOf("image/*"))
     }
 
     private fun fillInputWithAppPrompt() {
         val prompt = "生成一个应用："
+        chatBinding.etInput.setText(prompt)
+        chatBinding.etInput.setSelection(prompt.length)
+        switchToActiveState()
+    }
+
+    private fun fillInputWithMemoryPrompt() {
+        val prompt = "请记住："
         chatBinding.etInput.setText(prompt)
         chatBinding.etInput.setSelection(prompt.length)
         switchToActiveState()
@@ -2805,6 +2972,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     override fun onDestroyView() {
+        codeEditorDialog?.dismiss()
+        codeEditorBinding = null
+        codeEditorDialog = null
         super.onDestroyView()
         cancelVoiceInput()
         CameraPhotoBridge.detach(this)

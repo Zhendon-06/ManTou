@@ -1,6 +1,8 @@
 package com.hfad.mantou.data.database
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
+import androidx.room.Ignore
 import androidx.room.PrimaryKey
 
 /**
@@ -15,11 +17,23 @@ data class ChatSessionEntity(
     
     val createTime: Long,  // 创建时间戳
 
-    val isArchived: Boolean = false
-)
+    val isArchived: Boolean = false,
 
+    @ColumnInfo(defaultValue = "'chat'")
+    val taskType: String = TASK_TYPE_CHAT,
 
+    @ColumnInfo(defaultValue = "NULL")
+    val appHtmlPath: String? = null
+) {
+    @get:Ignore
+    val isGenerateTask: Boolean
+        get() = taskType == TASK_TYPE_GENERATE
 
+    companion object {
+        const val TASK_TYPE_CHAT = "chat"
+        const val TASK_TYPE_GENERATE = "generate"
+    }
+}
 
 
 

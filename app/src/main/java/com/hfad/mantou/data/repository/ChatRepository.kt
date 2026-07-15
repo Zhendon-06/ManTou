@@ -74,6 +74,26 @@ class ChatRepository(private val chatDao: ChatDao) {
         }
     }
 
+    suspend fun getSessionById(sessionId: Long): ChatSessionEntity? {
+        return chatDao.getSessionById(sessionId)
+    }
+
+    suspend fun markSessionAsGenerate(sessionId: Long, appHtmlPath: String? = null) {
+        chatDao.updateSessionTask(
+            sessionId = sessionId,
+            taskType = ChatSessionEntity.TASK_TYPE_GENERATE,
+            appHtmlPath = appHtmlPath
+        )
+    }
+
+    suspend fun clearGeneratedApp(sessionId: Long) {
+        chatDao.updateSessionTask(
+            sessionId = sessionId,
+            taskType = ChatSessionEntity.TASK_TYPE_GENERATE,
+            appHtmlPath = null
+        )
+    }
+
     /**
      * 获取所有会话（实时更新）
      * 

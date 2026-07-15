@@ -75,6 +75,8 @@ class SessionAdapter(
             binding.tvSessionTitle.maxLines = 1
             binding.progressSessionLoading.visibility =
                 if (session.sessionId in runningSessionIds) View.VISIBLE else View.GONE
+            binding.tvSessionTaskType.visibility =
+                if (session.isGenerateTask) View.VISIBLE else View.GONE
 
             // 显示创建时间
             val dateFormat = SimpleDateFormat("MM/dd HH:mm", Locale.getDefault())
@@ -95,7 +97,6 @@ class SessionDiffCallback : DiffUtil.ItemCallback<ChatSessionEntity>() {
         return oldItem == newItem
     }
 }
-
 
 
 

@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/mt_generate_surface">
+
+    <LinearLayout
+        android:id="@+id/codeEditorToolbar"
+        android:layout_width="0dp"
+        android:layout_height="56dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <TextView
+            android:id="@+id/btnCloseCodeEditor"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:paddingEnd="18dp"
+            android:text="关闭"
+            android:textColor="@color/mt_generate_accent"
+            android:textSize="15sp" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tvCodeEditorTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="middle"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="生成代码"
+                android:textColor="@color/mt_generate_text"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvCodeEditorStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:gravity="center"
+                android:maxLines="1"
+                android:textColor="@color/mt_generate_line"
+                android:textSize="10sp" />
+
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tvCodeEditorLanguage"
+            android:layout_width="56dp"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:text="HTML"
+            android:textColor="@color/mt_generate_accent"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+    </LinearLayout>
+
+    <View
+        android:id="@+id/codeEditorDivider"
+        android:layout_width="0dp"
+        android:layout_height="1dp"
+        android:background="@color/mt_generate_surface_soft"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/codeEditorToolbar" />
+
+    <ScrollView
+        android:id="@+id/codeEditorVerticalScroll"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:fillViewport="true"
+        android:overScrollMode="never"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/codeEditorDivider">
+
+        <HorizontalScrollView
+            android:id="@+id/codeEditorHorizontalScroll"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fillViewport="true"
+            android:overScrollMode="never">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minHeight="480dp"
+                android:orientation="horizontal"
+                android:paddingTop="14dp"
+                android:paddingBottom="32dp">
+
+                <TextView
+                    android:id="@+id/tvCodeEditorLines"
+                    android:layout_width="56dp"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:gravity="end"
+                    android:includeFontPadding="false"
+                    android:lineSpacingExtra="3dp"
+                    android:paddingEnd="12dp"
+                    android:textColor="@color/mt_generate_line"
+                    android:textIsSelectable="false"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tvCodeEditorContent"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minWidth="320dp"
+                    android:fontFamily="monospace"
+                    android:includeFontPadding="false"
+                    android:lineSpacingExtra="3dp"
+                    android:paddingEnd="24dp"
+                    android:textColor="@color/mt_generate_code"
+                    android:textIsSelectable="true"
+                    android:textSize="12sp" />
+
+            </LinearLayout>
+
+        </HorizontalScrollView>
+
+    </ScrollView>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

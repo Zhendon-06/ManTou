@@ -2,11 +2,13 @@ package com.hfad.mantou.viewmodel
 
 import android.app.Application
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
 import com.hfad.mantou.data.ChatMessage
+import com.hfad.mantou.data.GenerateTaskState
 import com.hfad.mantou.data.api.ApiConfig
 import com.hfad.mantou.data.api.ApiMessage
 import com.hfad.mantou.data.api.ChatCallConfig
@@ -25,6 +27,7 @@ import com.hfad.mantou.utils.AppIntentDetector
 import com.hfad.mantou.utils.ChatContextFormatter
 import com.hfad.mantou.utils.ErrorAnalyzer
 import com.hfad.mantou.utils.ImageUtils
+import com.hfad.mantou.utils.LocalDiffFileTool
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +39,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -65,6 +69,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isGeneratingApp = MutableLiveData(false)
     val isGeneratingApp: LiveData<Boolean> = _isGeneratingApp
+
+    private val _generateTaskStates = MutableLiveData<Map<Long, GenerateTaskState>>(emptyMap())
+    val generateTaskStates: LiveData<Map<Long, GenerateTaskState>> = _generateTaskStates
 
     private val _errorMessage = MutableLiveData<String?>()
     val errorMessage: LiveData<String?> = _errorMessage
@@ -115,6 +122,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         messagesJob?.cancel()
         _currentSessionId.value = sessionId
         loadMessages(sessionId)
+        restoreGenerateTaskState(sessionId)
         updateSessionLoadingIndicators()
     }
 
@@ -202,24 +210,54 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         content: String,
         imageBase64List: List<String>
     ) {
-        val isAppIntent = withContext(Dispatchers.IO) {
-            val latestAssistantMessage = repository.getMessagesBySessionIdOnce(state.sessionId)
+        val sessionRouting = withContext(Dispatchers.IO) {
+            val session = repository.getSessionById(state.sessionId)
+            val latestGeneratedPath = repository.getMessagesBySessionIdOnce(state.sessionId)
                 .asReversed()
-                .firstOrNull { it.role == ChatMessage.ROLE_ASSISTANT }
-            val hasGeneratedAppInSession = !latestAssistantMessage?.appHtmlPath.isNullOrBlank()
+                .firstNotNullOfOrNull { it.appHtmlPath?.takeIf(String::isNotBlank) }
+            val appHtmlPath = session?.appHtmlPath?.takeIf(String::isNotBlank) ?: latestGeneratedPath
+            SessionRouting(
+                isGenerateTask = session?.isGenerateTask == true || appHtmlPath != null,
+                appHtmlPath = appHtmlPath
+            )
+        }
+
+        if (sessionRouting.isGenerateTask) {
+            repository.markSessionAsGenerate(state.sessionId, sessionRouting.appHtmlPath)
+            val existingFile = sessionRouting.appHtmlPath
+                ?.let(::File)
+                ?.takeIf { it.isFile }
+            if (existingFile != null) {
+                generateAppDiffFlow(state, config, content, existingFile)
+            } else {
+                generateAppFlow(state, config, content)
+            }
+            return
+        }
+
+        val isAppIntent = withContext(Dispatchers.IO) {
             AppIntentDetector.isAppGenerationIntent(
                 context = getApplication(),
                 config = config,
                 userMessage = content,
-                hasGeneratedAppInSession = hasGeneratedAppInSession,
+                hasGeneratedAppInSession = false,
             )
         }
 
-        if (isAppIntent) {
-            generateAppFlow(state, config, content)
-        } else {
+        if (!isAppIntent) {
             normalChatFlow(state, config, imageBase64List)
+            return
         }
+
+        repository.markSessionAsGenerate(state.sessionId)
+        updateGenerateTaskState(
+            GenerateTaskState(
+                sessionId = state.sessionId,
+                phase = GenerateTaskState.Phase.PREPARING,
+                status = "正在准备初版应用"
+            )
+        )
+        generateAppFlow(state, config, content)
     }
 
     private suspend fun normalChatFlow(
@@ -430,12 +468,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun generateAppFlow(
         state: StreamingSessionState,
         config: ChatCallConfig,
-        userMessage: String
+        userMessage: String,
+        qualityRetryCount: Int = 0,
+        requestMessage: String = userMessage
     ) {
         val sessionId = state.sessionId
         state.isGeneratingApp = true
         updateSessionLoadingIndicators()
         try {
+            updateGenerateTaskState(
+                GenerateTaskState(
+                    sessionId = sessionId,
+                    phase = GenerateTaskState.Phase.PREPARING,
+                    status = "正在准备初版应用"
+                )
+            )
             state.thinkingContent.clear()
             addStreamingPlaceholder(state, status = "正在生成应用", useLoadingLayout = true)
             updateStreamingThinking(
@@ -443,16 +490,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 buildAppGenerationProgressText(elapsedSeconds = 0, receivedChars = 0)
             )
 
-            val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
-            val apiMessages = buildApiMessages(
-                historyMessages = historyMessages,
-                systemPrompt = AppGenerator.buildSystemPrompt(getApplication())
+            val apiMessages = listOf(
+                ApiMessage(
+                    role = "system",
+                    content = AppGenerator.buildSystemPrompt(getApplication())
+                ),
+                ApiMessage(role = ChatMessage.ROLE_USER, content = requestMessage)
             )
             val request = ChatRequest(
                 model = config.model,
                 messages = apiMessages,
                 stream = true,
-                maxTokens = ContextLimitStore.getTokenLimit(getApplication())
+                maxTokens = AppGenerator.resolveAppGenerationOutputLimit(
+                    ContextLimitStore.getTokenLimit(getApplication())
+                ),
+                temperature = 0.45,
+                topP = 0.9
             )
 
             val htmlBuffer = StringBuilder()
@@ -462,6 +515,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 .catch { e ->
                     if (e is CancellationException) throw e
                     stopAppGenerationProgressHeartbeat(state)
+                    markGenerateTaskError(state, e.message ?: "未知错误", htmlBuffer.toString())
                     handleApiError(state, config, e.message ?: "未知错误", "生成网页应用")
                 }
                 .collect { event ->
@@ -473,6 +527,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                         is StreamingApiService.StreamEvent.Content -> {
                             htmlBuffer.append(event.text)
+                            updateGenerateTaskCode(
+                                state = state,
+                                code = htmlBuffer,
+                                phase = GenerateTaskState.Phase.WRITING_INITIAL,
+                                status = "正在写入 HTML · ${htmlBuffer.length} 字符"
+                            )
                             if (state.thinkingContent.isBlank()) {
                                 updateStreamingThinking(
                                     state,
@@ -497,9 +557,53 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     AppGenerator.extractHtml(htmlBuffer.toString())
                                 }
                                 if (htmlContent != null) {
+                                    val qualityIssues = withContext(Dispatchers.Default) {
+                                        AppGenerator.generatedWebAppQualityIssues(htmlContent)
+                                    }
+                                    if (qualityIssues.isNotEmpty() && qualityRetryCount == 0) {
+                                        updateGenerateTaskCode(
+                                            state = state,
+                                            code = htmlBuffer.toString(),
+                                            phase = GenerateTaskState.Phase.PREPARING,
+                                            status = "质量检查未通过，准备重新生成",
+                                            force = true
+                                        )
+                                        updateStreamingThinking(
+                                            state,
+                                            "初版缺少完整样式或交互，已自动要求模型从头重做...",
+                                            force = true
+                                        )
+                                        generateAppFlow(
+                                            state = state,
+                                            config = config,
+                                            userMessage = userMessage,
+                                            qualityRetryCount = 1,
+                                            requestMessage = AppGenerator.buildQualityRetryUserPrompt(
+                                                userMessage,
+                                                qualityIssues
+                                            )
+                                        )
+                                        return@collect
+                                    }
+                                    AppGenerator.validateGeneratedWebApp(htmlContent)
                                     val file = withContext(Dispatchers.IO) {
                                         AppGenerator.saveHtmlFile(getApplication(), htmlContent, userMessage)
                                     }
+                                    val savedCode = withContext(Dispatchers.IO) { file.readText() }
+                                    repository.markSessionAsGenerate(sessionId, file.absolutePath)
+                                    updateGenerateTaskState(
+                                        GenerateTaskState(
+                                            sessionId = sessionId,
+                                            phase = GenerateTaskState.Phase.COMPLETED,
+                                            code = savedCode,
+                                            filePath = file.absolutePath,
+                                            status = if (qualityRetryCount == 0) {
+                                                "初版应用已写入本地"
+                                            } else {
+                                                "重生成应用已通过质量检查"
+                                            }
+                                        )
+                                    )
                                     removeStreamingPlaceholder(state)
                                     state.thinkingContent.clear()
                                     addFinalAssistantMessage(
@@ -509,6 +613,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     )
                                     _appGenerated.value = file.absolutePath
                                 } else {
+                                    if (qualityRetryCount == 0) {
+                                        val qualityIssues = listOf("模型返回内容中未找到完整 HTML")
+                                        updateGenerateTaskCode(
+                                            state = state,
+                                            code = htmlBuffer.toString(),
+                                            phase = GenerateTaskState.Phase.PREPARING,
+                                            status = "HTML 不完整，准备重新生成",
+                                            force = true
+                                        )
+                                        generateAppFlow(
+                                            state = state,
+                                            config = config,
+                                            userMessage = userMessage,
+                                            qualityRetryCount = 1,
+                                            requestMessage = AppGenerator.buildQualityRetryUserPrompt(
+                                                userMessage,
+                                                qualityIssues
+                                            )
+                                        )
+                                        return@collect
+                                    }
+                                    markGenerateTaskError(state, "模型返回内容中未找到合法 HTML", htmlBuffer.toString())
                                     handleApiError(
                                         state,
                                         config,
@@ -518,6 +644,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
+                                markGenerateTaskError(
+                                    state,
+                                    e.message ?: "保存 HTML 时出错",
+                                    htmlBuffer.toString()
+                                )
                                 handleApiError(
                                     state,
                                     config,
@@ -529,11 +660,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                         is StreamingApiService.StreamEvent.Disconnected -> {
                             stopAppGenerationProgressHeartbeat(state)
+                            markGenerateTaskError(state, event.message, htmlBuffer.toString())
                             handleApiError(state, config, event.message, "生成网页应用")
                         }
 
                         is StreamingApiService.StreamEvent.Error -> {
                             stopAppGenerationProgressHeartbeat(state)
+                            markGenerateTaskError(state, event.message, htmlBuffer.toString())
                             handleApiError(state, config, event.message, "生成网页应用")
                         }
 
@@ -544,6 +677,333 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             stopAppGenerationProgressHeartbeat(state)
             state.isGeneratingApp = false
             updateSessionLoadingIndicators()
+        }
+    }
+
+    private suspend fun generateAppDiffFlow(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        userMessage: String,
+        htmlFile: File,
+        diffRetryCount: Int = 0,
+        previousFailure: String? = null
+    ) {
+        val sessionId = state.sessionId
+        state.isGeneratingApp = true
+        updateSessionLoadingIndicators()
+        val diffBuffer = StringBuilder()
+
+        try {
+            val diffTool = withContext(Dispatchers.IO) {
+                LocalDiffFileTool(getApplication<Application>().filesDir)
+            }
+            val snapshot = withContext(Dispatchers.IO) { diffTool.readSnapshot(htmlFile) }
+            updateGenerateTaskState(
+                GenerateTaskState(
+                    sessionId = sessionId,
+                    phase = GenerateTaskState.Phase.PREPARING,
+                    code = snapshot.content,
+                    filePath = htmlFile.absolutePath,
+                    status = if (diffRetryCount == 0) "正在读取现有应用" else "正在重新生成规范 DIFF",
+                    isModification = true
+                )
+            )
+
+            state.thinkingContent.clear()
+            addStreamingPlaceholder(
+                state,
+                status = if (diffRetryCount == 0) "正在修改应用" else "正在修复补丁格式",
+                useLoadingLayout = true
+            )
+            updateStreamingThinking(
+                state,
+                if (diffRetryCount == 0) {
+                    "已读取当前 HTML，正在生成最小化 diff..."
+                } else {
+                    "上一份补丁格式不合法，正在基于原文件重新生成规范 unified diff..."
+                },
+                force = true
+            )
+
+            val request = ChatRequest(
+                model = config.model,
+                messages = listOf(
+                    ApiMessage(
+                        role = "system",
+                        content = AppGenerator.buildModificationSystemPrompt(
+                            context = getApplication(),
+                            relativePath = snapshot.relativePath,
+                            expectedSha256 = snapshot.sha256,
+                            includeTools = AppGenerator.modificationNeedsTools(userMessage)
+                        )
+                    ),
+                    ApiMessage(
+                        role = ChatMessage.ROLE_USER,
+                        content = AppGenerator.buildModificationUserPrompt(
+                            userMessage,
+                            snapshot,
+                            previousFailure
+                        )
+                    )
+                ),
+                stream = true,
+                maxTokens = AppGenerator.resolveAppDiffOutputLimit(
+                    ContextLimitStore.getTokenLimit(getApplication())
+                ),
+                temperature = 0.2,
+                topP = 0.9
+            )
+
+            StreamingApiService.streamChatCompletion(config, request)
+                .catch { error ->
+                    if (error is CancellationException) throw error
+                    val message = error.message ?: "生成 diff 时出错"
+                    if (StreamingApiService.isRetryableNetworkFailure(message) &&
+                        retryAppDiffFlow(
+                            state = state,
+                            config = config,
+                            userMessage = userMessage,
+                            htmlFile = htmlFile,
+                            diffRetryCount = diffRetryCount,
+                            failure = message,
+                            diffCode = diffBuffer,
+                            status = "网络连接超时，准备自动重试"
+                        )
+                    ) {
+                        return@catch
+                    }
+                    markGenerateTaskError(
+                        state,
+                        message,
+                        diffBuffer.toString(),
+                        htmlFile.absolutePath,
+                        isModification = true
+                    )
+                    handleApiError(state, config, message, "增量修改网页应用")
+                }
+                .collect { event ->
+                    when (event) {
+                        is StreamingApiService.StreamEvent.Thinking -> {
+                            state.thinkingContent.append(event.text)
+                            updateStreamingThinking(state, state.thinkingContent.toString())
+                        }
+
+                        is StreamingApiService.StreamEvent.Content -> {
+                            diffBuffer.append(event.text)
+                            updateGenerateTaskCode(
+                                state = state,
+                                code = diffBuffer,
+                                phase = GenerateTaskState.Phase.WRITING_DIFF,
+                                status = "正在写入 DIFF · ${diffBuffer.length} 字符",
+                                filePath = htmlFile.absolutePath,
+                                isModification = true
+                            )
+                        }
+
+                        is StreamingApiService.StreamEvent.Done -> {
+                            updateGenerateTaskCode(
+                                state = state,
+                                code = diffBuffer.toString(),
+                                phase = GenerateTaskState.Phase.APPLYING_DIFF,
+                                status = "正在校验并应用 DIFF",
+                                filePath = htmlFile.absolutePath,
+                                isModification = true,
+                                force = true
+                            )
+                            try {
+                                val unifiedDiff = AppGenerator.extractUnifiedDiff(diffBuffer.toString())
+                                    ?: throw LocalDiffFileTool.DiffException("模型没有返回合法 unified diff")
+                                val applyResult = withContext(Dispatchers.IO) {
+                                    diffTool.apply(htmlFile, snapshot.sha256, unifiedDiff) { patchedContent ->
+                                        AppGenerator.validatePatchedWebApp(snapshot.content, patchedContent)
+                                    }
+                                }
+                                val updatedCode = withContext(Dispatchers.IO) { htmlFile.readText() }
+                                repository.markSessionAsGenerate(sessionId, htmlFile.absolutePath)
+                                updateGenerateTaskState(
+                                    GenerateTaskState(
+                                        sessionId = sessionId,
+                                        phase = GenerateTaskState.Phase.COMPLETED,
+                                        code = updatedCode,
+                                        filePath = htmlFile.absolutePath,
+                                        status = "已应用 ${applyResult.hunkCount} 处修改 · +${applyResult.additions} -${applyResult.deletions}",
+                                        isModification = true
+                                    )
+                                )
+                                removeStreamingPlaceholder(state)
+                                state.thinkingContent.clear()
+                                addFinalAssistantMessage(
+                                    state,
+                                    "已按你的要求增量修改应用，点击代码窗口可查看最新源码 👇",
+                                    appHtmlPath = htmlFile.absolutePath
+                                )
+                                _appGenerated.value = htmlFile.absolutePath
+                            } catch (error: Exception) {
+                                if (error is CancellationException) throw error
+                                logGeneratedAppDiffFailure(
+                                    state = state,
+                                    htmlFile = htmlFile,
+                                    diffRetryCount = diffRetryCount,
+                                    diffCode = diffBuffer,
+                                    error = error
+                                )
+                                if (error is LocalDiffFileTool.DiffException &&
+                                    retryAppDiffFlow(
+                                        state = state,
+                                        config = config,
+                                        userMessage = userMessage,
+                                        htmlFile = htmlFile,
+                                        diffRetryCount = diffRetryCount,
+                                        failure = error.message ?: "补丁格式不合法",
+                                        diffCode = diffBuffer,
+                                        status = "补丁格式或上下文无效，准备自动重试"
+                                    )
+                                ) {
+                                    return@collect
+                                }
+                                markGenerateTaskError(
+                                    state,
+                                    error.message ?: "应用 diff 时出错",
+                                    diffBuffer.toString(),
+                                    htmlFile.absolutePath,
+                                    isModification = true
+                                )
+                                handleApiError(
+                                    state,
+                                    config,
+                                    error.message ?: "应用 diff 时出错",
+                                    "增量修改网页应用"
+                                )
+                            }
+                        }
+
+                        is StreamingApiService.StreamEvent.Disconnected -> {
+                            if (retryAppDiffFlow(
+                                    state = state,
+                                    config = config,
+                                    userMessage = userMessage,
+                                    htmlFile = htmlFile,
+                                    diffRetryCount = diffRetryCount,
+                                    failure = event.message,
+                                    diffCode = diffBuffer,
+                                    status = "网络连接中断，准备自动重试"
+                                )
+                            ) {
+                                return@collect
+                            }
+                            markGenerateTaskError(
+                                state,
+                                event.message,
+                                diffBuffer.toString(),
+                                htmlFile.absolutePath,
+                                isModification = true
+                            )
+                            handleApiError(state, config, event.message, "增量修改网页应用")
+                        }
+
+                        is StreamingApiService.StreamEvent.Error -> {
+                            if (StreamingApiService.isRetryableNetworkFailure(event.message) &&
+                                retryAppDiffFlow(
+                                    state = state,
+                                    config = config,
+                                    userMessage = userMessage,
+                                    htmlFile = htmlFile,
+                                    diffRetryCount = diffRetryCount,
+                                    failure = event.message,
+                                    diffCode = diffBuffer,
+                                    status = "网络连接超时，准备自动重试"
+                                )
+                            ) {
+                                return@collect
+                            }
+                            markGenerateTaskError(
+                                state,
+                                event.message,
+                                diffBuffer.toString(),
+                                htmlFile.absolutePath,
+                                isModification = true
+                            )
+                            handleApiError(state, config, event.message, "增量修改网页应用")
+                        }
+
+                        is StreamingApiService.StreamEvent.Start -> Unit
+                    }
+                }
+        } catch (error: Exception) {
+            if (error is CancellationException) throw error
+            markGenerateTaskError(
+                state,
+                error.message ?: "无法读取现有应用",
+                diffBuffer.toString(),
+                htmlFile.absolutePath,
+                isModification = true
+            )
+            handleApiError(state, config, error.message ?: "无法读取现有应用", "增量修改网页应用")
+        } finally {
+            state.isGeneratingApp = false
+            updateSessionLoadingIndicators()
+        }
+    }
+
+    private suspend fun retryAppDiffFlow(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        userMessage: String,
+        htmlFile: File,
+        diffRetryCount: Int,
+        failure: String,
+        diffCode: CharSequence,
+        status: String
+    ): Boolean {
+        if (diffRetryCount != 0) return false
+        updateGenerateTaskCode(
+            state = state,
+            code = diffCode,
+            phase = GenerateTaskState.Phase.PREPARING,
+            status = status,
+            filePath = htmlFile.absolutePath,
+            isModification = true,
+            force = true
+        )
+        generateAppDiffFlow(
+            state = state,
+            config = config,
+            userMessage = userMessage,
+            htmlFile = htmlFile,
+            diffRetryCount = 1,
+            previousFailure = failure
+        )
+        return true
+    }
+
+    private fun logGeneratedAppDiffFailure(
+        state: StreamingSessionState,
+        htmlFile: File,
+        diffRetryCount: Int,
+        diffCode: CharSequence,
+        error: Exception
+    ) {
+        val response = diffCode.toString()
+        Log.e(
+            WEB_APP_DIFF_LOG_TAG,
+            "Generated app diff failed: sessionId=${state.sessionId}, " +
+                "attempt=${diffRetryCount + 1}, file=${htmlFile.absolutePath}, " +
+                "responseChars=${response.length}",
+            error
+        )
+        Log.e(
+            WEB_APP_DIFF_LOG_TAG,
+            "Model diff response preview:\n${buildDiffLogPreview(response)}"
+        )
+    }
+
+    private fun buildDiffLogPreview(response: String): String {
+        if (response.length <= APP_DIFF_LOG_PREVIEW_CHARS) return response
+        val previewPartChars = APP_DIFF_LOG_PREVIEW_CHARS / 2
+        return buildString(APP_DIFF_LOG_PREVIEW_CHARS + 80) {
+            append(response.take(previewPartChars))
+            append("\n… ${response.length - APP_DIFF_LOG_PREVIEW_CHARS} characters omitted …\n")
+            append(response.takeLast(previewPartChars))
         }
     }
 
@@ -592,6 +1052,97 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             "如果模型没有思考过程，这里会持续显示生成状态"
         }
         return listOf(elapsedLine, stageLine, receivedLine).joinToString("\n")
+    }
+
+    private fun updateGenerateTaskCode(
+        state: StreamingSessionState,
+        code: CharSequence,
+        phase: GenerateTaskState.Phase,
+        status: String,
+        filePath: String? = null,
+        isModification: Boolean = false,
+        force: Boolean = false
+    ) {
+        val now = System.currentTimeMillis()
+        if (!force && state.lastGenerateTaskUpdateAt != 0L &&
+            now - state.lastGenerateTaskUpdateAt < streamingUiUpdateIntervalMs
+        ) {
+            return
+        }
+        state.lastGenerateTaskUpdateAt = now
+        updateGenerateTaskState(
+            GenerateTaskState(
+                sessionId = state.sessionId,
+                phase = phase,
+                code = code.toString(),
+                filePath = filePath,
+                status = status,
+                isModification = isModification,
+                updatedAt = now
+            )
+        )
+    }
+
+    private fun updateGenerateTaskState(taskState: GenerateTaskState) {
+        val states = _generateTaskStates.value.orEmpty().toMutableMap()
+        states[taskState.sessionId] = taskState
+        _generateTaskStates.value = states
+    }
+
+    private fun markGenerateTaskError(
+        state: StreamingSessionState,
+        message: String,
+        code: String = "",
+        filePath: String? = null,
+        isModification: Boolean = false
+    ) {
+        updateGenerateTaskState(
+            GenerateTaskState(
+                sessionId = state.sessionId,
+                phase = GenerateTaskState.Phase.ERROR,
+                code = code,
+                filePath = filePath,
+                status = message,
+                isModification = isModification
+            )
+        )
+    }
+
+    private fun restoreGenerateTaskState(sessionId: Long) {
+        if (streamingStates[sessionId]?.isGeneratingApp == true) return
+        viewModelScope.launch {
+            val restored = withContext(Dispatchers.IO) {
+                val session = repository.getSessionById(sessionId) ?: return@withContext null
+                val legacyPath = repository.getMessagesBySessionIdOnce(sessionId)
+                    .asReversed()
+                    .firstNotNullOfOrNull { it.appHtmlPath?.takeIf(String::isNotBlank) }
+                val path = session.appHtmlPath?.takeIf(String::isNotBlank) ?: legacyPath
+                if (!session.isGenerateTask && path == null) return@withContext null
+                if (!session.isGenerateTask) {
+                    repository.markSessionAsGenerate(sessionId, path)
+                }
+                val file = path?.let(::File)?.takeIf { it.isFile }
+                if (file == null) {
+                    GenerateTaskState(
+                        sessionId = sessionId,
+                        phase = GenerateTaskState.Phase.ERROR,
+                        filePath = path,
+                        status = "生成任务尚无可用的 HTML 文件"
+                    )
+                } else {
+                    GenerateTaskState(
+                        sessionId = sessionId,
+                        phase = GenerateTaskState.Phase.COMPLETED,
+                        code = file.readText(),
+                        filePath = file.absolutePath,
+                        status = "应用源码已载入"
+                    )
+                }
+            }
+            if (restored != null && streamingStates[sessionId]?.isGeneratingApp != true) {
+                updateGenerateTaskState(restored)
+            }
+        }
     }
 
     private fun addStreamingPlaceholder(
@@ -750,6 +1301,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         state.job?.cancel()
         state.job = null
         stopAppGenerationProgressHeartbeat(state)
+        if (state.isGeneratingApp) {
+            val task = _generateTaskStates.value.orEmpty()[sessionId]
+            updateGenerateTaskState(
+                task?.copy(
+                    phase = GenerateTaskState.Phase.ERROR,
+                    status = "生成任务已停止",
+                    updatedAt = System.currentTimeMillis()
+                ) ?: GenerateTaskState(
+                    sessionId = sessionId,
+                    phase = GenerateTaskState.Phase.ERROR,
+                    status = "生成任务已停止"
+                )
+            )
+        }
         state.isGeneratingApp = false
         if (persistFallback) {
             fallbackScope.launch {
@@ -892,6 +1457,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         cancelStreaming(sessionId)
         viewModelScope.launch {
             repository.deleteSession(sessionId)
+            _generateTaskStates.value = _generateTaskStates.value.orEmpty() - sessionId
             if (_currentSessionId.value == sessionId) {
                 _currentSessionId.value = null
                 _messages.value = emptyList()
@@ -930,6 +1496,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 ?: return@launch
             if (repository.getMessageCount(editedMessage.sessionId) == 1) {
                 repository.updateSessionTitle(editedMessage.sessionId, content.ifEmpty { "[图片]" })
+                if (repository.getSessionById(editedMessage.sessionId)?.isGenerateTask == true) {
+                    repository.clearGeneratedApp(editedMessage.sessionId)
+                }
             }
 
             val state = StreamingSessionState(editedMessage.sessionId)
@@ -968,6 +1537,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             repository.deleteAllSessions()
             _currentSessionId.value = null
             _messages.value = emptyList()
+            _generateTaskStates.value = emptyMap()
         }
     }
 
@@ -997,6 +1567,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 }
 
+private const val WEB_APP_DIFF_LOG_TAG = "WebAppDiff"
+private const val APP_DIFF_LOG_PREVIEW_CHARS = 3_000
+
 private data class StreamingSessionState(
     val sessionId: Long,
     var job: Job? = null,
@@ -1009,7 +1582,13 @@ private data class StreamingSessionState(
     var hasFinalAssistantMessage: Boolean = false,
     var lastStreamingContentUpdateAt: Long = 0L,
     var lastStreamingThinkingUpdateAt: Long = 0L,
+    var lastGenerateTaskUpdateAt: Long = 0L,
     var reconnectPrefixPending: String = ""
+)
+
+private data class SessionRouting(
+    val isGenerateTask: Boolean,
+    val appHtmlPath: String?
 )
 
 private fun ChatMessageEntity.toChatMessage() = ChatMessage(

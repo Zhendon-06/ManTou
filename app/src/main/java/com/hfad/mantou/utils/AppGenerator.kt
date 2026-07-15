@@ -10,26 +10,24 @@ import java.util.UUID
 
 object AppGenerator {
 
-    private const val BASE_SYSTEM_PROMPT = """你是一个专业的网页应用生成器。根据用户的一句话描述，生成一个完整的、可直接运行的HTML文件。
+    private const val BASE_SYSTEM_PROMPT = """你是一名资深移动端产品设计师和前端工程师。根据用户描述，交付一个完整、精致、可直接运行的单文件 HTML 应用，而不是页面草稿或组件演示。
 
 严格要求：
 1. 必须生成一个完整的、自包含的HTML文件，所有CSS和JavaScript都内联在HTML中
-2. 必须使用移动端App风格的布局设计：
-   - 使用viewport meta标签适配移动端
-   - 底部导航栏（如需要）
-   - 顶部标题栏
-   - 卡片式布局
-   - 圆角、阴影等现代UI元素
-   - 合适的字体大小和间距
-   - 响应式设计
-3. 页面要美观、交互完整、功能可用
-4. 使用现代化的配色方案
-5. 所有交互功能必须完整实现，不能有占位或空函数
-6. 只返回HTML代码，不要有任何解释说明文字
-7. 代码必须以<!DOCTYPE html>开头，以</html>结尾
-8. 应用命名必须使用“馒头xxx”的形式，其中 xxx 是应用本身的自然名称，例如番茄钟叫“馒头番茄钟”，记事本叫“馒头记事本”；HTML 的 title 和主标题应优先使用这个名称。"""
+2. 必须先完成信息架构再实现界面：明确主任务、内容区、主要操作、空状态和必要的导航，不要把控件直接堆在页面左上角
+3. 必须建立完整视觉系统：在 :root 定义颜色、字号、圆角、阴影和间距变量；使用 CSS reset；至少设计 6 个有明确职责的组件/区域样式
+4. 所有 button、input、textarea、select 都必须覆盖浏览器默认外观，并实现合适的尺寸、圆角、字体、间距，以及 focus、active 或 disabled 等状态
+5. 必须使用移动端 App 风格的响应式布局，包含清晰的顶部区域、可滚动内容区和稳定可用的关键操作区域；只有确有需要时才使用底部导航
+6. 使用现代且克制的配色、层级、留白、卡片、圆角和阴影；触控目标不小于 44px；不能使用未排版的默认控件或大面积无意义留白
+7. 所有用户可见操作必须由 JavaScript 完整实现，包括新增、编辑、删除、筛选、搜索、切换、关闭等适用交互；必须提供空状态和即时反馈，不能有占位、TODO、伪代码或空函数
+8. 不能依赖 CDN、网络字体、外部 CSS、外部 JavaScript 或远程图片；离线打开也必须完整可用
+9. 输出前在内部检查 HTML、CSS 和 JavaScript 是否闭合，控件是否已美化，主要操作是否能从初始状态完成；不要输出检查过程
+10. 只返回HTML代码，不要有任何解释说明文字；代码必须以<!DOCTYPE html>开头，以</html>结尾
+11. 应用命名必须使用“馒头xxx”的形式，其中 xxx 是应用本身的自然名称，例如番茄钟叫“馒头番茄钟”，记事本叫“馒头记事本”；HTML 的 title 和主标题应优先使用这个名称。"""
 
     const val APP_GEN_MAX_TOKENS = 256000
+    const val APP_GEN_MAX_OUTPUT_TOKENS = 128000
+    const val APP_DIFF_MAX_OUTPUT_TOKENS = 32_000
     const val WEB_APP_BRIDGE_NAME = "MantouApp"
     const val WEB_APP_USER_AGENT_TOKEN = "MantouApp/1"
     /** 编译期 generateToolsDoc 任务的输出，运行时从 assets 读出来注入 prompt。 */
@@ -45,6 +43,25 @@ object AppGenerator {
     private val WEB_APP_ID_NAME_REGEX = Regex("\\bname\\s*=\\s*['\"]$WEB_APP_ID_NAME['\"]", RegexOption.IGNORE_CASE)
     private val META_CONTENT_REGEX = Regex("\\bcontent\\s*=\\s*['\"]([^'\"]+)['\"]", RegexOption.IGNORE_CASE)
     private val META_CHARSET_REGEX = Regex("\\bcharset\\s*=", RegexOption.IGNORE_CASE)
+    private val STYLE_BLOCK_REGEX = Regex("<style\\b[^>]*>([\\s\\S]*?)</style\\s*>", RegexOption.IGNORE_CASE)
+    private val CSS_RULE_REGEX = Regex("[^{}]+\\{[^{}]+\\}")
+    private val SCRIPT_BLOCK_REGEX = Regex("<script\\b[^>]*>([\\s\\S]*?)</script\\s*>", RegexOption.IGNORE_CASE)
+    private val RAW_TEXT_BLOCK_REGEX = Regex("<(script|style)\\b[^>]*>[\\s\\S]*?</\\1\\s*>", RegexOption.IGNORE_CASE)
+    private val HTML_COMMENT_REGEX = Regex("<!--[\\s\\S]*?-->")
+    private val HTML_TAG_TOKEN_REGEX = Regex("<\\s*(/?)\\s*([a-z][a-z0-9:-]*)\\b[^>]*>", RegexOption.IGNORE_CASE)
+    private val SUSPICIOUS_ATTRIBUTE_TEXT_REGEX = Regex(
+        ">\\s*=[\"'][^<>\\n]*(?:\\bid|\\bclass|\\btype)\\s*=",
+        RegexOption.IGNORE_CASE
+    )
+    private val INTERACTIVE_ELEMENT_REGEX = Regex("<(?:button|input|textarea|select)\\b", RegexOption.IGNORE_CASE)
+    private val EVENT_BINDING_REGEX = Regex(
+        "(?:addEventListener\\s*\\(|on(?:click|input|change|submit|keydown|pointerdown|touchstart)\\s*=)",
+        RegexOption.IGNORE_CASE
+    )
+    private val BALANCED_HTML_TAGS = setOf(
+        "article", "button", "canvas", "dialog", "div", "footer", "form", "header",
+        "li", "main", "nav", "ol", "p", "section", "select", "textarea", "ul"
+    )
 
     fun buildSystemPrompt(context: Context): String {
         val metrics = context.resources.displayMetrics
@@ -81,6 +98,106 @@ object AppGenerator {
         """.trimIndent()
 
         return basePrompt + buildToolsSection(context)
+    }
+
+    fun buildModificationSystemPrompt(
+        context: Context,
+        relativePath: String,
+        expectedSha256: String,
+        includeTools: Boolean = false
+    ): String {
+        val toolsRequirement = if (includeTools) {
+            "11. 用户要求新增或修改 Android 系统能力，必须遵守下方 Tools 的调用约定。"
+        } else {
+            "11. 本次不新增 Android 系统能力；保留现有 MantouApp bridge 调用，不要改写其接口。"
+        }
+        val basePrompt = """
+            你正在增量修改一个已经存在、可直接运行的自包含 HTML 网页应用。
+
+            严格要求：
+            1. 只返回 unified diff，不要返回完整 HTML，不要解释，不要使用 Markdown 标题。
+            2. diff 只能修改一个已有文件，不能创建、删除、重命名或复制文件。
+            3. 文件头必须严格使用：
+               --- a/$relativePath
+               +++ b/$relativePath
+            4. 文件头之后必须立即输出至少一个 `@@ -oldStart,oldCount +newStart,newCount @@` hunk 头；禁止直接输出 CSS、HTML 或 JavaScript 源码。
+            5. hunk 内每一行都必须有 unified diff 前缀：上下文行前缀为空格，删除行前缀为 `-`，新增行前缀为 `+`。原始 CSS 变量行若以 `--font-xs` 开头，上下文必须写成 ` --font-xs`，删除必须写成 `---font-xs`，新增必须写成 `+--font-xs`，绝不能原样输出无前缀的 `--font-xs`。
+            6. 每个 hunk 必须包含准确的上下文行，只修改完成用户需求所必需的最小范围；hunk 头的 oldCount 必须等于“上下文行 + 删除行”数量，newCount 必须等于“上下文行 + 新增行”数量，多段 hunk 分别计算。
+            7. 当前文件 SHA-256 为 $expectedSha256；不要假设文件中存在未展示的代码。
+            8. 必须保留 mantou-webapp-id meta、mantou-webapp-runtime-guard 区块和现有持久化数据兼容性。
+            9. 修改后仍须是完整、合法、可直接运行的 HTML，所有 CSS 和 JavaScript 保持内联。
+            10. 新增交互必须完整实现，不能留下占位、伪代码或空函数。
+            $toolsRequirement
+
+            合法输出示例：
+            --- a/$relativePath
+            +++ b/$relativePath
+            @@ -10,3 +10,3 @@
+             <header>
+            -  <h1>旧标题</h1>
+            +  <h1>新标题</h1>
+             </header>
+        """.trimIndent()
+
+        return basePrompt + if (includeTools) buildToolsSection(context) else ""
+    }
+
+    internal fun modificationNeedsTools(userMessage: String): Boolean {
+        val normalized = userMessage.lowercase(Locale.US)
+        return DIRECT_MODIFICATION_TOOL_KEYWORDS.any(normalized::contains) ||
+                (AMBIGUOUS_MODIFICATION_TOOL_KEYWORDS.any(normalized::contains) &&
+                        MODIFICATION_TOOL_ACTIONS.any(normalized::contains))
+    }
+
+    fun buildModificationUserPrompt(
+        userMessage: String,
+        snapshot: LocalDiffFileTool.FileSnapshot,
+        previousFailure: String? = null
+    ): String {
+        val retrySection = previousFailure?.let {
+            """
+                上一次补丁未通过本地解析或校验：
+                $it
+                请丢弃上一份补丁，重新计算行号并输出一份全新的、完整的 unified diff。
+
+            """.trimIndent()
+        }.orEmpty()
+        return """
+            用户本轮修改要求：
+            $userMessage
+
+            当前文件：${snapshot.relativePath}
+            当前 SHA-256：${snapshot.sha256}
+
+            $retrySection
+            补丁格式提醒：文件头后必须先出现 `@@` hunk 头；hunk 中每行必须以空格、`-` 或 `+` 开头；每段 hunk 头的 oldCount/newCount 必须与该段正文的实际旧行数/新行数完全一致。
+            CSS 自定义变量原文 `--font-xs: 12px;` 作为上下文行时必须输出为 ` --font-xs: 12px;`，删除时为 `---font-xs: 12px;`，新增时为 `+--font-xs: 12px;`。
+
+            当前完整文件内容如下。请只输出针对它的 unified diff：
+            <current_file>
+            ${snapshot.content}
+            </current_file>
+        """.trimIndent()
+    }
+
+    fun buildQualityRetryUserPrompt(userMessage: String, qualityIssues: List<String>): String {
+        return """
+            原始需求：
+            $userMessage
+
+            上一次结果未通过应用质量检查：
+            ${qualityIssues.joinToString("\n") { "- $it" }}
+
+            请从头重新生成完整 HTML，不要输出 diff，不要解释。必须补齐视觉样式和真实交互，不能复用上一次的半成品结构。
+        """.trimIndent()
+    }
+
+    internal fun resolveAppGenerationOutputLimit(contextTokenLimit: Int): Int {
+        return contextTokenLimit.coerceIn(1, APP_GEN_MAX_OUTPUT_TOKENS)
+    }
+
+    internal fun resolveAppDiffOutputLimit(contextTokenLimit: Int): Int {
+        return contextTokenLimit.coerceIn(1, APP_DIFF_MAX_OUTPUT_TOKENS)
     }
 
     /** 读取编译期生成的 assets/mantou_tools.md，作为可调用的 Android 系统能力清单注入到 prompt。 */
@@ -145,6 +262,123 @@ object AppGenerator {
         val htmlStart = trimmed.indexOf("<html", ignoreCase = true)
         if (htmlStart >= 0) return trimmed.substring(htmlStart)
         return null
+    }
+
+    fun extractUnifiedDiff(content: String): String? {
+        val trimmed = content.trim()
+        val fenced = Regex(
+            "```(?:diff|patch)\\s*\\n([\\s\\S]*?)\\n```",
+            RegexOption.IGNORE_CASE
+        ).find(trimmed)?.groupValues?.getOrNull(1)?.trim()
+        if (!fenced.isNullOrEmpty()) return fenced
+
+        return trimmed.takeIf {
+            it.startsWith("diff --git ") || it.startsWith("--- ")
+        }
+    }
+
+    fun generatedWebAppQualityIssues(htmlContent: String): List<String> {
+        val issues = mutableListOf<String>()
+        val html = extractHtml(htmlContent)
+        if (html == null || !html.trimEnd().endsWith("</html>", ignoreCase = true)) {
+            return listOf("HTML 文档不完整")
+        }
+
+        val structuralHtml = HTML_COMMENT_REGEX.replace(RAW_TEXT_BLOCK_REGEX.replace(html, ""), "")
+        val unbalancedTags = findUnbalancedHtmlTags(structuralHtml)
+        if (unbalancedTags.isNotEmpty()) {
+            issues += "HTML 标签未正确闭合：${unbalancedTags.joinToString("、")}"
+        }
+        if (SUSPICIOUS_ATTRIBUTE_TEXT_REGEX.containsMatchIn(structuralHtml)) {
+            issues += "HTML 中存在缺失标签名的属性片段"
+        }
+
+        val styleContent = STYLE_BLOCK_REGEX.findAll(html)
+            .joinToString("\n") { it.groupValues[1] }
+            .trim()
+        val styleRuleCount = CSS_RULE_REGEX.findAll(styleContent).count()
+        if (styleContent.length < 500 || styleRuleCount < 6) {
+            issues += "CSS 过少，未形成完整的移动端视觉系统"
+        }
+
+        val scriptContent = SCRIPT_BLOCK_REGEX.findAll(html)
+            .joinToString("\n") { it.groupValues[1] }
+            .trim()
+        if (scriptContent.length < 250) {
+            issues += "JavaScript 过少，主要交互可能没有完整实现"
+        }
+        if (!INTERACTIVE_ELEMENT_REGEX.containsMatchIn(html)) {
+            issues += "页面缺少可执行主要任务的交互控件"
+        }
+        if (!EVENT_BINDING_REGEX.containsMatchIn(html)) {
+            issues += "页面没有绑定用户交互事件"
+        }
+        if (Regex("\\b(?:TODO|FIXME|placeholder implementation)\\b", RegexOption.IGNORE_CASE)
+                .containsMatchIn(html)
+        ) {
+            issues += "代码中仍包含占位实现"
+        }
+        return issues
+    }
+
+    private fun findUnbalancedHtmlTags(structuralHtml: String): List<String> {
+        val balances = mutableMapOf<String, Int>()
+        HTML_TAG_TOKEN_REGEX.findAll(structuralHtml).forEach { match ->
+            val tagName = match.groupValues[2].lowercase(Locale.US)
+            if (tagName !in BALANCED_HTML_TAGS) return@forEach
+            val delta = if (match.groupValues[1].isEmpty()) 1 else -1
+            balances[tagName] = balances.getOrDefault(tagName, 0) + delta
+        }
+        return balances.filterValues { it != 0 }.keys.sorted()
+    }
+
+    fun validateGeneratedWebApp(htmlContent: String) {
+        val issues = generatedWebAppQualityIssues(htmlContent)
+        require(issues.isEmpty()) {
+            "生成质量检查未通过：${issues.joinToString("；")}"
+        }
+    }
+
+    fun validatePatchedWebApp(originalContent: String, patchedContent: String) {
+        require(extractHtml(patchedContent) != null) {
+            "增量修改后的文件不是合法 HTML"
+        }
+        require(patchedContent.trimEnd().endsWith("</html>", ignoreCase = true)) {
+            "增量修改后的 HTML 缺少结束标签"
+        }
+
+        val originalIdentity = extractWebAppIdentity(originalContent)
+        val patchedIdentity = extractWebAppIdentity(patchedContent)
+        require(originalIdentity != null && patchedIdentity == originalIdentity) {
+            "增量修改不能删除或替换网页应用标识"
+        }
+        require(patchedContent.countOccurrences(WEB_APP_RUNTIME_GUARD_START) == 1 &&
+                patchedContent.countOccurrences(WEB_APP_RUNTIME_GUARD_END) == 1
+        ) {
+            "增量修改不能删除或复制馒头运行时保护区块"
+        }
+        require(extractRuntimeGuard(originalContent) == extractRuntimeGuard(patchedContent)) {
+            "增量修改不能更改馒头运行时保护区块"
+        }
+    }
+
+    private fun extractRuntimeGuard(content: String): String? {
+        val start = content.indexOf(WEB_APP_RUNTIME_GUARD_START)
+        if (start < 0) return null
+        val end = content.indexOf(WEB_APP_RUNTIME_GUARD_END, start)
+        if (end < 0) return null
+        return content.substring(start, end + WEB_APP_RUNTIME_GUARD_END.length)
+    }
+
+    private fun String.countOccurrences(value: String): Int {
+        var count = 0
+        var fromIndex = 0
+        while (true) {
+            val index = indexOf(value, fromIndex)
+            if (index < 0) return count
+            count++
+            fromIndex = index + value.length
+        }
     }
 
     fun ensureWebAppIdentity(htmlContent: String): String {
@@ -378,6 +612,18 @@ object AppGenerator {
         "工具",
         "app",
         "一个"
+    )
+
+    private val DIRECT_MODIFICATION_TOOL_KEYWORDS = listOf(
+        "mantouapp", "android", "安卓", "系统能力", "相机", "拍照", "录像", "定位", "震动",
+        "振动", "手电筒", "剪贴板", "拨号", "短信", "系统设置", "toast"
+    )
+
+    private val AMBIGUOUS_MODIFICATION_TOOL_KEYWORDS = listOf("闹钟", "日历", "通知", "分享")
+
+    private val MODIFICATION_TOOL_ACTIONS = listOf(
+        "调用", "接入", "唤起", "写入系统", "打开系统", "创建事件", "添加事件", "设置闹钟",
+        "发送通知", "系统分享"
     )
 
     private val WEB_APP_RUNTIME_GUARD = """

@@ -19,9 +19,28 @@
         android:maxLines="1"
         android:ellipsize="end"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toStartOf="@id/progressSessionLoading"
+        app:layout_constraintEnd_toStartOf="@id/tvSessionTaskType"
         app:layout_constraintTop_toTopOf="parent"
         tools:text="你好，请介绍一下自己" />
+
+    <TextView
+        android:id="@+id/tvSessionTaskType"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:background="@drawable/bg_workspace_badge"
+        android:paddingStart="7dp"
+        android:paddingTop="2dp"
+        android:paddingEnd="7dp"
+        android:paddingBottom="2dp"
+        android:text="generate"
+        android:textColor="@color/mt_primary_dark"
+        android:textSize="10sp"
+        android:textStyle="bold"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@id/tvSessionTitle"
+        app:layout_constraintEnd_toStartOf="@id/progressSessionLoading"
+        app:layout_constraintTop_toTopOf="@id/tvSessionTitle" />
 
     <ProgressBar
         android:id="@+id/progressSessionLoading"
@@ -50,8 +69,6 @@
         tools:text="01/06 14:30" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>
-
-
 
 
 
