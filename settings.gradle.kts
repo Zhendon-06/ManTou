@@ -21,4 +21,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "ManTou"
 include(":app")
- 
+include(":tool-ksp")

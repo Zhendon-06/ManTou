@@ -56,7 +56,8 @@ object MantouWebViewRuntime {
     @MantouTool(
         name = STORAGE_TOOL_NAME,
         description = "读取和写入当前网页 App 专属的 JSON 数据文件",
-        usageScenario = "待办、笔记、设置、历史记录、游戏进度、统计数据等需要下次打开仍保留的数据"
+        usageScenario = "待办、笔记、设置、历史记录、游戏进度、统计数据等需要下次打开仍保留的数据",
+        autoRegister = false
     )
     private class StorageTool(
         context: android.content.Context,
