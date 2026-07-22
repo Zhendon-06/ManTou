@@ -105,14 +105,13 @@
                 android:paddingTop="14dp"
                 android:paddingBottom="32dp">
 
-                <TextView
+                <com.hfad.mantou.view.widget.CodeLineNumberView
                     android:id="@+id/tvCodeEditorLines"
                     android:layout_width="56dp"
-                    android:layout_height="wrap_content"
+                    android:layout_height="match_parent"
                     android:fontFamily="monospace"
                     android:gravity="end"
                     android:includeFontPadding="false"
-                    android:lineSpacingExtra="3dp"
                     android:paddingEnd="12dp"
                     android:textColor="@color/mt_generate_line"
                     android:textIsSelectable="false"
