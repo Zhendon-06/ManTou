@@ -493,7 +493,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val apiMessages = listOf(
                 ApiMessage(
                     role = "system",
-                    content = AppGenerator.buildSystemPrompt(getApplication())
+                    content = AppGenerator.buildSystemPrompt(getApplication(), userMessage)
                 ),
                 ApiMessage(role = ChatMessage.ROLE_USER, content = requestMessage)
             )
@@ -734,6 +734,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             context = getApplication(),
                             relativePath = snapshot.relativePath,
                             expectedSha256 = snapshot.sha256,
+                            userMessage = userMessage,
                             includeTools = AppGenerator.modificationNeedsTools(userMessage)
                         )
                     ),

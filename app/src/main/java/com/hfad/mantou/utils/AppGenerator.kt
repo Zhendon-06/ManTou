@@ -2,6 +2,7 @@ package com.hfad.mantou.utils
 
 import android.content.Context
 import android.content.res.Configuration
+import android.util.Log
 import com.hfad.mantou.tool.generated.GeneratedMantouToolsDoc
 import java.io.File
 import java.text.SimpleDateFormat
@@ -11,6 +12,7 @@ import java.util.UUID
 
 object AppGenerator {
 
+    private const val TOOL_PROMPT_LOG_TAG = "ToolPromptOptimizer"
     private const val BASE_SYSTEM_PROMPT = """你是一名资深移动端产品设计师和前端工程师。根据用户描述，交付一个完整、精致、可直接运行的单文件 HTML 应用，而不是页面草稿或组件演示。
 
 严格要求：
@@ -62,7 +64,7 @@ object AppGenerator {
         "li", "main", "nav", "ol", "p", "section", "select", "textarea", "ul"
     )
 
-    fun buildSystemPrompt(context: Context): String {
+    suspend fun buildSystemPrompt(context: Context, userMessage: String): String {
         val metrics = context.resources.displayMetrics
         val widthPx = metrics.widthPixels
         val heightPx = metrics.heightPixels
@@ -96,13 +98,19 @@ object AppGenerator {
             5. `storageWrite` 的参数必须是合法 JSON 字符串，建议把整个应用状态组织成一个对象后整体写入。
         """.trimIndent()
 
-        return basePrompt + buildToolsSection()
+        return appendOptimizedTools(
+            context = context,
+            userMessage = userMessage,
+            basePrompt = basePrompt,
+            requestType = "generate",
+        )
     }
 
-    fun buildModificationSystemPrompt(
+    suspend fun buildModificationSystemPrompt(
         context: Context,
         relativePath: String,
         expectedSha256: String,
+        userMessage: String,
         includeTools: Boolean = false
     ): String {
         val toolsRequirement = if (includeTools) {
@@ -138,7 +146,24 @@ object AppGenerator {
              </header>
         """.trimIndent()
 
-        return basePrompt + if (includeTools) buildToolsSection() else ""
+        if (!includeTools) {
+            logPromptOptimization(
+                requestType = "modify",
+                userMessage = userMessage,
+                selection = null,
+                baselinePrompt = basePrompt,
+                optimizedPrompt = basePrompt,
+                elapsedMs = 0L,
+                source = "gated-none",
+            )
+            return basePrompt
+        }
+        return appendOptimizedTools(
+            context = context,
+            userMessage = userMessage,
+            basePrompt = basePrompt,
+            requestType = "modify",
+        )
     }
 
     internal fun modificationNeedsTools(userMessage: String): Boolean {
@@ -199,9 +224,79 @@ object AppGenerator {
         return contextTokenLimit.coerceIn(1, APP_DIFF_MAX_OUTPUT_TOKENS)
     }
 
-    private fun buildToolsSection(): String {
-        val doc = GeneratedMantouToolsDoc.markdown.takeIf { it.isNotBlank() } ?: return ""
+    private suspend fun appendOptimizedTools(
+        context: Context,
+        userMessage: String,
+        basePrompt: String,
+        requestType: String,
+    ): String {
+        val startedAt = System.currentTimeMillis()
+        val selection = ToolPromptRetriever.select(context, userMessage)
+        val optimizedPrompt = basePrompt + buildToolsSection(selection.documents)
+        val baselinePrompt = basePrompt + buildLegacyToolsSection()
+        logPromptOptimization(
+            requestType = requestType,
+            userMessage = userMessage,
+            selection = selection,
+            baselinePrompt = baselinePrompt,
+            optimizedPrompt = optimizedPrompt,
+            elapsedMs = System.currentTimeMillis() - startedAt,
+            source = selection.source,
+        )
+        return optimizedPrompt
+    }
 
+    private fun buildToolsSection(
+        documents: List<GeneratedMantouToolsDoc.ToolDocument>
+    ): String {
+        if (documents.isEmpty()) return ""
+        val doc = documents.joinToString(separator = "\n") { it.markdown.trim() }
+        val cameraInstructions = if (documents.any { it.name == "camera" }) {
+            """
+
+                # 相机拍照结果回显
+
+                如果网页 App 需要拍照并把照片显示在 HTML 页面中，必须使用异步回调：
+                1. 先定义回调：`window.MantouApp.onCameraPhoto = function(dataUrl, uri) { document.querySelector("img").src = dataUrl; };`
+                2. 再调用：`window.MantouApp.camera.cameraTakePhoto();`
+                3. `dataUrl` 是 `data:image/jpeg;base64,...`，可直接赋给 `<img>` 的 `src`，也可以写入 storage 做持久化。
+                4. 也可以调用 `cameraTakePhotoWithCallback("window.handlePhoto")` 指定自己的全局回调函数。
+            """.trimIndent()
+        } else {
+            ""
+        }
+
+        return "\n\n" + """
+            ---
+
+            # Android 系统能力 (Tools)
+
+            当用户需求涉及"调用安卓系统功能"（闹钟、日历、Toast、跳转系统设置 等）时，
+            生成的 HTML 必须使用下面声明的 Tools 桥接调用真实 Android API，
+            **不要**只写一个纯前端模拟。
+
+            统一调用步骤：
+            1. 入口先判断：`if (window.MantouApp && window.MantouApp.isMantouApp && window.MantouApp.isMantouApp()) { ... }`
+            2. 调用：`var raw = window.MantouApp.<toolName>.<methodName>(...args); var r = JSON.parse(raw);`
+            3. 判断：`if (r.success) { 用 r.data } else { 提示 r.error }`
+            4. 不在馒头 App 中时给降级方案（如 alert / 纯前端模拟）。
+
+            # 基础交互体验
+
+            `toast` 和 `vibration` 是默认提供的基础体验能力：
+            1. 保存成功、操作失败、任务完成等需要即时确认的关键结果，可以使用原生 Toast 配合页面内状态反馈。
+            2. 计时完成、任务勾选、关键按钮确认等重要交互，可以使用 30-80ms 的短振动增强触感。
+            3. 不要在普通点击、连续输入或频繁刷新时滥用 Toast 和振动；同一次操作只提供一次明确反馈。
+            4. 浏览器降级环境中保留页面内提示，不要因为原生能力不可用而中断主流程。
+
+            $cameraInstructions
+
+            $doc
+        """.trimIndent()
+    }
+
+    private fun buildLegacyToolsSection(): String {
+        val doc = GeneratedMantouToolsDoc.markdown.takeIf { it.isNotBlank() } ?: return ""
         return "\n\n" + """
             ---
 
@@ -231,6 +326,50 @@ object AppGenerator {
 
             $doc
         """.trimIndent()
+    }
+
+    private fun logPromptOptimization(
+        requestType: String,
+        userMessage: String,
+        selection: ToolPromptRetriever.Selection?,
+        baselinePrompt: String,
+        optimizedPrompt: String,
+        elapsedMs: Long,
+        source: String,
+    ) {
+        val baselineTokens = ContextTokenCounter.estimateText(baselinePrompt)
+        val optimizedTokens = ContextTokenCounter.estimateText(optimizedPrompt)
+        val savedChars = (baselinePrompt.length - optimizedPrompt.length).coerceAtLeast(0)
+        val savedTokens = (baselineTokens - optimizedTokens).coerceAtLeast(0)
+        val savedPercent = if (baselineTokens == 0) {
+            0f
+        } else {
+            savedTokens * 100f / baselineTokens
+        }
+        val availableNames = GeneratedMantouToolsDoc.tools
+            .asSequence()
+            .map(GeneratedMantouToolsDoc.ToolDocument::name)
+            .filterNot { it == "storage" }
+            .toList()
+        val injectedNames = selection?.documents?.map(GeneratedMantouToolsDoc.ToolDocument::name).orEmpty()
+        val omittedNames = availableNames.filterNot(injectedNames::contains)
+        val injectedText = injectedNames.joinToString(",").ifEmpty { "none" }
+        val omittedText = omittedNames.joinToString(",").ifEmpty { "none" }
+        val scores = selection?.topScores?.joinToString(",") { score ->
+            "${score.name}:${String.format(Locale.US, "%.3f", score.score)}"
+        }.orEmpty().ifEmpty { "none" }
+        Log.i(
+            TOOL_PROMPT_LOG_TAG,
+            "[Tool选择] type=$requestType 注入=[$injectedText] 数量=${injectedNames.size}/${availableNames.size} " +
+                "未注入=[$omittedText] source=$source scores=$scores retrievalMs=$elapsedMs"
+        )
+        Log.i(
+            TOOL_PROMPT_LOG_TAG,
+            "[Token对比] type=$requestType requestChars=${userMessage.length} baselineChars=${baselinePrompt.length} " +
+                "optimizedChars=${optimizedPrompt.length} savedChars=$savedChars " +
+                "baselineTokens~$baselineTokens optimizedTokens~$optimizedTokens " +
+                "savedTokens~$savedTokens savedPercent=${String.format(Locale.US, "%.1f", savedPercent)}%"
+        )
     }
 
     fun extractHtml(content: String): String? {

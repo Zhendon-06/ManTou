@@ -21,6 +21,14 @@ class GeneratedToolMetadataTest {
         )
         assertTrue(GeneratedMantouToolsDoc.markdown.contains("window.MantouApp.alarm.alarmSet"))
         assertTrue(GeneratedMantouToolsDoc.markdown.contains("window.MantouApp.storage.storageWrite"))
+        assertEquals(GeneratedMantouToolsDoc.documentedToolNames, GeneratedMantouToolsDoc.tools.map { it.name })
+        assertTrue(GeneratedMantouToolsDoc.tools.first { it.name == "camera" }.retrievalText.contains("拍照"))
+        assertTrue(
+            GeneratedMantouToolsDoc.tools
+                .first { it.name == "calendar" }
+                .markdown
+                .contains("window.MantouApp.calendar.calendarAdd")
+        )
         assertFalse(GeneratedToolRegistry.toolNames.contains("storage"))
     }
 }
