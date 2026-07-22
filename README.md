@@ -250,7 +250,7 @@ app/src/main/java/com/hfad/mantou/tool/
 | `vibration` | 单次振动、模式振动、停止振动 |
 | `storage` | 当前网页 App 专属 JSON 文件读写，运行时注入 |
 
-完整方法列表会自动生成到 `app/src/main/assets/mantou_tools.md`，可以把它当作 Tool API 参考文档。
+KSP 会生成完整方法列表。Debug 构建产物位于 `app/build/generated/ksp/debug/resources/mantou_tools.md`，运行时使用同批生成的 `GeneratedMantouToolsDoc` 注入 Prompt。
 
 ### 开发约定
 
@@ -312,6 +312,7 @@ class ToastTool(context: Context) : BaseTool(context)
 | `name` | JS 调用时的工具名，例如 `window.MantouApp.toast` |
 | `description` | Tool 能力描述 |
 | `usageScenario` | 适合使用该 Tool 的场景，给 LLM 判断何时调用 |
+| `autoRegister` | 是否进入 KSP 生成的全局注册表；需要页面级上下文的 Tool 设为 `false` |
 
 #### `@ToolMethod`
 
@@ -326,7 +327,7 @@ class ToastTool(context: Context) : BaseTool(context)
 
 #### `@ToolParam`
 
-描述方法参数。Kotlin 运行时不一定能稳定保留参数名，因此每个参数都要写。
+描述方法公开参数名和用途，KSP 会将其写入 API 文档。
 
 ```kotlin
 @ToolParam(name = "message", description = "提示文本")
@@ -385,20 +386,17 @@ class ToastTool(context: Context) : BaseTool(context) {
 }
 ```
 
-> 注意：编译期文档生成任务会扫描源码注解。为了让文档稳定生成，建议保持注解顺序为 `@JavascriptInterface`、`@ToolMethod`、`@ToolReturns`、`fun ...`。
+KSP 会按注解全限定名读取符号，因此注解顺序不影响生成。编译期还会检查三件套是否完整、返回值是否为非空 `String`、参数类型是否受 JSBridge 支持，以及 Tool 名是否重复。
 
 ### 注册 Tool
 
-新增 Tool 后，在 `ToolRegistry.kt` 的 `toolClasses` 中注册：
+普通 Tool 不需要手动注册。KSP 会为所有 `autoRegister = true` 且具有 `public constructor(Context)` 的 Tool 生成直接构造代码：
 
 ```kotlin
-private val toolClasses: List<KClass<out BaseTool>> = listOf(
-    com.hfad.mantou.tool.impl.AlarmTool::class,
-    com.hfad.mantou.tool.impl.CalendarTool::class,
-    com.hfad.mantou.tool.impl.ToastTool::class,
-    com.hfad.mantou.tool.impl.YourTool::class,
-)
+GeneratedToolRegistry.createAll(context)
 ```
+
+像 `StorageTool` 这样依赖当前 HTML 文件、必须按 WebView 创建的能力，需要设置 `autoRegister = false`，并由宿主运行时单独实例化。
 
 运行时 `MantouWebViewRuntime.install(...)` 会读取 `ToolRegistry.instances()`，并把每个 Tool 注入 WebView：
 
@@ -426,27 +424,22 @@ var result = JSON.parse(raw);
 
 ### Tool 文档生成
 
-项目在 `app/build.gradle.kts` 中定义了 `generateToolsDoc` 任务：
+`tool-ksp` 模块实现了 `SymbolProcessor`，在 Kotlin 编译期读取 Tool 注解并生成：
 
 ```text
-扫描 app/src/main/java/com/hfad/mantou/tool/impl/
-生成 app/src/main/assets/mantou_tools.md
+GeneratedMantouToolsDoc.kt
+GeneratedToolRegistry.kt
+mantou_tools.md
 ```
 
-`preBuild` 会依赖该任务，因此正常构建 APK 时会自动刷新文档。
+KSP 输出按变体位于 `app/build/generated/ksp/<variant>/`。`GeneratedMantouToolsDoc` 直接提供运行时 Prompt 文档，Markdown 文件用于人工检查或 CI 归档。
 
 这份文档会被 `AppGenerator` 注入到网页 App 生成 prompt 中，LLM 才知道当前 App 有哪些 Tool、怎么调用、返回什么结构。
 
-如果你只想刷新 Tool 文档，可以运行：
+如果只想刷新 Debug Tool 生成结果，可以运行：
 
 ```bash
-./gradlew :app:generateToolsDoc
-```
-
-Windows：
-
-```powershell
-.\gradlew.bat :app:generateToolsDoc
+./gradlew :app:kspDebugKotlin
 ```
 
 ### Tool 设计建议

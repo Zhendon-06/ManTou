@@ -2,6 +2,7 @@ package com.hfad.mantou.utils
 
 import android.content.Context
 import android.content.res.Configuration
+import com.hfad.mantou.tool.generated.GeneratedMantouToolsDoc
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -30,8 +31,6 @@ object AppGenerator {
     const val APP_DIFF_MAX_OUTPUT_TOKENS = 32_000
     const val WEB_APP_BRIDGE_NAME = "MantouApp"
     const val WEB_APP_USER_AGENT_TOKEN = "MantouApp/1"
-    /** 编译期 generateToolsDoc 任务的输出，运行时从 assets 读出来注入 prompt。 */
-    private const val TOOLS_DOC_ASSET = "mantou_tools.md"
     private const val WEB_APP_ID_NAME = "mantou-webapp-id"
     private const val WEB_APP_RUNTIME_GUARD_START = "<!-- mantou-webapp-runtime-guard:start -->"
     private const val WEB_APP_RUNTIME_GUARD_END = "<!-- mantou-webapp-runtime-guard:end -->"
@@ -97,7 +96,7 @@ object AppGenerator {
             5. `storageWrite` 的参数必须是合法 JSON 字符串，建议把整个应用状态组织成一个对象后整体写入。
         """.trimIndent()
 
-        return basePrompt + buildToolsSection(context)
+        return basePrompt + buildToolsSection()
     }
 
     fun buildModificationSystemPrompt(
@@ -139,7 +138,7 @@ object AppGenerator {
              </header>
         """.trimIndent()
 
-        return basePrompt + if (includeTools) buildToolsSection(context) else ""
+        return basePrompt + if (includeTools) buildToolsSection() else ""
     }
 
     internal fun modificationNeedsTools(userMessage: String): Boolean {
@@ -200,11 +199,8 @@ object AppGenerator {
         return contextTokenLimit.coerceIn(1, APP_DIFF_MAX_OUTPUT_TOKENS)
     }
 
-    /** 读取编译期生成的 assets/mantou_tools.md，作为可调用的 Android 系统能力清单注入到 prompt。 */
-    private fun buildToolsSection(context: Context): String {
-        val doc = runCatching {
-            context.assets.open(TOOLS_DOC_ASSET).bufferedReader().use { it.readText() }
-        }.getOrNull()?.takeIf { it.isNotBlank() } ?: return ""
+    private fun buildToolsSection(): String {
+        val doc = GeneratedMantouToolsDoc.markdown.takeIf { it.isNotBlank() } ?: return ""
 
         return "\n\n" + """
             ---
@@ -223,15 +219,7 @@ object AppGenerator {
 
             # 持久化存储 (Storage)
 
-            生成的网页 App 可以调用 `window.MantouApp.storage` 读写当前项目专属的 JSON 数据文件：
-            - `window.MantouApp.storage.storageRead()` → `{"success": true, "data": {"content": "{}"}, "error": null}`
-            - `window.MantouApp.storage.storageWrite(jsonContent)` → `{"success": true, "data": {"bytes": 12}, "error": null}`
-            - `window.MantouApp.storage.storageGet(key)` → 从根对象读取某个字段
-            - `window.MantouApp.storage.storageSet(key, valueJson)` → 把某个字段写入根对象，valueJson 必须是合法 JSON 值
-            - `window.MantouApp.storage.storageRemove(key)` → 删除根对象字段
-            - `window.MantouApp.storage.storageClear()` → 清空为 `{}`
-
-            需要永久保存的数据必须使用这个 storage；可以把 localStorage 作为浏览器外的降级方案，但在馒头 App 内优先写 JSON 文件。
+            需要永久保存的数据必须使用 `window.MantouApp.storage`；可以把 localStorage 作为浏览器外的降级方案，但在馒头 App 内优先写 JSON 文件。完整方法签名见下方 KSP 自动生成文档。
 
             # 相机拍照结果回显
 

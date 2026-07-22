@@ -15,14 +15,14 @@ import org.json.JSONObject
  *    - @android.webkit.JavascriptInterface  （让 WebView 能调）
  *    - @ToolMethod                          （描述方法用途）
  *    - @ToolReturns                         （描述返回值结构）
- * 3. 每个参数必须加 @ToolParam（Kotlin 反射拿不到运行时参数名）
+ * 3. 每个参数必须加 @ToolParam，供 KSP 生成稳定的公开参数文档
  * 4. 方法签名只能用基本类型：String / Int / Long / Boolean / Double
  *    （JS → Java 桥不支持复杂对象传参）
  * 5. 返回值统一为 JSON String，schema：
  *      { "success": true,  "data": ..., "error": null    }
  *      { "success": false, "data": null, "error": "..." }
  * 6. 不做耗时操作；权限敏感操作必须先检查，没权限时返回 error JSON
- * 7. 必须在 ToolRegistry 手动注册
+ * 7. 默认由 KSP 自动生成注册表；按页面创建的特殊 Tool 使用 autoRegister=false
  *
  * JS 侧调用约定：
  *   `window.MantouApp.<toolName>.<methodName>(...)` 返回 JSON 字符串

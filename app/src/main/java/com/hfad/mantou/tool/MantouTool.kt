@@ -1,8 +1,9 @@
 package com.hfad.mantou.tool
 
 /**
- * Tool 元信息注解。标注一个 Tool 的名称、描述和使用场景。
- * ToolRegistry 会扫描这些注解，生成给 LLM 看的 API 文档（Markdown）。
+ * Tool 元信息注解。标注一个 Tool 的名称、描述、使用场景和注册策略。
+ * KSP 会读取这些注解，校验 Tool 契约并生成注册表和 LLM API 文档。
+ * autoRegister=false 表示由宿主按页面实例化和注入，不进入全局 GeneratedToolRegistry。
  *
  * 命名概念说明：
  * - Tool 不是 LLM agent 意义上的"工具调用"，而是馒头 App 自定义的
@@ -26,7 +27,8 @@ package com.hfad.mantou.tool
 annotation class MantouTool(
     val name: String,
     val description: String,
-    val usageScenario: String = ""
+    val usageScenario: String = "",
+    val autoRegister: Boolean = true
 )
 
 /**
@@ -34,18 +36,17 @@ annotation class MantouTool(
  * 生成的 API 文档会包含这些说明，帮助 LLM 正确调用。
  */
 @Target(AnnotationTarget.FUNCTION)
-@Retention(AnnotationRetention.RUNTIME)
+@Retention(AnnotationRetention.SOURCE)
 annotation class ToolMethod(
     val description: String,
     val example: String = ""
 )
 
 /**
- * Tool 参数注解。给 JSBridge 方法的参数起名字（Kotlin 反射在运行时默认拿不到参数名），
- * 并补充描述。生成 API 文档时会用这些信息。
+ * Tool 参数注解。声明稳定的公开参数名并补充描述，KSP 生成 API 文档时使用。
  */
 @Target(AnnotationTarget.VALUE_PARAMETER)
-@Retention(AnnotationRetention.RUNTIME)
+@Retention(AnnotationRetention.SOURCE)
 annotation class ToolParam(
     val name: String,
     val description: String = ""
@@ -56,7 +57,7 @@ annotation class ToolParam(
  * LLM 读文档时需要知道返回值格式，以便生成正确的 JS 解析代码。
  */
 @Target(AnnotationTarget.FUNCTION)
-@Retention(AnnotationRetention.RUNTIME)
+@Retention(AnnotationRetention.SOURCE)
 annotation class ToolReturns(
     val description: String,
     val jsonExample: String = ""
