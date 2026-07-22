@@ -1,6 +1,7 @@
 package com.hfad.mantou.utils
 
 import android.content.Context
+import com.hfad.mantou.tool.generated.GeneratedMantouToolsDoc
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -9,6 +10,7 @@ import java.util.Locale
 object AgentWorkspace {
 
     const val WEB_DIR = "generated_apps"
+    const val TOOL_DOC_DIR = "ManTou_Tool"
     private const val AGENT_DIR = "agent"
     private const val MEMORY_DIR = "memory"
     private const val SOUL_FILE = "SOUL.md"
@@ -19,6 +21,8 @@ object AgentWorkspace {
     fun ensureWorkspace(context: Context) {
         webDir(context).mkdirs()
         normalizeGeneratedAppProjects(context)
+        toolDocDir(context).mkdirs()
+        syncToolDocuments(context)
         agentDir(context).mkdirs()
         memoryDir(context).mkdirs()
 
@@ -100,6 +104,14 @@ object AgentWorkspace {
             dir = memoryDir(context)
         )
 
+        val toolDocNode = folderNode(
+            name = TOOL_DOC_DIR,
+            displayPath = "/workspace/$TOOL_DOC_DIR",
+            level = 1,
+            defaultExpanded = false,
+            dir = toolDocDir(context)
+        )
+
         return listOf(
             WorkspaceNode(
                 name = "workspace",
@@ -107,7 +119,7 @@ object AgentWorkspace {
                 isDirectory = true,
                 level = 0,
                 defaultExpanded = true,
-                children = listOf(webNode, agentNode, memoryNode)
+                children = listOf(webNode, toolDocNode, agentNode, memoryNode)
             )
         )
     }
@@ -200,6 +212,7 @@ object AgentWorkspace {
     }
 
     private fun webDir(context: Context) = File(context.filesDir, WEB_DIR)
+    private fun toolDocDir(context: Context) = File(context.filesDir, TOOL_DOC_DIR)
     private fun agentDir(context: Context) = File(context.filesDir, AGENT_DIR)
     private fun memoryDir(context: Context) = File(context.filesDir, MEMORY_DIR)
     private fun soulFile(context: Context) = File(agentDir(context), SOUL_FILE)
@@ -209,6 +222,48 @@ object AgentWorkspace {
 
     private fun writeIfMissing(file: File, content: String) {
         if (!file.exists()) file.writeText(content.trimIndent() + "\n")
+    }
+
+    private fun syncToolDocuments(context: Context) {
+        val directory = toolDocDir(context)
+        val documents = GeneratedMantouToolsDoc.tools
+        val expectedFiles = buildSet {
+            add(TOOL_DOC_INDEX_FILE)
+            documents.forEach { add("${it.name}.md") }
+        }
+
+        val indexContent = buildString {
+            appendLine(GENERATED_TOOL_DOC_MARKER)
+            appendLine("# ManTou Tool 文档")
+            appendLine()
+            appendLine("由 KSP 根据当前 Android Bridge 能力自动生成，请勿手动修改。")
+            appendLine()
+            documents.forEach { document ->
+                appendLine("- `${document.name}.md`")
+            }
+        }
+        writeIfChanged(File(directory, TOOL_DOC_INDEX_FILE), indexContent)
+
+        documents.forEach { document ->
+            val content = "$GENERATED_TOOL_DOC_MARKER\n${document.markdown.trim()}\n"
+            writeIfChanged(File(directory, "${document.name}.md"), content)
+        }
+
+        directory.listFiles()
+            ?.asSequence()
+            ?.filter { it.isFile && it.extension.equals("md", ignoreCase = true) }
+            ?.filterNot { it.name in expectedFiles }
+            ?.filter { file ->
+                runCatching { file.bufferedReader().use { it.readLine() } == GENERATED_TOOL_DOC_MARKER }
+                    .getOrDefault(false)
+            }
+            ?.forEach { it.delete() }
+    }
+
+    private fun writeIfChanged(file: File, content: String) {
+        if (!file.exists() || file.readText() != content) {
+            file.writeText(content)
+        }
     }
 
     private fun normalizeGeneratedAppProjects(context: Context) {
@@ -250,6 +305,9 @@ object AgentWorkspace {
     private fun isHtmlFile(file: File): Boolean {
         return file.extension.equals("html", true) || file.extension.equals("htm", true)
     }
+
+    private const val TOOL_DOC_INDEX_FILE = "README.md"
+    private const val GENERATED_TOOL_DOC_MARKER = "<!-- ManTou Tool 文档：KSP 自动生成 -->"
 
     private val DEFAULT_SOUL = """
         # SOUL
