@@ -1647,6 +1647,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
         codeEditorBinding = editorBinding
         codeEditorDialog = dialog
+        editorBinding.tvCodeEditorLines.bindTo(editorBinding.tvCodeEditorContent)
         dialog.show()
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
@@ -1669,9 +1670,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         editorBinding.tvCodeEditorStatus.text = taskState.status
         editorBinding.tvCodeEditorLanguage.text = taskState.languageLabel
         editorBinding.tvCodeEditorContent.text = taskState.code
-
-        val lineCount = taskState.code.count { it == '\n' } + 1
-        editorBinding.tvCodeEditorLines.text = (1..lineCount).joinToString("\n")
+        editorBinding.tvCodeEditorLines.refreshLineNumbers()
         if (taskState.isRunning) {
             editorBinding.codeEditorVerticalScroll.post {
                 editorBinding.codeEditorVerticalScroll.fullScroll(View.FOCUS_DOWN)
