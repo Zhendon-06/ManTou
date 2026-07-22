@@ -250,7 +250,15 @@ app/src/main/java/com/hfad/mantou/tool/
 | `vibration` | 单次振动、模式振动、停止振动 |
 | `storage` | 当前网页 App 专属 JSON 文件读写，运行时注入 |
 
-KSP 会生成完整方法列表。Debug 构建产物位于 `app/build/generated/ksp/debug/resources/mantou_tools.md`，运行时使用同批生成的 `GeneratedMantouToolsDoc` 注入 Prompt。
+KSP 会生成完整方法列表。Debug 构建产物位于 `app/build/generated/ksp/debug/resources/mantou_tools.md`；运行时使用同批生成的 `GeneratedMantouToolsDoc`，根据用户请求通过关键词和本地 embedding 检索相关 Tool，只把命中的文档注入 Prompt。`toast` 和 `vibration` 作为基础交互体验能力始终注入新建应用的 Prompt。
+
+可用下面的 Logcat 过滤器查看优化前后的系统 Prompt 长度、估算 Token、节省比例、检索耗时和命中的 Tool：
+
+```bash
+adb logcat -s ToolPromptOptimizer:I
+```
+
+每次请求会连续输出 `[Tool选择]` 和 `[Token对比]` 两条日志：前者明确列出实际注入及未注入的 Tool，后者用 `baselineTokens~` 表示旧版全量注入的估算 Token、`optimizedTokens~` 表示实际请求使用的估算 Token。两者使用项目统一的字符估算规则，不代表服务端精确 tokenizer 计数，但适合做同一请求的前后对比。
 
 ### 开发约定
 
@@ -432,9 +440,9 @@ GeneratedToolRegistry.kt
 mantou_tools.md
 ```
 
-KSP 输出按变体位于 `app/build/generated/ksp/<variant>/`。`GeneratedMantouToolsDoc` 直接提供运行时 Prompt 文档，Markdown 文件用于人工检查或 CI 归档。
+KSP 输出按变体位于 `app/build/generated/ksp/<variant>/`。`GeneratedMantouToolsDoc` 同时提供完整文档和按 Tool 拆分的检索文档，Markdown 文件用于人工检查或 CI 归档。
 
-这份文档会被 `AppGenerator` 注入到网页 App 生成 prompt 中，LLM 才知道当前 App 有哪些 Tool、怎么调用、返回什么结构。
+`AppGenerator` 会按用户需求选出相关 Tool 文档并注入网页 App 生成 Prompt，LLM 只接收当前请求可能需要的调用方式和返回结构；本地 embedding 不可用时会回退到完整 Tool 清单。
 
 如果只想刷新 Debug Tool 生成结果，可以运行：
 

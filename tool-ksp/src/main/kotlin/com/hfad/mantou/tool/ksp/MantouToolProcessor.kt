@@ -265,7 +265,14 @@ private class MantouToolProcessor(
             appendLine("package $GENERATED_PACKAGE")
             appendLine()
             appendLine("object GeneratedMantouToolsDoc {")
+            appendLine("    data class ToolDocument(")
+            appendLine("        val name: String,")
+            appendLine("        val retrievalText: String,")
+            appendLine("        val markdown: String")
+            appendLine("    )")
+            appendLine()
             appendLine("    val documentedToolNames: List<String> = ${renderStringList(tools.map { it.name })}")
+            appendLine("    val tools: List<ToolDocument> = ${renderToolDocuments(tools)}")
             appendLine("    val markdown: String = ${markdown.toKotlinStringLiteral()}")
             appendLine("}")
         }
@@ -417,51 +424,90 @@ private fun renderMarkdown(tools: List<ToolModel>): String = buildString {
     appendLine()
 
     tools.forEach { tool ->
-        appendLine("## `${tool.name}`")
-        appendLine()
-        appendLine("**描述**：${tool.description}")
-        if (tool.usageScenario.isNotBlank()) {
-            appendLine()
-            appendLine("**使用场景**：${tool.usageScenario}")
-        }
-        appendLine()
+        append(renderToolMarkdown(tool))
+    }
+}
 
-        if (tool.methods.isEmpty()) {
-            appendLine("_（该 Tool 暂无对外方法）_")
+private fun renderToolMarkdown(tool: ToolModel): String = buildString {
+    appendLine("## `${tool.name}`")
+    appendLine()
+    appendLine("**描述**：${tool.description}")
+    if (tool.usageScenario.isNotBlank()) {
+        appendLine()
+        appendLine("**使用场景**：${tool.usageScenario}")
+    }
+    appendLine()
+
+    if (tool.methods.isEmpty()) {
+        appendLine("_（该 Tool 暂无对外方法）_")
+        appendLine()
+    } else {
+        tool.methods.forEach { method ->
+            val signature = method.params.joinToString(", ") { "${it.name}: ${it.type}" }
+            appendLine("### `window.MantouApp.${tool.name}.${method.name}($signature)` → String")
             appendLine()
-        } else {
-            tool.methods.forEach { method ->
-                val signature = method.params.joinToString(", ") { "${it.name}: ${it.type}" }
-                appendLine("### `window.MantouApp.${tool.name}.${method.name}($signature)` → String")
-                appendLine()
-                appendLine(method.description)
-                appendLine()
-                if (method.params.isNotEmpty()) {
-                    appendLine("**参数**：")
-                    method.params.forEach { parameter ->
-                        appendLine("- `${parameter.name}` (${parameter.type})：${parameter.description}")
-                    }
-                    appendLine()
-                }
-                appendLine("**返回**：${method.returnsDescription}")
-                if (method.returnsJsonExample.isNotBlank()) {
-                    appendLine()
-                    appendLine("```json")
-                    appendLine(method.returnsJsonExample)
-                    appendLine("```")
+            appendLine(method.description)
+            appendLine()
+            if (method.params.isNotEmpty()) {
+                appendLine("**参数**：")
+                method.params.forEach { parameter ->
+                    appendLine("- `${parameter.name}` (${parameter.type})：${parameter.description}")
                 }
                 appendLine()
-                if (method.example.isNotBlank()) {
-                    appendLine("**调用示例**：")
-                    appendLine("```js")
-                    appendLine(method.example)
-                    appendLine("```")
-                    appendLine()
-                }
+            }
+            appendLine("**返回**：${method.returnsDescription}")
+            if (method.returnsJsonExample.isNotBlank()) {
+                appendLine()
+                appendLine("```json")
+                appendLine(method.returnsJsonExample)
+                appendLine("```")
+            }
+            appendLine()
+            if (method.example.isNotBlank()) {
+                appendLine("**调用示例**：")
+                appendLine("```js")
+                appendLine(method.example)
+                appendLine("```")
+                appendLine()
             }
         }
-        appendLine("---")
-        appendLine()
+    }
+    appendLine("---")
+    appendLine()
+}
+
+private fun renderToolRetrievalText(tool: ToolModel): String = buildString {
+    append(tool.name)
+    append(' ')
+    append(tool.description)
+    if (tool.usageScenario.isNotBlank()) {
+        append(' ')
+        append(tool.usageScenario)
+    }
+    tool.methods.forEach { method ->
+        append(' ')
+        append(method.name)
+        append(' ')
+        append(method.description)
+        method.params.forEach { parameter ->
+            append(' ')
+            append(parameter.description)
+        }
+    }
+}
+
+private fun renderToolDocuments(tools: List<ToolModel>): String {
+    if (tools.isEmpty()) return "emptyList()"
+    return tools.joinToString(prefix = "listOf(\n", postfix = "\n    )", separator = ",\n") { tool ->
+        buildString {
+            append("        ToolDocument(name = ")
+            append(tool.name.toKotlinStringLiteral())
+            append(", retrievalText = ")
+            append(renderToolRetrievalText(tool).toKotlinStringLiteral())
+            append(", markdown = ")
+            append(renderToolMarkdown(tool).toKotlinStringLiteral())
+            append(')')
+        }
     }
 }
 
