@@ -45,7 +45,7 @@ generated_apps/
 
 ### Workspace 文件与记忆
 
-- 内置 workspace 文件树，展示 `generated_apps`、`agent`、`memory`
+- 内置 workspace 文件树，展示 `generated_apps`、`ManTou_Tool`、`agent`、`memory`
 - 支持打开生成的 HTML App
 - 支持 JSON 富文本查看器，方便查看网页 App 的状态数据
 - 支持编辑文本和 Markdown 文件
