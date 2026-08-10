@@ -59,11 +59,12 @@
                     android:layout_width="118dp"
                     android:layout_height="38dp"
                     android:layout_gravity="center"
-                    android:background="@drawable/bg_appbar_segment_container"
+                    android:background="@android:color/transparent"
                     android:clipChildren="false"
                     android:clipToPadding="false"
                     android:elevation="8dp"
-                    android:padding="3dp">
+                    android:padding="3dp"
+                    android:tag="glass:capsule">
 
                     <View
                         android:id="@+id/appBarSegmentIndicator"
@@ -143,12 +144,13 @@
                 android:layout_width="38dp"
                 android:layout_height="38dp"
                 android:layout_gravity="start|center_vertical"
-                android:background="@drawable/bg_drawer_action_circle"
+                android:background="@android:color/transparent"
                 android:contentDescription="菜单"
                 android:foreground="?attr/selectableItemBackgroundBorderless"
                 android:padding="10dp"
                 android:scaleType="center"
                 android:src="@drawable/ic_appbar_menu"
+                android:tag="glass:circle"
                 android:tint="@color/mt_text_secondary" />
 
             <ImageButton
@@ -162,6 +164,7 @@
                 android:padding="7dp"
                 android:scaleType="center"
                 android:src="@drawable/ic_appbar_new_chat"
+                android:tag="glass:accent"
                 android:tint="@color/input_action_blue" />
         </FrameLayout>
     </FrameLayout>

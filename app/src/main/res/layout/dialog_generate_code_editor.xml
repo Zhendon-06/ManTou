@@ -4,7 +4,8 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/mt_generate_surface">
+    android:background="@android:color/transparent"
+    android:tag="glass:sheet">
 
     <LinearLayout
         android:id="@+id/codeEditorToolbar"
@@ -14,6 +15,7 @@
         android:orientation="horizontal"
         android:paddingStart="16dp"
         android:paddingEnd="16dp"
+        android:tag="glass:toolbar"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent">
@@ -25,6 +27,7 @@
             android:gravity="center"
             android:paddingEnd="18dp"
             android:text="关闭"
+            android:tag="glass:button"
             android:textColor="@color/mt_generate_accent"
             android:textSize="15sp" />
 
@@ -85,6 +88,7 @@
         android:layout_height="0dp"
         android:fillViewport="true"
         android:overScrollMode="never"
+        android:tag="glass:panel"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"

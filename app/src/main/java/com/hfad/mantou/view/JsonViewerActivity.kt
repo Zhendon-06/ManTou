@@ -12,6 +12,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.hfad.mantou.databinding.ActivityJsonViewerBinding
+import com.hfad.mantou.view.glass.LiquidGlass
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,6 +34,7 @@ class JsonViewerActivity : AppCompatActivity() {
 
         binding = ActivityJsonViewerBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        LiquidGlass.install(this, binding.root)
 
         binding.toolbar.setNavigationOnClickListener { finish() }
 

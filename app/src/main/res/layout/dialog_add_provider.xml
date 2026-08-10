@@ -44,11 +44,12 @@
             android:layout_height="50dp"
             android:layout_marginEnd="10dp"
             android:layout_weight="1"
-            android:background="@drawable/bg_btn_pill_outline"
+            android:background="@android:color/transparent"
             android:clickable="true"
             android:focusable="true"
             android:gravity="center"
             android:text="取消"
+            android:tag="glass:button"
             android:textColor="#2F6BFF"
             android:textSize="16sp"
             android:textStyle="bold" />
@@ -63,6 +64,7 @@
             android:focusable="true"
             android:gravity="center"
             android:text="新增"
+            android:tag="glass:accent"
             android:textColor="#FFFFFF"
             android:textSize="16sp"
             android:textStyle="bold" />

@@ -2,8 +2,9 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="@color/mt_background"
-    android:orientation="vertical">
+    android:background="@android:color/transparent"
+    android:orientation="vertical"
+    android:tag="glass:card">
 
     <LinearLayout
         android:id="@+id/headerRow"
@@ -85,10 +86,11 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginBottom="10dp"
-        android:background="@color/mt_surface_soft"
+        android:background="@android:color/transparent"
         android:orientation="vertical"
         android:paddingHorizontal="12dp"
         android:paddingVertical="10dp"
+        android:tag="glass:panel"
         android:visibility="gone">
 
         <TextView

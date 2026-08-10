@@ -85,6 +85,7 @@ import com.hfad.mantou.utils.AutoContrastColor
 import com.hfad.mantou.utils.ContextTokenCounter
 import com.hfad.mantou.utils.DesktopAppScanner
 import com.hfad.mantou.utils.WorkspaceNode
+import com.hfad.mantou.view.glass.LiquidGlass
 import com.hfad.mantou.viewmodel.ChatViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -223,9 +224,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         setupChatRecyclerView()
         CameraPhotoBridge.attach(this)
         
-        // 初始化会话列表 RecyclerView
-        setupSessionRecyclerView()
-        
         initInsets()
         
         // 观察 ViewModel 数据
@@ -319,10 +317,14 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         updateVoiceInputButtonState()
         applyWallpaper()
 
-        // 侧边栏清空历史按钮
-        setupDrawerMenu()
+        LiquidGlass.refresh(binding.root)
 
-
+        binding.root.post {
+            if (_binding == null || !isAdded) return@post
+            setupSessionRecyclerView()
+            setupDrawerMenu()
+            LiquidGlass.refresh(binding.root)
+        }
     }
 
     override fun requestCameraPhoto(callbackName: String?) {
@@ -497,6 +499,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun renderChatMessages(messages: List<ChatMessage>) {
+        updateGreetingVisibility(messages.isNotEmpty())
         if (forceScrollToLatestMessage) {
             pendingMessagesWhileScrolling = null
         }
@@ -712,58 +715,150 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 return@launch
             }
 
+            val dialogRoot = FrameLayout(requireContext()).apply {
+                background = glassDialogSurface(26f)
+            }
+            val contentLayout = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.VERTICAL
+                isFocusableInTouchMode = true
+                setPadding(0, dp(8), 0, dp(10))
+            }
+            dialogRoot.addView(
+                contentLayout,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+
+            val header = LinearLayout(requireContext()).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(24), dp(14), dp(20), dp(14))
+            }
+            header.addView(
+                TextView(requireContext()).apply {
+                    text = file.name
+                    textSize = 21f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_text_primary))
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                    includeFontPadding = false
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            header.addView(
+                TextView(requireContext()).apply {
+                    text = file.extension.ifBlank { "TEXT" }.uppercase(Locale.getDefault())
+                    textSize = 11f
+                    typeface = Typeface.DEFAULT_BOLD
+                    gravity = Gravity.CENTER
+                    setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_primary_dark))
+                    background = roundedBackground(Color.argb(150, 226, 239, 255), 12f)
+                },
+                LinearLayout.LayoutParams(dp(46), dp(25)).apply {
+                    marginStart = dp(14)
+                }
+            )
+            contentLayout.addView(header)
+
             val editor = EditText(requireContext()).apply {
                 setText(content)
                 setSelection(text?.length ?: 0)
-                minLines = 12
-                maxLines = 18
+                gravity = Gravity.TOP or Gravity.START
                 inputType = InputType.TYPE_CLASS_TEXT or
                         InputType.TYPE_TEXT_FLAG_MULTI_LINE or
                         InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                 setHorizontallyScrolling(false)
+                overScrollMode = View.OVER_SCROLL_NEVER
                 textSize = 14f
-            }
-
-            val paddingHorizontal = (16 * resources.displayMetrics.density).toInt()
-            val paddingTop = (8 * resources.displayMetrics.density).toInt()
-            val editorContainer = FrameLayout(requireContext()).apply {
-                setPadding(paddingHorizontal, paddingTop, paddingHorizontal, 0)
-                addView(
-                    editor,
-                    FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.WRAP_CONTENT
-                    )
+                setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_text_primary))
+                setPadding(dp(16), dp(14), dp(16), dp(14))
+                background = roundedStrokeBackground(
+                    fillColor = Color.argb(190, 247, 250, 255),
+                    strokeColor = Color.argb(180, 218, 228, 242),
+                    radius = 18f
                 )
             }
+            val editorHeight = (resources.displayMetrics.heightPixels * 0.42f)
+                .roundToInt()
+                .coerceIn(dp(260), dp(420))
+            contentLayout.addView(
+                editor,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    editorHeight
+                ).apply {
+                    marginStart = dp(20)
+                    marginEnd = dp(20)
+                }
+            )
 
-            val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
-                .setTitle(file.name)
-                .setView(editorContainer)
-                .setNegativeButton("取消", null)
-                .setPositiveButton("保存", null)
-                .create()
-
-            dialog.setOnShowListener {
-                dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
-                    .setOnClickListener {
-                        lifecycleScope.launch {
-                            val saveResult = withContext(Dispatchers.IO) {
-                                runCatching { file.writeText(editor.text.toString()) }
-                            }
-                            saveResult
-                                .onSuccess {
-                                    Toast.makeText(requireContext(), "已保存", Toast.LENGTH_SHORT).show()
-                                    refreshWorkspaceTree()
-                                    dialog.dismiss()
-                                }
-                                .onFailure { error ->
-                                    Toast.makeText(requireContext(), "保存失败: ${error.message}", Toast.LENGTH_SHORT).show()
-                                }
-                        }
-                    }
+            val actions = LinearLayout(requireContext()).apply {
+                gravity = Gravity.CENTER_VERTICAL or Gravity.END
+                setPadding(dp(20), dp(12), dp(20), 0)
             }
+            val cancelButton = TextView(requireContext()).apply {
+                text = "取消"
+                textSize = 15f
+                gravity = Gravity.CENTER
+                setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_text_secondary))
+                background = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
+            }
+            val saveButton = TextView(requireContext()).apply {
+                text = "保存"
+                textSize = 15f
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_primary_dark))
+                background = roundedStrokeBackground(
+                    fillColor = Color.argb(170, 223, 239, 255),
+                    strokeColor = Color.argb(190, 177, 211, 252),
+                    radius = 16f
+                )
+            }
+            actions.addView(cancelButton, LinearLayout.LayoutParams(dp(72), dp(44)))
+            actions.addView(
+                saveButton,
+                LinearLayout.LayoutParams(dp(84), dp(44)).apply {
+                    marginStart = dp(8)
+                }
+            )
+            contentLayout.addView(actions)
+
+            val dialog = Dialog(requireContext())
+            dialog.setContentView(dialogRoot)
+            cancelButton.setOnClickListener { dialog.dismiss() }
+            saveButton.setOnClickListener {
+                lifecycleScope.launch {
+                    val saveResult = withContext(Dispatchers.IO) {
+                        runCatching { file.writeText(editor.text.toString()) }
+                    }
+                    saveResult
+                        .onSuccess {
+                            Toast.makeText(requireContext(), "已保存", Toast.LENGTH_SHORT).show()
+                            refreshWorkspaceTree()
+                            dialog.dismiss()
+                        }
+                        .onFailure { error ->
+                            Toast.makeText(requireContext(), "保存失败: ${error.message}", Toast.LENGTH_SHORT).show()
+                        }
+                }
+            }
+            contentLayout.requestFocus()
             dialog.show()
+            configureFloatingGlassWindow(
+                dialog = dialog,
+                width = (resources.displayMetrics.widthPixels * 0.9f).roundToInt(),
+                height = editorHeight + dp(142),
+                blurRadiusDp = 14,
+                dimAmount = 0.16f
+            )
+            dialog.window?.setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                        WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+            )
         }
     }
 
@@ -793,6 +888,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun showRenameWorkspaceFileDialog(file: File) {
         val editor = EditText(requireContext()).apply {
+            tag = "glass:input"
             setText(file.name)
             setSelection(0, file.nameWithoutExtension.length.coerceAtMost(file.name.length))
             setSingleLine(true)
@@ -850,6 +946,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 }
         }
         dialog.show()
+        decorateAlertDialog(dialog)
     }
 
     private fun normalizeWorkspaceFileName(input: String, originalExtension: String): String? {
@@ -867,7 +964,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun confirmDeleteWorkspaceFile(file: File) {
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
             .setTitle("删除文件")
             .setMessage("确定要删除「${file.name}」吗？")
             .setPositiveButton("删除") { _, _ ->
@@ -880,7 +977,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 refreshWorkspaceTree()
             }
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+        dialog.show()
+        decorateAlertDialog(dialog)
     }
 
     private fun updateAppBarTitleSlide(position: Int, positionOffset: Float) {
@@ -1054,7 +1153,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
      * 显示清空历史确认对话框
      */
     private fun showClearHistoryDialog() {
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
             .setTitle("清空所有会话")
             .setMessage("确定要删除所有历史会话吗？此操作不可恢复。")
             .setPositiveButton("确定") { _, _ ->
@@ -1063,7 +1162,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 (activity as? MainActivity)?.closeDrawer()
             }
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+        dialog.show()
+        decorateAlertDialog(dialog)
     }
 
     /**
@@ -1179,7 +1280,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
      * 显示删除会话确认对话框
      */
     private fun showDeleteSessionDialog(session: ChatSessionEntity) {
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
             .setTitle("删除会话")
             .setMessage("确定要删除会话「${session.title}」吗？")
             .setPositiveButton("删除") { _, _ ->
@@ -1187,7 +1288,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 Toast.makeText(requireContext(), "已删除会话", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+        dialog.show()
+        decorateAlertDialog(dialog)
     }
 
     private fun showMessageActions(message: ChatMessage) {
@@ -1229,6 +1332,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val paddingHorizontal = (18 * resources.displayMetrics.density).toInt()
         val paddingVertical = (10 * resources.displayMetrics.density).toInt()
         val container = FrameLayout(requireContext()).apply {
+            tag = "glass:panel"
             setPadding(paddingHorizontal, paddingVertical, paddingHorizontal, 0)
             addView(
                 textView,
@@ -1239,11 +1343,13 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             )
         }
 
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
             .setTitle("选字复制")
             .setView(container)
             .setPositiveButton("关闭", null)
-            .show()
+            .create()
+        dialog.show()
+        decorateAlertDialog(dialog)
     }
 
     private fun confirmDeleteMessage(message: ChatMessage) {
@@ -1251,7 +1357,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             Toast.makeText(requireContext(), "该消息无法删除", Toast.LENGTH_SHORT).show()
             return
         }
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
             .setTitle("删除消息")
             .setMessage("确定要删除这条消息吗？")
             .setPositiveButton("删除") { _, _ ->
@@ -1259,7 +1365,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 Toast.makeText(requireContext(), "已删除", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+        dialog.show()
+        decorateAlertDialog(dialog)
     }
 
     private fun showEditMessageDialog(message: ChatMessage) {
@@ -1273,6 +1381,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
 
         val editor = EditText(requireContext()).apply {
+            tag = "glass:input"
             setText(message.content)
             setSelection(text?.length ?: 0)
             minLines = 4
@@ -1318,6 +1427,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 }
         }
         dialog.show()
+        decorateAlertDialog(dialog)
     }
 
     private fun showActionMenu(items: List<ActionMenuItem>) {
@@ -1329,11 +1439,13 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val density = resources.displayMetrics.density
         val menu = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
-            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_action_menu)
+            background = ColorDrawable(Color.TRANSPARENT)
+            tag = "glass:sheet"
         }
 
         items.forEachIndexed { index, item ->
             val row = LinearLayout(requireContext()).apply {
+                tag = "glass:button"
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(24), 0, dp(24), 0)
@@ -1405,6 +1517,55 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             )
         }
         dialog.show()
+        LiquidGlass.decorate(dialog)
+    }
+
+    private fun decorateAlertDialog(dialog: androidx.appcompat.app.AlertDialog) {
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.tag = "glass:button"
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.tag = "glass:button"
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.tag = "glass:accent"
+        LiquidGlass.decorate(dialog)
+    }
+
+    private fun glassDialogSurface(radiusDp: Float): GradientDrawable {
+        return GradientDrawable(
+            GradientDrawable.Orientation.TL_BR,
+            intArrayOf(
+                Color.argb(248, 255, 255, 255),
+                Color.argb(238, 244, 249, 255)
+            )
+        ).apply {
+            cornerRadius = dp(radiusDp).toFloat()
+            setStroke(dp(1f), Color.argb(220, 255, 255, 255))
+        }
+    }
+
+    private fun configureFloatingGlassWindow(
+        dialog: Dialog,
+        width: Int,
+        height: Int,
+        gravity: Int = Gravity.CENTER,
+        y: Int = 0,
+        blurRadiusDp: Int = 14,
+        dimAmount: Float = 0.16f
+    ) {
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setWindowAnimations(R.style.MtDialogAnimation)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurRadiusDp > 0) {
+                addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
+            }
+            attributes = attributes.apply {
+                this.gravity = gravity
+                this.y = y
+                this.dimAmount = dimAmount
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    blurBehindRadius = dp(blurRadiusDp)
+                }
+            }
+            setLayout(width, height)
+        }
     }
 
     private fun dp(value: Int): Int {
@@ -1431,11 +1592,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private fun setupChatRecyclerView() {
         chatAdapter = ChatAdapter(
             onDataChanged = { itemCount ->
-                if (itemCount > 0) {
-                    chatBinding.flGreeting.visibility = View.GONE
-                } else {
-                    chatBinding.flGreeting.visibility = View.VISIBLE
-                }
+                updateGreetingVisibility(itemCount > 0)
             },
             onFullscreenClick = { htmlPath ->
                 val intent = Intent(requireContext(), VirtualAppActivity::class.java).apply {
@@ -1482,6 +1639,13 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             if (shouldKeepLatestMessageVisible) scrollChatToBottom()
         }
         chatAdapter.updateAppearance(AppearanceSettingsStore.getSettings(requireContext()))
+    }
+
+    private fun updateGreetingVisibility(hasMessages: Boolean) {
+        val targetVisibility = if (hasMessages) View.GONE else View.VISIBLE
+        if (chatBinding.flGreeting.visibility == targetVisibility) return
+        chatBinding.flGreeting.visibility = targetVisibility
+        LiquidGlass.refresh(binding.root)
     }
 
     /**
@@ -1649,6 +1813,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         codeEditorDialog = dialog
         editorBinding.tvCodeEditorLines.bindTo(editorBinding.tvCodeEditorContent)
         dialog.show()
+        LiquidGlass.decorate(dialog)
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             statusBarColor = ContextCompat.getColor(requireContext(), R.color.mt_generate_surface)
@@ -1725,14 +1890,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         selectedImageUris.forEach { uri ->
             val chip = Chip(requireContext()).apply {
+                tag = "glass:capsule"
                 text = queryDisplayName(uri)
                 isCloseIconVisible = true
                 isClickable = true
                 isCheckable = false
                 setTextColor(Color.rgb(44, 83, 122))
                 textSize = 13f
-                chipBackgroundColor = android.content.res.ColorStateList.valueOf(Color.rgb(238, 245, 255))
-                chipStrokeColor = android.content.res.ColorStateList.valueOf(Color.rgb(187, 216, 255))
+                chipBackgroundColor = android.content.res.ColorStateList.valueOf(Color.TRANSPARENT)
+                chipStrokeColor = android.content.res.ColorStateList.valueOf(Color.argb(120, 255, 255, 255))
                 chipStrokeWidth = dp(1).toFloat()
                 closeIconTint = android.content.res.ColorStateList.valueOf(Color.rgb(44, 131, 216))
                 setOnCloseIconClickListener {
@@ -1743,6 +1909,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             }
             chatBinding.selectedImageChipGroup.addView(chip)
         }
+        LiquidGlass.refresh(binding.root)
     }
 
     private fun clearSelectedImages() {
@@ -1769,16 +1936,22 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(buildMimoVoiceKeyContent(dialog, startAfterActivation))
         dialog.setCanceledOnTouchOutside(true)
-        configureModelPickerWindow(dialog)
         dialog.show()
+        configureFloatingGlassWindow(
+            dialog = dialog,
+            width = (resources.displayMetrics.widthPixels - dp(40)).coerceAtLeast(dp(300)),
+            height = ViewGroup.LayoutParams.WRAP_CONTENT,
+            blurRadiusDp = 14,
+            dimAmount = 0.16f
+        )
     }
 
     private fun buildMimoVoiceKeyContent(dialog: Dialog, startAfterActivation: Boolean): View {
         val currentApiKey = VoiceInputModelStore.getActiveApiKey(requireContext())
         val root = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
-            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
-            setPadding(dp(18), dp(18), dp(18), dp(16))
+            background = glassDialogSurface(24f)
+            setPadding(dp(22), dp(22), dp(22), dp(20))
         }
 
         root.addView(
@@ -1911,8 +2084,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             setHintTextColor(Color.rgb(150, 162, 182))
             inputType = inputTypeValue
             background = roundedStrokeBackground(
-                fillColor = Color.argb(160, 248, 251, 255),
-                strokeColor = Color.WHITE,
+                fillColor = Color.argb(235, 247, 250, 255),
+                strokeColor = Color.argb(220, 216, 226, 240),
                 radius = 14f
             )
             setPadding(dp(14), 0, dp(14), 0)
@@ -1939,8 +2112,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val loadingView = buildModelPickerLoadingView()
         dialog.setContentView(loadingView)
         dialog.setCanceledOnTouchOutside(true)
-        configureModelPickerWindow(dialog)
         dialog.show()
+        configureModelPickerWindow(dialog)
 
         viewLifecycleOwner.lifecycleScope.launch {
             val groups = withContext(Dispatchers.IO) {
@@ -1956,6 +2129,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                     onSelected = onSelected
                 )
             )
+            configureModelPickerWindow(dialog)
         }
     }
 
@@ -1973,26 +2147,22 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun configureModelPickerWindow(dialog: Dialog) {
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setDimAmount(0f)
-            setWindowAnimations(R.style.MtDialogAnimation)
-            setLayout(
-                (resources.displayMetrics.widthPixels - dp(40)).coerceAtLeast(dp(280)),
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-            attributes = attributes.apply {
-                gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-                y = chatBinding.inputContainer.height + dp(8)
-            }
-        }
+        configureFloatingGlassWindow(
+            dialog = dialog,
+            width = (resources.displayMetrics.widthPixels - dp(32)).coerceAtLeast(dp(300)),
+            height = ViewGroup.LayoutParams.WRAP_CONTENT,
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
+            y = chatBinding.inputContainer.height + dp(10),
+            blurRadiusDp = 12,
+            dimAmount = 0.08f
+        )
     }
 
     private fun buildModelPickerLoadingView(): View {
         return LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
+            background = glassDialogSurface(26f)
             setPadding(dp(24), dp(34), dp(24), dp(34))
             minimumHeight = modelPickerPanelHeight()
             addView(
@@ -2017,9 +2187,26 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         val root = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
-            background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_dialog_glass)
-            setPadding(dp(14), dp(14), dp(14), dp(12))
+            background = glassDialogSurface(26f)
+            setPadding(dp(16), dp(16), dp(16), dp(14))
         }
+
+        root.addView(
+            TextView(requireContext()).apply {
+                text = "选择模型"
+                textSize = 20f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_text_primary))
+                includeFontPadding = false
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                bottomMargin = dp(14)
+                marginStart = dp(4)
+            }
+        )
 
         val searchInput = EditText(requireContext()).apply {
             hint = "搜索模型 ID"
@@ -2028,8 +2215,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             setTextColor(Color.rgb(45, 52, 68))
             setHintTextColor(Color.rgb(160, 170, 188))
             background = roundedStrokeBackground(
-                fillColor = Color.argb(160, 248, 251, 255),
-                strokeColor = Color.WHITE,
+                fillColor = Color.argb(235, 247, 250, 255),
+                strokeColor = Color.argb(220, 216, 226, 240),
                 radius = 16f
             )
             setPadding(dp(14), 0, dp(14), 0)
@@ -2455,6 +2642,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             sheet?.background = ColorDrawable(Color.TRANSPARENT)
         }
         dialog.show()
+        LiquidGlass.install(requireActivity(), content)
     }
 
     private fun buildContextLimitSheet(): View {
@@ -2463,12 +2651,13 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         lateinit var saveLimitAction: (Int, Boolean) -> Unit
 
         val scroll = ScrollView(requireContext()).apply {
+            tag = "glass:sheet"
             isFillViewport = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
         val container = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
-            background = roundedBackground(Color.WHITE, topLeft = 28f, topRight = 28f)
+            background = ColorDrawable(Color.TRANSPARENT)
             setPadding(dp(22), dp(12), dp(22), dp(22))
         }
         scroll.addView(
@@ -2523,8 +2712,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         })
 
         val statsRow = LinearLayout(requireContext()).apply {
+            tag = "glass:card"
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(14), dp(12), dp(14))
         }
         val currentValue = createStatValue(formatNumber(currentContextTokens), Color.rgb(45, 52, 68))
         val targetValue = createStatValue(formatNumber(currentLimit), Color.rgb(58, 132, 226))
@@ -2558,6 +2749,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val optionButtons = mutableMapOf<Int, TextView>()
         ContextLimitStore.TOKEN_OPTIONS.forEach { option ->
             val button = TextView(requireContext()).apply {
+                tag = "glass:button"
                 text = formatCompactToken(option)
                 gravity = Gravity.CENTER
                 textSize = 16f
@@ -2603,6 +2795,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         )
 
         val exactInput = EditText(requireContext()).apply {
+            tag = "glass:input"
             inputType = InputType.TYPE_CLASS_NUMBER
             setSingleLine(true)
             textSize = 22f
@@ -2646,6 +2839,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
         savedRow.addView(
             TextView(requireContext()).apply {
+                tag = "glass:circle"
                 text = "✓"
                 gravity = Gravity.CENTER
                 textSize = 17f
@@ -2693,6 +2887,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             percentValue.text = formatPercent(currentContextTokens, clamped)
             optionButtons.forEach { (option, button) ->
                 val selected = option == clamped
+                button.tag = if (selected) "glass:accent" else "glass:button"
                 button.setTextColor(if (selected) Color.WHITE else Color.rgb(122, 133, 153))
                 button.background = roundedStrokeBackground(
                     fillColor = if (selected) Color.rgb(58, 132, 226) else Color.rgb(245, 247, 252),
@@ -2701,6 +2896,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 )
             }
             updateContextProgressIndicator()
+            LiquidGlass.refresh(scroll)
         }
 
         saveLimitAction = { limit, updateInput ->

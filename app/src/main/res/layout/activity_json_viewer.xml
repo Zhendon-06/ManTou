@@ -10,7 +10,8 @@
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="48dp"
-        android:background="@color/mt_surface"
+        android:background="@android:color/transparent"
+        android:tag="glass:toolbar"
         app:navigationIcon="@drawable/ic_arrow_back"
         app:navigationIconTint="@color/mt_text_primary"
         app:title="JSON 查看器"
@@ -31,7 +32,8 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:fillViewport="true"
-            android:overScrollMode="ifContentScrolls">
+            android:overScrollMode="ifContentScrolls"
+            android:tag="glass:panel">
 
             <TextView
                 android:id="@+id/tvJsonContent"

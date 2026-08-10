@@ -37,18 +37,24 @@
             tools:src="@drawable/ic_launcher_background"
             tools:visibility="visible" />
 
-        <TextView
-            android:id="@+id/tvMessage"
+        <FrameLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:gravity="start"
-            android:lineSpacingExtra="2dp"
-            android:textAlignment="viewStart"
-            android:textColor="@color/mt_text_primary"
-            android:textDirection="ltr"
-            android:textIsSelectable="true"
-            android:textSize="16sp"
-            tools:text="你看看" />
+            android:padding="10dp">
+
+            <TextView
+                android:id="@+id/tvMessage"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="start"
+                android:lineSpacingExtra="2dp"
+                android:textAlignment="viewStart"
+                android:textColor="@color/mt_text_primary"
+                android:textDirection="ltr"
+                android:textIsSelectable="true"
+                android:textSize="16sp"
+                tools:text="你看看" />
+        </FrameLayout>
 
     </LinearLayout>
 
