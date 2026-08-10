@@ -14,10 +14,11 @@
         android:id="@+id/ivAvatar"
         android:layout_width="36dp"
         android:layout_height="36dp"
-        android:background="@drawable/bg_drawer_action_circle"
+        android:background="@android:color/transparent"
         android:contentDescription="@string/app_name"
         android:padding="6dp"
         android:src="@drawable/mantou"
+        android:tag="glass:circle"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
@@ -50,6 +51,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="14dp"
         android:orientation="vertical"
+        android:padding="10dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/ivAvatar">
@@ -130,7 +132,7 @@
             android:layout_height="300dp"
             android:layout_marginTop="12dp"
             android:visibility="gone"
-            app:cardBackgroundColor="@color/mt_surface"
+            app:cardBackgroundColor="@android:color/transparent"
             app:cardCornerRadius="12dp"
             app:cardElevation="0dp"
             app:strokeColor="@color/mt_outline"
@@ -147,9 +149,11 @@
                 android:layout_height="36dp"
                 android:layout_gravity="end|top"
                 android:layout_margin="8dp"
-                android:background="@drawable/tobig"
+                android:background="@android:color/transparent"
                 android:elevation="4dp"
-                android:scaleType="centerInside" />
+                android:scaleType="centerInside"
+                android:src="@drawable/tobig"
+                android:tag="glass:circle" />
 
         </com.google.android.material.card.MaterialCardView>
 

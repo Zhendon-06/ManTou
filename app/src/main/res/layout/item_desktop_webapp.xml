@@ -3,12 +3,15 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="?attr/selectableItemBackground"
+    android:layout_margin="4dp"
+    android:background="@android:color/transparent"
+    android:foreground="?attr/selectableItemBackground"
     android:gravity="center_horizontal"
     android:orientation="vertical"
     android:paddingHorizontal="6dp"
     android:paddingTop="10dp"
-    android:paddingBottom="14dp">
+    android:paddingBottom="14dp"
+    android:tag="glass:card">
 
     <ImageView
         android:id="@+id/ivAppIcon"

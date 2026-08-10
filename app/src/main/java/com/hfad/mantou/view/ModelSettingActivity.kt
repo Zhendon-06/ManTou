@@ -137,7 +137,6 @@ class ModelSettingActivity : AppCompatActivity() {
         actvProvider2.setAdapter(adapter)
         actvProvider2.setOnClickListener { actvProvider2.showDropDown() }
         actvProvider2.setOnItemClickListener { _, _, position, _ ->
-            val key = apiFormatLabels.keys.toList()[position]
             val label = labels[position]
             actvProvider2.setText(label, false)
             saveCurrentDraft()

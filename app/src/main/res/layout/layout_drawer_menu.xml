@@ -6,12 +6,16 @@
     android:layout_width="320dp"
     android:layout_height="match_parent"
     android:layout_gravity="start"
-    android:background="@color/mt_background"
+    android:background="@android:color/transparent"
+    android:clickable="true"
+    android:focusable="false"
+    android:importantForAccessibility="no"
     android:orientation="vertical"
     android:paddingStart="18dp"
     android:paddingTop="28dp"
     android:paddingEnd="18dp"
-    android:paddingBottom="18dp">
+    android:paddingBottom="18dp"
+    android:tag="glass:sheet">
 
     <LinearLayout
         android:id="@+id/drawerTopActions"
@@ -25,11 +29,12 @@
             android:layout_width="0dp"
             android:layout_height="32dp"
             android:layout_weight="1"
-            android:background="@drawable/bg_drawer_search"
+            android:background="@android:color/transparent"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingStart="16dp"
-            android:paddingEnd="14dp">
+            android:paddingEnd="14dp"
+            android:tag="glass:input">
 
             <ImageView
                 android:layout_width="22dp"
@@ -61,10 +66,11 @@
             android:layout_width="32dp"
             android:layout_height="32dp"
             android:layout_marginStart="12dp"
-            android:background="@drawable/bg_drawer_action_circle"
+            android:background="@android:color/transparent"
             android:contentDescription="查看归档"
             android:padding="6dp"
             android:src="@drawable/ic_archive_outline"
+            android:tag="glass:circle"
             app:tint="@color/mt_text_primary" />
     </LinearLayout>
 
@@ -90,6 +96,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:clipToPadding="false"
+            android:paddingHorizontal="2dp"
             android:paddingTop="4dp"
             android:paddingBottom="12dp"
             tools:listitem="@layout/item_session" />
@@ -130,10 +137,11 @@
             <ImageView
                 android:layout_width="40dp"
                 android:layout_height="40dp"
-                android:background="@drawable/bg_drawer_action_circle"
+                android:background="@android:color/transparent"
                 android:contentDescription="设置"
                 android:padding="8dp"
-                android:src="@drawable/setting" />
+                android:src="@drawable/setting"
+                android:tag="glass:circle" />
 
             <TextView
                 android:layout_width="wrap_content"
@@ -158,10 +166,11 @@
             <ImageView
                 android:layout_width="40dp"
                 android:layout_height="40dp"
-                android:background="@drawable/bg_drawer_action_circle"
+                android:background="@android:color/transparent"
                 android:contentDescription="清空对话"
                 android:padding="8dp"
                 android:src="@drawable/ic_delete_outline"
+                android:tag="glass:circle"
                 app:tint="@color/mt_error" />
 
             <TextView

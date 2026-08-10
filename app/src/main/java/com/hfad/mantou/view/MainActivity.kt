@@ -10,6 +10,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import com.hfad.mantou.R
+import com.hfad.mantou.view.glass.LiquidGlass
 
 class MainActivity : AppCompatActivity() {
 
@@ -40,11 +41,32 @@ class MainActivity : AppCompatActivity() {
         // 处理侧边菜单的状态栏 padding
         val drawerMenu = findViewById<android.view.View>(R.id.drawerMenu)
         val drawerMenuBasePaddingTop = drawerMenu.paddingTop
+        val drawerMenuBasePaddingBottom = drawerMenu.paddingBottom
         ViewCompat.setOnApplyWindowInsetsListener(drawerMenu) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(v.paddingLeft, systemBars.top + drawerMenuBasePaddingTop, v.paddingRight, v.paddingBottom)
+            v.setPadding(
+                v.paddingLeft,
+                systemBars.top + drawerMenuBasePaddingTop,
+                v.paddingRight,
+                systemBars.bottom + drawerMenuBasePaddingBottom
+            )
             insets
         }
+
+        val glassHandle = LiquidGlass.install(this, drawerLayout)
+        drawerLayout.addDrawerListener(object : DrawerLayout.SimpleDrawerListener() {
+            override fun onDrawerSlide(drawerView: android.view.View, slideOffset: Float) {
+                glassHandle.refresh()
+            }
+
+            override fun onDrawerOpened(drawerView: android.view.View) {
+                glassHandle.refresh()
+            }
+
+            override fun onDrawerClosed(drawerView: android.view.View) {
+                glassHandle.refresh()
+            }
+        })
     }
 
     fun openDrawer() = drawerLayout.openDrawer(GravityCompat.START)

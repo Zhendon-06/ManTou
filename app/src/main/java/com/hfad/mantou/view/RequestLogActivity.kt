@@ -13,6 +13,7 @@ import com.hfad.mantou.adapter.RequestLogAdapter
 import com.hfad.mantou.data.logging.ApiLogEntry
 import com.hfad.mantou.data.logging.ApiLogStore
 import com.hfad.mantou.databinding.ActivityRequestLogBinding
+import com.hfad.mantou.view.glass.LiquidGlass
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -30,6 +31,7 @@ class RequestLogActivity : AppCompatActivity() {
         enableEdgeToEdge()
         binding = ActivityRequestLogBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        LiquidGlass.install(this, binding.root)
 
         ViewCompat.setOnApplyWindowInsetsListener(binding.main) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
