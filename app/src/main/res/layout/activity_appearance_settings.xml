@@ -200,7 +200,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="增强统一蒙版，让页面元素更干净"
+                android:text="自动模式只取最低必要强度，并限制过度遮挡"
                 android:textColor="@color/mt_text_secondary"
                 android:textSize="12sp" />
 

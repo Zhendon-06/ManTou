@@ -134,6 +134,31 @@ class AppGeneratorTest {
     }
 
     @Test
+    fun harnessRepairPromptContainsBoundedInspectorDiagnostics() {
+        val snapshot = LocalDiffFileTool.FileSnapshot(
+            file = File("generated_apps/app.html"),
+            relativePath = "generated_apps/app.html",
+            content = "<!DOCTYPE html><html><body></body></html>",
+            sha256 = "b".repeat(64),
+            sizeBytes = 41
+        )
+
+        val prompt = AppGenerator.buildHarnessRepairUserPrompt(
+            userMessage = "做一个 <计时器>",
+            snapshot = snapshot,
+            failedStage = "runtime-inspection",
+            diagnostics = listOf("Uncaught ReferenceError: timer is not defined"),
+            iteration = 2
+        )
+
+        assertTrue(prompt.contains("第 2 轮"))
+        assertTrue(prompt.contains("runtime-inspection"))
+        assertTrue(prompt.contains("Uncaught ReferenceError"))
+        assertTrue(prompt.contains("&lt;计时器&gt;"))
+        assertTrue(prompt.contains("只输出针对当前文件的 unified diff"))
+    }
+
+    @Test
     fun smallVisualModificationDoesNotLoadAndroidToolCatalog() {
         assertFalse(AppGenerator.modificationNeedsTools("把开始按钮颜色改成红色"))
         assertFalse(AppGenerator.modificationNeedsTools("调整日历卡片的位置"))
@@ -168,6 +193,22 @@ class AppGeneratorTest {
             <body><h1>馒头记事本</h1><input><button>添加</button>
             <script>document.querySelector('button').onclick = function () {};</script></body></html>
         """.trimIndent()
+
+        val issues = AppGenerator.generatedWebAppQualityIssues(html)
+
+        assertTrue(issues.any { it.contains("CSS") })
+        assertTrue(issues.any { it.contains("JavaScript") })
+    }
+
+    @Test
+    fun runtimeGuardDoesNotMakeBarePagePassQualityGate() {
+        val html = AppGenerator.ensureWebAppIdentity(
+            """
+                <!DOCTYPE html>
+                <html><head><title>馒头空页面</title></head>
+                <body><button id="run">运行</button><script>run.onclick=function(){};</script></body></html>
+            """.trimIndent()
+        )
 
         val issues = AppGenerator.generatedWebAppQualityIssues(html)
 
@@ -225,6 +266,40 @@ class AppGeneratorTest {
         """.trimIndent()
 
         assertTrue(AppGenerator.generatedWebAppQualityIssues(html).isEmpty())
+    }
+
+    @Test
+    fun secondExtractableLowQualityCandidateRunsHarnessInsteadOfFailing() {
+        val html = "<!DOCTYPE html><html><head><title>馒头应用</title></head><body>内容</body></html>"
+
+        val firstDecision = AppGenerator.decideInitialGeneration(html, attempt = 1)
+        val secondDecision = AppGenerator.decideInitialGeneration(html, attempt = 2)
+
+        assertTrue(firstDecision is AppGenerator.InitialGenerationDecision.Retry)
+        assertTrue(secondDecision is AppGenerator.InitialGenerationDecision.RunHarness)
+        val harnessDecision = secondDecision as AppGenerator.InitialGenerationDecision.RunHarness
+        assertEquals(html, harnessDecision.html)
+        assertTrue(harnessDecision.diagnostics.isNotEmpty())
+    }
+
+    @Test
+    fun missingHtmlRetriesAreBoundedAndEndWithClearFailure() {
+        val modelOutput = "我无法生成代码"
+
+        assertTrue(
+            AppGenerator.decideInitialGeneration(modelOutput, attempt = 1) is
+                AppGenerator.InitialGenerationDecision.Retry
+        )
+        assertTrue(
+            AppGenerator.decideInitialGeneration(modelOutput, attempt = 2) is
+                AppGenerator.InitialGenerationDecision.Retry
+        )
+        val finalDecision = AppGenerator.decideInitialGeneration(modelOutput, attempt = 3)
+
+        assertTrue(finalDecision is AppGenerator.InitialGenerationDecision.Fail)
+        assertTrue(
+            (finalDecision as AppGenerator.InitialGenerationDecision.Fail).reason.contains("连续 3 次")
+        )
     }
 
     @Test

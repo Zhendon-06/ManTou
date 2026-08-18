@@ -1,12 +1,16 @@
 package com.hfad.mantou.adapter
 
+import android.content.res.ColorStateList
+import android.graphics.Color
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import androidx.core.graphics.ColorUtils
 import androidx.recyclerview.widget.RecyclerView
 import com.hfad.mantou.R
 import com.hfad.mantou.databinding.ItemWorkspaceNodeBinding
 import com.hfad.mantou.utils.WorkspaceNode
+import java.util.Locale
 
 class WorkspaceFileAdapter(
     private val onFileClick: (WorkspaceNode) -> Unit,
@@ -16,6 +20,7 @@ class WorkspaceFileAdapter(
     private val roots = mutableListOf<WorkspaceNode>()
     private val visibleNodes = mutableListOf<WorkspaceNode>()
     private val expandedPaths = mutableSetOf<String>()
+    private var textColor: Int = Color.BLACK
 
     fun submitNodes(nodes: List<WorkspaceNode>) {
         roots.clear()
@@ -24,6 +29,12 @@ class WorkspaceFileAdapter(
             nodes.forEach(::collectDefaultExpandedPaths)
         }
         rebuildVisibleNodes()
+    }
+
+    fun updateTextColor(color: Int) {
+        if (textColor == color) return
+        textColor = color
+        notifyItemRangeChanged(0, itemCount, PAYLOAD_TEXT_COLOR)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): WorkspaceNodeViewHolder {
@@ -37,6 +48,18 @@ class WorkspaceFileAdapter(
 
     override fun onBindViewHolder(holder: WorkspaceNodeViewHolder, position: Int) {
         holder.bind(visibleNodes[position])
+    }
+
+    override fun onBindViewHolder(
+        holder: WorkspaceNodeViewHolder,
+        position: Int,
+        payloads: MutableList<Any>
+    ) {
+        if (payloads.contains(PAYLOAD_TEXT_COLOR)) {
+            holder.applyTextColor()
+            return
+        }
+        super.onBindViewHolder(holder, position, payloads)
     }
 
     override fun getItemCount(): Int = visibleNodes.size
@@ -75,6 +98,7 @@ class WorkspaceFileAdapter(
 
         fun bind(node: WorkspaceNode) {
             binding.tvNodeName.text = node.name
+            applyTextColor()
             binding.ivNodeIcon.setImageResource(
                 if (node.isDirectory) R.drawable.ic_folder_outline else R.drawable.ic_file_markdown
             )
@@ -107,10 +131,58 @@ class WorkspaceFileAdapter(
                 !node.isDirectory && onFileLongClick(node)
             }
         }
+
+        fun applyTextColor() {
+            binding.tvNodeName.setTextColor(textColor)
+            val secondaryColor = ColorUtils.setAlphaComponent(textColor, 184)
+            binding.ivNodeIcon.imageTintList = ColorStateList.valueOf(secondaryColor)
+            binding.ivNodeChevron.imageTintList = ColorStateList.valueOf(secondaryColor)
+        }
     }
 
     private fun fileTypeLabel(fileName: String): String {
-        val extension = fileName.substringAfterLast('.', missingDelimiterValue = "")
-        return extension.ifBlank { "FILE" }.uppercase().take(5)
+        return WorkspaceFileOpenPolicy.badgeLabel(fileName)
+    }
+
+    private companion object {
+        const val PAYLOAD_TEXT_COLOR = "text_color"
+    }
+}
+
+internal enum class WorkspaceFileOpenMode {
+    WEB_APP,
+    JSON,
+    TEXT,
+    UNSUPPORTED
+}
+
+internal object WorkspaceFileOpenPolicy {
+    private val textExtensions = setOf(
+        "css", "scss", "sass", "less",
+        "js", "mjs", "cjs", "jsx",
+        "ts", "mts", "cts", "tsx",
+        "svg", "xml", "webmanifest", "map",
+        "md", "markdown", "txt",
+        "yaml", "yml", "toml", "ini", "properties",
+        "csv", "tsv", "sql", "graphql", "gql",
+        "sh", "bash", "zsh", "env", "gitignore"
+    )
+
+    fun modeFor(fileName: String): WorkspaceFileOpenMode {
+        return when (extensionOf(fileName)) {
+            "html", "htm" -> WorkspaceFileOpenMode.WEB_APP
+            "json" -> WorkspaceFileOpenMode.JSON
+            in textExtensions -> WorkspaceFileOpenMode.TEXT
+            else -> WorkspaceFileOpenMode.UNSUPPORTED
+        }
+    }
+
+    fun badgeLabel(fileName: String): String {
+        return extensionOf(fileName).ifBlank { "FILE" }.uppercase(Locale.ROOT).take(5)
+    }
+
+    private fun extensionOf(fileName: String): String {
+        return fileName.substringAfterLast('.', missingDelimiterValue = "")
+            .lowercase(Locale.ROOT)
     }
 }

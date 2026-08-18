@@ -11,12 +11,15 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.ColorUtils
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
@@ -33,6 +36,10 @@ import com.hfad.mantou.databinding.ItemChatLoadingBinding
 import com.hfad.mantou.databinding.ItemChatUserBinding
 import com.hfad.mantou.utils.MantouWebViewRuntime
 import com.hfad.mantou.utils.RichTextFormatter
+import com.hfad.mantou.utils.WebProjectContentServer
+import com.hfad.mantou.utils.project.WebAppProjectResolver
+import com.hfad.mantou.utils.project.WebAppProjectSnapshotKind
+import com.hfad.mantou.utils.project.WebAppProjectWorkspace
 import java.io.File
 
 class ChatAdapter(
@@ -47,11 +54,13 @@ class ChatAdapter(
         private const val VIEW_TYPE_USER = 1
         private const val VIEW_TYPE_ASSISTANT = 2
         private const val VIEW_TYPE_LOADING = 3
+        private const val VIEW_TYPE_HARNESS = 4
         private const val PAYLOAD_APPEARANCE_CHANGED = "appearance_changed"
     }
 
     private var appearanceSettings = AppearanceSettingsStore.Settings()
     private var autoTextColor: Int = Color.BLACK
+    private val harnessActivityRenderer = HarnessActivityRenderer()
 
     init {
         setHasStableIds(true)
@@ -75,6 +84,7 @@ class ChatAdapter(
     override fun getItemViewType(position: Int): Int {
         val message = getItem(position)
         return when {
+            message.generateTaskState != null -> VIEW_TYPE_HARNESS
             message.isStreaming && message.content.isBlank() -> VIEW_TYPE_LOADING
             message.role == ChatMessage.ROLE_USER -> VIEW_TYPE_USER
             else -> VIEW_TYPE_ASSISTANT
@@ -97,6 +107,7 @@ class ChatAdapter(
             VIEW_TYPE_LOADING -> LoadingViewHolder(
                 ItemChatLoadingBinding.inflate(LayoutInflater.from(parent.context), parent, false)
             )
+            VIEW_TYPE_HARNESS -> harnessActivityRenderer.createViewHolder(parent)
             else -> throw IllegalArgumentException("未知的视图类型: $viewType")
         }
     }
@@ -107,6 +118,11 @@ class ChatAdapter(
             is UserMessageViewHolder -> holder.bind(message)
             is AssistantMessageViewHolder -> holder.bind(message)
             is LoadingViewHolder -> holder.bind(message)
+            is HarnessActivityRenderer.HarnessActivityViewHolder -> {
+                message.generateTaskState?.let { state ->
+                    holder.bind(state, effectiveTextColor, effectiveSecondaryColor, effectiveMutedColor)
+                }
+            }
         }
     }
 
@@ -129,6 +145,16 @@ class ChatAdapter(
                 is LoadingViewHolder -> {
                     if (payloads.contains(PAYLOAD_APPEARANCE_CHANGED)) holder.bind(message)
                     else holder.updateThinking(message.thinking)
+                }
+                is HarnessActivityRenderer.HarnessActivityViewHolder -> {
+                    message.generateTaskState?.let { state ->
+                        holder.bind(
+                            state,
+                            effectiveTextColor,
+                            effectiveSecondaryColor,
+                            effectiveMutedColor
+                        )
+                    }
                 }
                 else -> super.onBindViewHolder(holder, position, payloads)
             }
@@ -190,46 +216,94 @@ class ChatAdapter(
         }
 
         fun bind(message: ChatMessage) {
+            binding.tvAssistantStatus.setTextColor(effectiveMutedColor)
             bindRichText(binding.tvMessage, message.content, RichTextRole.ASSISTANT)
             bindImage(binding.ivImage, message.imagePath)
             bindStatus(message)
 
-            if (!message.appHtmlPath.isNullOrEmpty()) {
-                binding.webViewContainer.visibility = View.VISIBLE
-                setupWebView(message.appHtmlPath)
-            } else {
-                binding.webViewContainer.visibility = View.GONE
+            val previewReady = message.appHtmlPath
+                ?.takeIf(String::isNotBlank)
+                ?.let(::setupWebView) == true
+            binding.webViewContainer.visibility = if (previewReady) View.VISIBLE else View.GONE
+            if (!previewReady) {
                 clearWebViewOnly()
             }
         }
 
-        private fun setupWebView(htmlPath: String) {
+        private fun setupWebView(htmlPath: String): Boolean {
+            val snapshot = runCatching {
+                WebAppProjectResolver.resolve(File(htmlPath))
+            }.getOrElse {
+                return false
+            }
+            val isManagedProject = snapshot.kind != WebAppProjectSnapshotKind.LEGACY
+            val contentServer = if (isManagedProject) {
+                runCatching {
+                    WebProjectContentServer.create(
+                        projectRoot = snapshot.contentRoot,
+                        entryFile = snapshot.entryFile,
+                        projectId = snapshot.manifest.projectId,
+                        revision = snapshot.version?.let { version ->
+                            val prefix = if (snapshot.kind == WebAppProjectSnapshotKind.DRAFT) {
+                                "d"
+                            } else {
+                                "r"
+                            }
+                            "$prefix-$version"
+                        }
+                    )
+                }.getOrElse {
+                    return false
+                }
+            } else {
+                null
+            }
+
             ensureWebView().apply {
-                webViewClient = WebViewClient()
+                webViewClient = contentServer?.let { server ->
+                    object : WebViewClient() {
+                        override fun shouldInterceptRequest(
+                            view: WebView,
+                            request: WebResourceRequest
+                        ): WebResourceResponse? {
+                            return runCatching { server.intercept(request) }.getOrNull()
+                                ?: super.shouldInterceptRequest(view, request)
+                        }
+                    }
+                } ?: WebViewClient()
                 webChromeClient = WebChromeClient()
                 settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
-                    allowFileAccess = true
-                    allowContentAccess = true
+                    allowFileAccess = !isManagedProject
+                    allowContentAccess = !isManagedProject
                     cacheMode = WebSettings.LOAD_DEFAULT
                     useWideViewPort = true
                     loadWithOverviewMode = true
                 }
-                MantouWebViewRuntime.install(this, File(htmlPath))
+                if (contentServer != null) {
+                    MantouWebViewRuntime.install(
+                        webView = this,
+                        htmlFile = snapshot.entryFile,
+                        storageFile = WebAppProjectWorkspace.runtimeStateFile(snapshot.projectRoot)
+                    )
+                } else {
+                    MantouWebViewRuntime.install(this, snapshot.entryFile)
+                }
                 setOnTouchListener { view, event ->
                     if (event.action == MotionEvent.ACTION_DOWN) {
                         (view as? WebView)?.let { onActiveWebViewChanged?.invoke(it) }
                     }
                     false
                 }
-                loadUrl("file://$htmlPath")
+                loadUrl(contentServer?.entryUrl ?: "file://${snapshot.entryFile.absolutePath}")
                 onActiveWebViewChanged?.invoke(this)
             }
 
             binding.btnFullscreen.setOnClickListener {
                 onFullscreenClick?.invoke(htmlPath)
             }
+            return true
         }
 
         private fun ensureWebView(): WebView {
@@ -275,9 +349,7 @@ class ChatAdapter(
             binding.statusContainer.visibility = View.VISIBLE
             binding.tvStatus.text = statusText
             binding.tvStatus.textSize = (appearanceSettings.chatTextSizeSp - 3f).coerceAtLeast(12f)
-            binding.tvStatus.setTextColor(
-                ContextCompat.getColor(binding.root.context, R.color.mt_text_secondary)
-            )
+            binding.tvStatus.setTextColor(effectiveSecondaryColor)
 
             val dotVisibility = if (message.showStatusLoader) View.VISIBLE else View.GONE
             binding.dot1.visibility = dotVisibility
@@ -305,6 +377,7 @@ class ChatAdapter(
 
         fun bind(message: ChatMessage) {
             val context = binding.root.context
+            binding.tvLoadingStatus.setTextColor(effectiveMutedColor)
             binding.tvThinkingTitle.text = message.statusText ?: message.content.ifBlank { "正在处理" }
             binding.tvThinkingTitle.textSize = appearanceSettings.chatTextSizeSp
             binding.tvThinkingTitle.setTextColor(
@@ -340,14 +413,14 @@ class ChatAdapter(
         val palette = when (role) {
             RichTextRole.USER -> RichTextFormatter.Palette(
                 textColor = effectiveTextColor,
-                secondaryColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
+                secondaryColor = effectiveSecondaryColor,
                 accentColor = effectiveTextColor,
                 codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
             )
             RichTextRole.ASSISTANT -> RichTextFormatter.Palette(
                 textColor = effectiveTextColor,
-                secondaryColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
+                secondaryColor = effectiveSecondaryColor,
                 accentColor = effectiveTextColor,
                 codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
                 codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
@@ -471,6 +544,12 @@ class ChatAdapter(
             autoTextColor
         }
 
+    private val effectiveSecondaryColor: Int
+        get() = ColorUtils.setAlphaComponent(effectiveTextColor, 184)
+
+    private val effectiveMutedColor: Int
+        get() = ColorUtils.setAlphaComponent(effectiveTextColor, 145)
+
     private enum class RichTextRole {
         USER,
         ASSISTANT,
@@ -491,6 +570,7 @@ class ChatMessageDiffCallback : DiffUtil.ItemCallback<ChatMessage>() {
     override fun getChangePayload(oldItem: ChatMessage, newItem: ChatMessage): Any? {
         if (oldItem.messageId == newItem.messageId &&
             oldItem.role == newItem.role &&
+            oldItem.appHtmlPath == newItem.appHtmlPath &&
             (oldItem.content != newItem.content ||
                 oldItem.statusText != newItem.statusText ||
                 oldItem.showStatusLoader != newItem.showStatusLoader) &&

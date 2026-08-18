@@ -3,10 +3,15 @@ package com.hfad.mantou.viewmodel
 import android.app.Application
 import android.net.Uri
 import android.util.Log
+import android.view.View
+import android.webkit.WebView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.data.GenerateTaskState
 import com.hfad.mantou.data.api.ApiConfig
@@ -21,17 +26,48 @@ import com.hfad.mantou.data.database.ChatMessageEntity
 import com.hfad.mantou.data.database.ChatSessionEntity
 import com.hfad.mantou.data.preferences.ContextLimitStore
 import com.hfad.mantou.data.repository.ChatRepository
+import com.hfad.mantou.service.HarnessForegroundServiceController
+import com.hfad.mantou.service.HarnessProgress
+import com.hfad.mantou.service.HarnessProgressReporter
+import com.hfad.mantou.service.HarnessProgressStatus
+import com.hfad.mantou.service.HarnessServiceRequest
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.AppGenerator
 import com.hfad.mantou.utils.AppIntentDetector
 import com.hfad.mantou.utils.ChatContextFormatter
 import com.hfad.mantou.utils.ErrorAnalyzer
+import com.hfad.mantou.utils.GenerationInputFilter
 import com.hfad.mantou.utils.ImageUtils
 import com.hfad.mantou.utils.LocalDiffFileTool
+import com.hfad.mantou.utils.harness.AppHarnessOrchestrator
+import com.hfad.mantou.utils.harness.GeneratedAppHarnessScripts
+import com.hfad.mantou.utils.harness.GeneratedAppWebViewInspector
+import com.hfad.mantou.utils.harness.HarnessBuilder
+import com.hfad.mantou.utils.harness.HarnessCheckResult
+import com.hfad.mantou.utils.harness.HarnessFileTool
+import com.hfad.mantou.utils.harness.HarnessLimits
+import com.hfad.mantou.utils.harness.HarnessRunRequest
+import com.hfad.mantou.utils.harness.HarnessRunResult
+import com.hfad.mantou.utils.harness.HarnessToolResult
+import com.hfad.mantou.utils.harness.StreamingHarnessModelRepair
+import com.hfad.mantou.utils.harness.WebInspectionReport
+import com.hfad.mantou.utils.harness.WebInspectionTarget
+import com.hfad.mantou.utils.harness.WebViewHarnessInspectorAdapter
+import com.hfad.mantou.utils.project.StreamingWebProjectPlanner
+import com.hfad.mantou.utils.project.WebAppProjectFileRole
+import com.hfad.mantou.utils.project.WebAppProjectManifest
+import com.hfad.mantou.utils.project.WebAppProjectResolver
+import com.hfad.mantou.utils.project.WebAppProjectSnapshot
+import com.hfad.mantou.utils.project.WebAppProjectSnapshotKind
+import com.hfad.mantou.utils.project.WebAppProjectWorkspace
+import com.hfad.mantou.utils.project.WebAppProjectValidator
+import com.hfad.mantou.utils.project.WebProjectFileTool
+import com.hfad.mantou.utils.project.WebProjectPlanParser
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -40,6 +76,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -94,10 +131,112 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val requestInterruptedFallback = "出错了，请稍后重试。"
     private val requestFailedSuffix = "\n\n出错了，请稍后重试。"
     private val assistantStreamingPlaceholder = "\u200B"
+    private var serviceProgressStates: Map<String, HarnessProgress> = emptyMap()
 
     init {
         AgentWorkspace.ensureWorkspace(application)
         refreshActiveModel()
+        observeHarnessServiceProgress()
+    }
+
+    private fun observeHarnessServiceProgress() {
+        viewModelScope.launch {
+            HarnessForegroundServiceController.states.collect { states ->
+                serviceProgressStates = states
+                states.values.forEach(::mergeDetachedHarnessProgress)
+                updateSessionLoadingIndicators()
+            }
+        }
+    }
+
+    private fun mergeDetachedHarnessProgress(progress: HarnessProgress) {
+        val sessionId = progress.sessionId ?: return
+        if (streamingStates.containsKey(sessionId)) return
+        val current = _generateTaskStates.value.orEmpty()[sessionId]
+        if (current != null && current.updatedAt >= progress.updatedAt) return
+
+        val phase = when (progress.status) {
+            HarnessProgressStatus.SUCCEEDED -> GenerateTaskState.Phase.COMPLETED
+            HarnessProgressStatus.FAILED,
+            HarnessProgressStatus.CANCELLED -> GenerateTaskState.Phase.ERROR
+            HarnessProgressStatus.RUNNING -> progress.stage.toGenerateTaskPhase()
+        }
+        val outcome = when (progress.status) {
+            HarnessProgressStatus.RUNNING -> if (
+                progress.message.contains("重试") || progress.message.contains("修复")
+            ) {
+                GenerateTaskState.Outcome.RETRYING
+            } else {
+                GenerateTaskState.Outcome.RUNNING
+            }
+            HarnessProgressStatus.SUCCEEDED -> GenerateTaskState.Outcome.PASSED
+            HarnessProgressStatus.FAILED,
+            HarnessProgressStatus.CANCELLED -> GenerateTaskState.Outcome.FAILED
+        }
+        val eventStage = progress.stage?.let { stage ->
+            runCatching { GenerateTaskState.Stage.valueOf(stage) }.getOrNull()
+        }
+        val base = current ?: GenerateTaskState(
+            sessionId = sessionId,
+            phase = phase,
+            status = progress.message
+        )
+        var projected = base.copy(
+            phase = phase,
+            status = progress.message,
+            harnessIteration = maxOf(base.harnessIteration, progress.iteration),
+            diagnostics = progress.diagnostics,
+            updatedAt = progress.updatedAt
+        )
+        val lastEvent = projected.harnessEvents.lastOrNull()
+        if (eventStage != null && (
+                lastEvent?.stage != eventStage ||
+                    lastEvent.outcome != outcome ||
+                    lastEvent.message != progress.message
+                )
+        ) {
+            projected = projected.appendHarnessEvent(
+                GenerateTaskState.HarnessEvent(
+                    stage = eventStage,
+                    outcome = outcome,
+                    message = progress.message,
+                    iteration = progress.iteration,
+                    diagnostics = progress.diagnostics,
+                    timestamp = progress.updatedAt
+                )
+            )
+        }
+        val allStates = _generateTaskStates.value.orEmpty().toMutableMap()
+        allStates[sessionId] = projected
+        _generateTaskStates.value = allStates
+    }
+
+    private fun String?.toGenerateTaskPhase(): GenerateTaskState.Phase {
+        return when (this) {
+            GenerateTaskState.Stage.INPUT.name -> GenerateTaskState.Phase.SANITIZING
+            GenerateTaskState.Stage.PROMPT.name -> GenerateTaskState.Phase.PROMPTING
+            GenerateTaskState.Stage.MODEL.name -> GenerateTaskState.Phase.REQUESTING_MODEL
+            GenerateTaskState.Stage.TOOL.name -> GenerateTaskState.Phase.APPLYING_TOOL
+            GenerateTaskState.Stage.BUILD.name -> GenerateTaskState.Phase.BUILDING
+            GenerateTaskState.Stage.INSPECT.name -> GenerateTaskState.Phase.INSPECTING
+            GenerateTaskState.Stage.SELF_TEST.name -> GenerateTaskState.Phase.SELF_TESTING
+            GenerateTaskState.Stage.TEST.name -> GenerateTaskState.Phase.TESTING
+            GenerateTaskState.Stage.DELIVER.name -> GenerateTaskState.Phase.COMPLETED
+            GenerateTaskState.Phase.SANITIZING.name -> GenerateTaskState.Phase.SANITIZING
+            GenerateTaskState.Phase.PROMPTING.name -> GenerateTaskState.Phase.PROMPTING
+            GenerateTaskState.Phase.PREPARING.name -> GenerateTaskState.Phase.PREPARING
+            GenerateTaskState.Phase.REQUESTING_MODEL.name -> GenerateTaskState.Phase.REQUESTING_MODEL
+            GenerateTaskState.Phase.WRITING_INITIAL.name -> GenerateTaskState.Phase.WRITING_INITIAL
+            GenerateTaskState.Phase.WRITING_DIFF.name -> GenerateTaskState.Phase.WRITING_DIFF
+            GenerateTaskState.Phase.APPLYING_DIFF.name -> GenerateTaskState.Phase.APPLYING_DIFF
+            GenerateTaskState.Phase.APPLYING_TOOL.name -> GenerateTaskState.Phase.APPLYING_TOOL
+            GenerateTaskState.Phase.BUILDING.name -> GenerateTaskState.Phase.BUILDING
+            GenerateTaskState.Phase.INSPECTING.name -> GenerateTaskState.Phase.INSPECTING
+            GenerateTaskState.Phase.SELF_TESTING.name -> GenerateTaskState.Phase.SELF_TESTING
+            GenerateTaskState.Phase.TESTING.name -> GenerateTaskState.Phase.TESTING
+            GenerateTaskState.Phase.REPAIRING.name -> GenerateTaskState.Phase.REPAIRING
+            else -> GenerateTaskState.Phase.PREPARING
+        }
     }
 
     fun refreshActiveModel() {
@@ -185,7 +324,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 generateResponseForPersistedUserMessage(state, config, content, imageBase64List)
             } finally {
-                finishStreamingState(state)
+                if (!state.isServiceOwned) {
+                    finishStreamingState(state)
+                }
             }
         }
     }
@@ -226,12 +367,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             repository.markSessionAsGenerate(state.sessionId, sessionRouting.appHtmlPath)
             val existingFile = sessionRouting.appHtmlPath
                 ?.let(::File)
-                ?.takeIf { it.isFile }
-            if (existingFile != null) {
-                generateAppDiffFlow(state, config, content, existingFile)
-            } else {
-                generateAppFlow(state, config, content)
-            }
+                ?.takeIf { it.exists() }
+            launchAppGenerationService(state, config, content, existingFile)
             return
         }
 
@@ -257,7 +394,935 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 status = "正在准备初版应用"
             )
         )
-        generateAppFlow(state, config, content)
+        launchAppGenerationService(state, config, content)
+    }
+
+    private suspend fun launchAppGenerationService(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        userMessage: String,
+        existingFile: File? = null
+    ) {
+        if (state.serviceJob?.isActive == true) return
+
+        val runId = "harness-${state.sessionId}-${System.currentTimeMillis()}"
+        val request = HarnessServiceRequest(
+            runId = runId,
+            sessionId = state.sessionId,
+            title = "ManTou Harness",
+            initialMessage = if (existingFile == null) {
+                "正在后台生成应用"
+            } else {
+                "正在后台修改应用"
+            },
+            initialStage = "准备中"
+        )
+        state.serviceRunId = runId
+        state.isServiceOwned = true
+        state.isGeneratingApp = true
+        updateSessionLoadingIndicators()
+
+        try {
+            state.serviceJob = HarnessForegroundServiceController.launch(
+                context = getApplication<Application>(),
+                request = request
+            ) { reporter ->
+                state.harnessProgressReporter = reporter
+                var workerFailure: Throwable? = null
+                try {
+                    generateWebProjectFlow(
+                        state = state,
+                        config = config,
+                        userMessage = userMessage,
+                        existingFile = existingFile
+                    )
+                } catch (error: Throwable) {
+                    workerFailure = error
+                    throw error
+                } finally {
+                    withContext(NonCancellable + Dispatchers.Main.immediate) {
+                        state.harnessProgressReporter = null
+                        state.serviceJob = null
+                        state.isServiceOwned = false
+                        val unfinishedState = _generateTaskStates.value.orEmpty()[state.sessionId]
+                        if (unfinishedState?.isRunning != false) {
+                            val terminalMessage = when (workerFailure) {
+                                is CancellationException -> workerFailure.message ?: "生成任务已停止"
+                                null -> "生成任务未完成"
+                                else -> workerFailure.message ?: "Harness 执行失败"
+                            }
+                            updateGenerateTaskState(
+                                unfinishedState?.copy(
+                                    phase = GenerateTaskState.Phase.ERROR,
+                                    status = terminalMessage,
+                                    updatedAt = System.currentTimeMillis()
+                                ) ?: GenerateTaskState(
+                                    sessionId = state.sessionId,
+                                    phase = GenerateTaskState.Phase.ERROR,
+                                    status = terminalMessage
+                                )
+                            )
+                        }
+                        if (workerFailure is CancellationException &&
+                            state.userMessagePersisted &&
+                            !state.hasFinalAssistantMessage
+                        ) {
+                            addFinalAssistantMessage(state, "生成任务已停止。")
+                        }
+                        try {
+                            finishStreamingState(state)
+                        } finally {
+                            val taskState = _generateTaskStates.value.orEmpty()[state.sessionId]
+                            when {
+                                workerFailure is CancellationException -> reporter.cancel("生成任务已停止")
+                                taskState?.phase == GenerateTaskState.Phase.COMPLETED -> reporter.succeed(
+                                    message = taskState.status,
+                                    diagnostics = taskState.diagnostics
+                                )
+                                taskState?.phase == GenerateTaskState.Phase.ERROR -> reporter.fail(
+                                    message = taskState.status,
+                                    diagnostics = taskState.diagnostics
+                                )
+                                workerFailure != null -> reporter.fail(
+                                    message = workerFailure.message ?: "Harness 执行失败"
+                                )
+                                else -> reporter.fail("生成任务未完成")
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (error: Exception) {
+            state.serviceRunId = null
+            state.isServiceOwned = false
+            state.isGeneratingApp = false
+            updateSessionLoadingIndicators()
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.PREPARING,
+                stage = GenerateTaskState.Stage.PROMPT,
+                outcome = GenerateTaskState.Outcome.RETRYING,
+                message = "后台服务启动失败，已切回当前页面继续执行",
+                diagnostics = listOfNotNull(error.message)
+            )
+            generateWebProjectFlow(
+                state = state,
+                config = config,
+                userMessage = userMessage,
+                existingFile = existingFile
+            )
+        }
+    }
+
+    private suspend fun generateWebProjectFlow(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        userMessage: String,
+        existingFile: File? = null
+    ) {
+        val application = getApplication<Application>()
+        val filteredInput = GenerationInputFilter.filter(userMessage)
+        val isModification = existingFile != null
+        var inspector: GeneratedAppWebViewInspector? = null
+        var inspectorWebView: WebView? = null
+
+        state.isGeneratingApp = true
+        withContext(Dispatchers.Main.immediate) {
+            replaceGenerateTaskState(
+                GenerateTaskState(
+                    sessionId = state.sessionId,
+                    phase = GenerateTaskState.Phase.SANITIZING,
+                    status = if (isModification) {
+                        "正在准备多文件项目修改"
+                    } else {
+                        "正在准备多文件项目规划"
+                    },
+                    isModification = isModification
+                )
+            )
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.SANITIZING,
+                stage = GenerateTaskState.Stage.INPUT,
+                outcome = GenerateTaskState.Outcome.PASSED,
+                message = filteredInput.notices.firstOrNull() ?: "用户输入已过滤并建立安全边界",
+                diagnostics = filteredInput.notices,
+                isModification = isModification
+            )
+            state.thinkingContent.clear()
+            addStreamingPlaceholder(
+                state = state,
+                status = if (isModification) "正在读取项目" else "正在规划项目",
+                useLoadingLayout = true
+            )
+            updateStreamingThinking(
+                state,
+                if (isModification) {
+                    "正在解析现有项目并创建可安全修改的草稿..."
+                } else {
+                    "正在发起独立项目规划请求，确定文件结构与职责..."
+                },
+                force = true
+            )
+        }
+
+        try {
+            val preparedProject = if (existingFile == null) {
+                planAndCreateWebProject(state, config, filteredInput.promptPayload)
+            } else {
+                withContext(Dispatchers.IO) {
+                    prepareExistingWebProject(existingFile)
+                }
+            }
+            val binding = MutableWebProjectBinding(
+                workspace = preparedProject.workspace,
+                projectRoot = preparedProject.snapshot.projectRoot,
+                contentRoot = preparedProject.snapshot.contentRoot,
+                manifest = preparedProject.snapshot.manifest,
+                draftVersion = requireNotNull(preparedProject.snapshot.version) {
+                    "多文件项目草稿缺少版本号"
+                }
+            )
+            val projectFileTool = withContext(Dispatchers.IO) {
+                WebProjectFileTool(binding.contentRoot).also { tool ->
+                    ensureProjectEntryIdentity(binding, tool)
+                }
+            }
+            val initialProjectFiles = withContext(Dispatchers.IO) {
+                projectFilePaths(projectFileTool)
+            }
+            val initialPreview = withContext(Dispatchers.IO) {
+                when {
+                    binding.entryFile.isFile -> projectFileTool.read(binding.manifest.entryPoint).content
+                    File(binding.contentRoot, PROJECT_PLAN_FILE_NAME).isFile -> {
+                        projectFileTool.read(PROJECT_PLAN_FILE_NAME).content
+                    }
+                    else -> ""
+                }
+            }
+
+            withContext(Dispatchers.Main.immediate) {
+                updateProjectFileState(
+                    state = state,
+                    relativePath = if (binding.entryFile.isFile) {
+                        binding.manifest.entryPoint
+                    } else {
+                        PROJECT_PLAN_FILE_NAME
+                    },
+                    content = initialPreview,
+                    entryPath = binding.entryFile.absolutePath,
+                    projectFiles = initialProjectFiles,
+                    isModification = isModification
+                )
+                updateHarnessStage(
+                    state = state,
+                    phase = GenerateTaskState.Phase.PROMPTING,
+                    stage = GenerateTaskState.Stage.PROMPT,
+                    outcome = GenerateTaskState.Outcome.RUNNING,
+                    message = "正在组装项目计划、设备上下文和代码工具协议",
+                    filePath = binding.entryFile.absolutePath,
+                    isModification = isModification
+                )
+            }
+
+            val projectSystemPrompt = withContext(Dispatchers.Default) {
+                AppGenerator.buildProjectSystemPrompt(
+                    context = application,
+                    userMessage = filteredInput.content,
+                    isModification = isModification
+                )
+            }
+            val modelRepair = StreamingHarnessModelRepair(
+                config = config,
+                maxTokens = AppGenerator.resolveProjectFileOutputLimit(
+                    ContextLimitStore.getTokenLimit(application)
+                ),
+                onThinking = { delta ->
+                    withContext(Dispatchers.Main.immediate) {
+                        state.thinkingContent.append(delta)
+                        updateStreamingThinking(state, state.thinkingContent.toString())
+                    }
+                },
+                onProgress = { progress ->
+                    withContext(Dispatchers.Main.immediate) {
+                        if (state.thinkingContent.isBlank()) {
+                            updateStreamingThinking(
+                                state,
+                                "正在执行第 ${progress.iteration} 轮多文件编排 · " +
+                                    "已接收 ${progress.receivedChars} 字符",
+                                force = progress.receivedChars == 0
+                            )
+                        }
+                        state.harnessProgressReporter?.report(
+                            message = "模型正在编排项目文件 · ${progress.receivedChars} 字符",
+                            stage = GenerateTaskState.Stage.MODEL.name,
+                            iteration = progress.iteration,
+                            progress = 25
+                        )
+                    }
+                }
+            )
+            val harnessFileTool = createWebProjectHarnessFileTool(
+                state = state,
+                binding = binding,
+                projectFileTool = projectFileTool,
+                isModification = isModification
+            )
+
+            inspectorWebView = withContext(Dispatchers.Main.immediate) {
+                WebView(application)
+            }
+            inspector = GeneratedAppWebViewInspector(
+                webView = inspectorWebView,
+                prepareWebView = ::prepareHarnessWebView
+            )
+            val inspectionAdapter = WebViewHarnessInspectorAdapter(inspector)
+            val projectBuilder = HarnessBuilder { checkRequest ->
+                val validation = withContext(Dispatchers.IO) {
+                    WebAppProjectValidator().validate(binding.manifest, binding.contentRoot)
+                }
+                if (!validation.passed) {
+                    HarnessCheckResult(
+                        passed = false,
+                        summary = "项目清单或本地依赖未通过构建检查",
+                        diagnostics = validation.diagnostics.map { diagnostic ->
+                            buildString {
+                                append(diagnostic.severity.name)
+                                append(' ').append(diagnostic.code).append(": ")
+                                append(diagnostic.message)
+                                diagnostic.path?.let { append(" [").append(it).append(']') }
+                            }
+                        },
+                        artifactPath = binding.entryFile.absolutePath
+                    )
+                } else {
+                    inspectionAdapter.build(checkRequest)
+                }
+            }
+            val orchestrator = AppHarnessOrchestrator(
+                modelRepair = modelRepair,
+                fileTool = harnessFileTool,
+                builder = projectBuilder,
+                inspector = inspectionAdapter,
+                testRunner = inspectionAdapter,
+                limits = HarnessLimits(
+                    maxCodeIterations = GENERATED_APP_HARNESS_MAX_ITERATIONS,
+                    maxModelTurnsPerIteration = WEB_PROJECT_MAX_MODEL_TURNS,
+                    maxToolCallsPerIteration = WEB_PROJECT_MAX_TOOL_CALLS
+                )
+            )
+            val runId = state.serviceRunId
+                ?: "harness-${state.sessionId}-${System.currentTimeMillis()}"
+            val result = withContext(Dispatchers.Default) {
+                orchestrator.run(
+                    HarnessRunRequest(
+                        runId = runId,
+                        workspacePath = binding.contentRoot.absolutePath,
+                        systemPrompt = projectSystemPrompt,
+                        userInput = filteredInput.content,
+                        artifactPath = binding.entryFile.absolutePath,
+                        selfTestScript = GeneratedAppHarnessScripts.selfTest,
+                        testSuiteScript = GeneratedAppHarnessScripts.testSuite,
+                        metadata = mapOf("projectId" to binding.manifest.projectId)
+                    )
+                ) { event ->
+                    val projectFiles = withContext(Dispatchers.IO) {
+                        projectFilePaths(projectFileTool)
+                    }
+                    withContext(Dispatchers.Main.immediate) {
+                        updateProjectHarnessEvent(
+                            state = state,
+                            event = event,
+                            isModification = isModification,
+                            entryPath = binding.entryFile.absolutePath,
+                            projectFiles = projectFiles
+                        )
+                    }
+                }
+            }
+
+            when (result) {
+                is HarnessRunResult.Delivered -> {
+                    val release = withContext(Dispatchers.IO) {
+                        synchronizeProjectManifest(binding, projectFileTool)
+                        ensureProjectEntryIdentity(binding, projectFileTool)
+                        binding.workspace.publishDraft(
+                            projectRoot = binding.projectRoot,
+                            draftVersion = binding.draftVersion,
+                            manifest = binding.manifest
+                        )
+                    }
+                    completeGeneratedWebProject(
+                        state = state,
+                        release = release,
+                        isModification = isModification,
+                        iteration = result.iterations
+                    )
+                }
+
+                is HarnessRunResult.Failed -> {
+                    failGeneratedWebProject(
+                        state = state,
+                        message = result.reason,
+                        diagnostics = result.diagnostics,
+                        entryPath = result.artifactPath ?: binding.entryFile.absolutePath,
+                        isModification = isModification
+                    )
+                }
+            }
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            failGeneratedWebProject(
+                state = state,
+                message = error.message ?: "多文件项目生成失败",
+                diagnostics = listOf(error.message ?: error::class.java.simpleName),
+                entryPath = existingFile?.absolutePath,
+                isModification = isModification
+            )
+            throw error
+        } finally {
+            withContext(NonCancellable + Dispatchers.Main.immediate) {
+                inspector?.cancelCurrentInspection()
+                inspectorWebView?.let { webView ->
+                    webView.stopLoading()
+                    webView.removeAllViews()
+                    webView.destroy()
+                }
+                state.isGeneratingApp = false
+                updateSessionLoadingIndicators()
+            }
+        }
+    }
+
+    private suspend fun planAndCreateWebProject(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        userRequirement: String
+    ): PreparedWebProject {
+        withContext(Dispatchers.Main.immediate) {
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.PROMPTING,
+                stage = GenerateTaskState.Stage.PROMPT,
+                outcome = GenerateTaskState.Outcome.RUNNING,
+                message = "正在请求模型规划项目文件与依赖顺序"
+            )
+        }
+        val planner = StreamingWebProjectPlanner(
+            config = config,
+            maxTokens = minOf(
+                WEB_PROJECT_PLAN_MAX_TOKENS,
+                ContextLimitStore.getTokenLimit(getApplication())
+            ).coerceAtLeast(1),
+            onThinking = { delta ->
+                withContext(Dispatchers.Main.immediate) {
+                    state.thinkingContent.append(delta)
+                    updateStreamingThinking(state, state.thinkingContent.toString())
+                }
+            },
+            onProgress = { receivedChars ->
+                withContext(Dispatchers.Main.immediate) {
+                    if (state.thinkingContent.isBlank()) {
+                        updateStreamingThinking(
+                            state,
+                            "正在接收项目规划 · $receivedChars 字符"
+                        )
+                    }
+                    state.harnessProgressReporter?.report(
+                        message = "正在规划多文件项目 · $receivedChars 字符",
+                        stage = GenerateTaskState.Stage.PROMPT.name,
+                        iteration = 0,
+                        progress = 12
+                    )
+                }
+            }
+        )
+        val planningResult = withContext(Dispatchers.Default) {
+            planner.plan(userRequirement)
+        }
+        val workspace = WebAppProjectWorkspace()
+        val snapshot = withContext(Dispatchers.IO) {
+            val projectRoot = nextWebProjectRoot(
+                displayName = planningResult.manifest.displayName,
+                projectId = planningResult.manifest.projectId
+            )
+            workspace.create(projectRoot, planningResult.manifest).also { draft ->
+                WebProjectFileTool(draft.contentRoot).write(
+                    path = PROJECT_PLAN_FILE_NAME,
+                    content = planningResult.projectPlanJson,
+                    createOnly = true
+                )
+            }
+        }
+        withContext(Dispatchers.Main.immediate) {
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.APPLYING_TOOL,
+                stage = GenerateTaskState.Stage.TOOL,
+                outcome = GenerateTaskState.Outcome.PASSED,
+                message = "项目计划已创建 · ${planningResult.manifest.files.size - 1} 个代码文件",
+                filePath = snapshot.entryFile.absolutePath
+            )
+            updateProjectFileState(
+                state = state,
+                relativePath = PROJECT_PLAN_FILE_NAME,
+                content = planningResult.projectPlanJson,
+                entryPath = snapshot.entryFile.absolutePath,
+                projectFiles = listOf(PROJECT_PLAN_FILE_NAME),
+                isModification = false
+            )
+        }
+        return PreparedWebProject(workspace, snapshot)
+    }
+
+    private fun prepareExistingWebProject(input: File): PreparedWebProject {
+        val workspace = WebAppProjectWorkspace()
+        val resolved = WebAppProjectResolver.resolve(input)
+        val draft = when (resolved.kind) {
+            WebAppProjectSnapshotKind.LEGACY -> {
+                val adoptedDraft = workspace.adoptLegacy(resolved)
+                workspace.publishDraft(
+                    projectRoot = adoptedDraft.projectRoot,
+                    draftVersion = requireNotNull(adoptedDraft.version),
+                    manifest = adoptedDraft.manifest
+                )
+                workspace.createDraft(adoptedDraft.projectRoot)
+            }
+            WebAppProjectSnapshotKind.RELEASE -> workspace.createDraft(resolved.projectRoot)
+            WebAppProjectSnapshotKind.DRAFT -> resolved
+        }
+        val synchronizedDraft = ensureVisibleProjectPlan(draft)
+        return PreparedWebProject(workspace, synchronizedDraft)
+    }
+
+    private fun ensureVisibleProjectPlan(draft: WebAppProjectSnapshot): WebAppProjectSnapshot {
+        val fileTool = WebProjectFileTool(draft.contentRoot)
+        val visiblePlan = File(draft.contentRoot, PROJECT_PLAN_FILE_NAME)
+        val parsedManifest = visiblePlan
+            .takeIf(File::isFile)
+            ?.let { planFile ->
+                runCatching {
+                    WebProjectPlanParser.parse(planFile.readText()).manifest.copy(
+                        projectId = draft.manifest.projectId,
+                        stateFile = draft.manifest.stateFile
+                    )
+                }.getOrNull()
+            }
+            ?.takeIf { manifest ->
+                manifest.entryPoint == draft.manifest.entryPoint &&
+                    manifest.files.any { it.role == WebAppProjectFileRole.STYLE } &&
+                    manifest.files.any { it.role == WebAppProjectFileRole.SCRIPT }
+            }
+
+        val manifest = parsedManifest ?: buildMigrationManifest(draft, fileTool)
+        val planJson = renderVisibleProjectPlan(manifest)
+        if (!visiblePlan.isFile || visiblePlan.readText() != planJson) {
+            fileTool.write(PROJECT_PLAN_FILE_NAME, planJson)
+        }
+        return draft.copy(
+            manifest = manifest,
+            entryFile = File(draft.contentRoot, manifest.entryPoint).canonicalFile
+        )
+    }
+
+    private fun buildMigrationManifest(
+        draft: WebAppProjectSnapshot,
+        fileTool: WebProjectFileTool
+    ): WebAppProjectManifest {
+        val existingFiles = fileTool.list(".", recursive = true)
+            .asSequence()
+            .filterNot { it.directory }
+            .map { it.path }
+            .filterNot { it == PROJECT_PLAN_FILE_NAME }
+            .distinct()
+            .toMutableList()
+        if (draft.manifest.entryPoint !in existingFiles) {
+            existingFiles.add(0, draft.manifest.entryPoint)
+        }
+        if (existingFiles.none { it.endsWith(".css", ignoreCase = true) }) {
+            existingFiles += DEFAULT_PROJECT_STYLE_PATH
+        }
+        if (existingFiles.none {
+                it.endsWith(".js", ignoreCase = true) || it.endsWith(".mjs", ignoreCase = true)
+            }
+        ) {
+            existingFiles += DEFAULT_PROJECT_SCRIPT_PATH
+        }
+        val prioritizedFiles = existingFiles
+            .distinct()
+            .sortedWith(
+                compareBy<String> { it != draft.manifest.entryPoint }
+                    .thenBy { projectRoleForPath(it).ordinal }
+                    .thenBy(String::lowercase)
+            )
+            .take(WEB_PROJECT_MAX_PLANNED_FILES)
+        val requiredPaths = buildList {
+            add(draft.manifest.entryPoint)
+            if (DEFAULT_PROJECT_STYLE_PATH in existingFiles) add(DEFAULT_PROJECT_STYLE_PATH)
+            if (DEFAULT_PROJECT_SCRIPT_PATH in existingFiles) add(DEFAULT_PROJECT_SCRIPT_PATH)
+            addAll(prioritizedFiles)
+        }.distinct().take(WEB_PROJECT_MAX_PLANNED_FILES)
+        return draft.manifest.copy(
+            files = buildList {
+                add(
+                    com.hfad.mantou.utils.project.WebAppProjectFile(
+                        PROJECT_PLAN_FILE_NAME,
+                        WebAppProjectFileRole.OTHER
+                    )
+                )
+                requiredPaths.forEach { path ->
+                    add(
+                        com.hfad.mantou.utils.project.WebAppProjectFile(
+                            path = path,
+                            role = if (path == draft.manifest.entryPoint) {
+                                WebAppProjectFileRole.ENTRY
+                            } else {
+                                projectRoleForPath(path)
+                            }
+                        )
+                    )
+                }
+            }
+        )
+    }
+
+    private fun createWebProjectHarnessFileTool(
+        state: StreamingSessionState,
+        binding: MutableWebProjectBinding,
+        projectFileTool: WebProjectFileTool,
+        isModification: Boolean
+    ): HarnessFileTool {
+        return HarnessFileTool { request ->
+            val call = request.call
+            val requestedPath = call.arguments[WebProjectFileTool.ARG_PATH]
+            val result = when {
+                call.name == WebProjectFileTool.TOOL_DELETE_FILE &&
+                    requestedPath == PROJECT_PLAN_FILE_NAME -> {
+                    com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
+                        success = false,
+                        output = "project.json 由编排器维护，不能删除",
+                        diagnostics = listOf("PROJECT_PLAN_DELETE_FORBIDDEN")
+                    )
+                }
+
+                call.name == WebProjectFileTool.TOOL_WRITE_FILE &&
+                    requestedPath == PROJECT_PLAN_FILE_NAME -> {
+                    updateVisibleProjectPlan(binding, projectFileTool, call.arguments)
+                }
+
+                call.name == WebProjectFileTool.TOOL_WRITE_FILE &&
+                    requestedPath != null && requestedPath !in binding.declaredPaths -> {
+                    com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
+                        success = false,
+                        output = "写入新文件前必须先把路径加入 project.json：$requestedPath",
+                        diagnostics = listOf("PROJECT_FILE_NOT_DECLARED: $requestedPath")
+                    )
+                }
+
+                call.name == WebProjectFileTool.TOOL_DELETE_FILE &&
+                    requestedPath != null && requestedPath in binding.declaredPaths -> {
+                    com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
+                        success = false,
+                        output = "删除文件前必须先从 project.json 移除声明：$requestedPath",
+                        diagnostics = listOf("PROJECT_FILE_STILL_DECLARED: $requestedPath")
+                    )
+                }
+
+                else -> {
+                    val arguments = if (
+                        call.name == WebProjectFileTool.TOOL_WRITE_FILE &&
+                        requestedPath == binding.manifest.entryPoint
+                    ) {
+                        call.arguments + (
+                            WebProjectFileTool.ARG_CONTENT to AppGenerator.ensureWebAppIdentity(
+                                call.arguments[WebProjectFileTool.ARG_CONTENT].orEmpty()
+                            )
+                        )
+                    } else {
+                        call.arguments
+                    }
+                    projectFileTool.execute(call.name, arguments)
+                }
+            }
+
+            if (result.success && result.changedFiles.isNotEmpty()) {
+                val projectFiles = projectFilePaths(projectFileTool)
+                val activePath = result.changedFiles.last()
+                val activeContent = runCatching { projectFileTool.read(activePath).content }
+                    .getOrDefault("")
+                withContext(Dispatchers.Main.immediate) {
+                    updateProjectFileState(
+                        state = state,
+                        relativePath = activePath,
+                        content = activeContent,
+                        entryPath = binding.entryFile.absolutePath,
+                        projectFiles = projectFiles,
+                        isModification = isModification
+                    )
+                }
+            }
+            HarnessToolResult(
+                callId = call.id,
+                success = result.success,
+                output = result.output,
+                diagnostics = result.diagnostics,
+                changedFiles = result.changedFiles,
+                artifactPath = binding.entryFile.absolutePath
+            )
+        }
+    }
+
+    private fun updateVisibleProjectPlan(
+        binding: MutableWebProjectBinding,
+        projectFileTool: WebProjectFileTool,
+        arguments: Map<String, String>
+    ): com.hfad.mantou.utils.project.WebProjectToolExecutionResult {
+        val content = arguments[WebProjectFileTool.ARG_CONTENT]
+            ?: return com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
+                success = false,
+                output = "write_file requires argument: content",
+                diagnostics = listOf("PROJECT_PLAN_CONTENT_MISSING")
+            )
+        val parsedManifest = runCatching {
+            WebProjectPlanParser.parse(content).manifest.copy(
+                projectId = binding.manifest.projectId,
+                stateFile = binding.manifest.stateFile
+            )
+        }.getOrElse { error ->
+            return com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
+                success = false,
+                output = error.message ?: "project.json 格式无效",
+                diagnostics = listOf("PROJECT_PLAN_INVALID: ${error.message.orEmpty()}")
+            )
+        }
+        if (parsedManifest.entryPoint != binding.manifest.entryPoint) {
+            return com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
+                success = false,
+                output = "当前任务不能改变项目入口 ${binding.manifest.entryPoint}",
+                diagnostics = listOf("PROJECT_ENTRY_CHANGE_FORBIDDEN")
+            )
+        }
+
+        val writeResult = projectFileTool.execute(
+            WebProjectFileTool.TOOL_WRITE_FILE,
+            arguments + (WebProjectFileTool.ARG_CONTENT to renderVisibleProjectPlan(parsedManifest))
+        )
+        if (!writeResult.success) return writeResult
+        binding.manifest = parsedManifest
+        return writeResult
+    }
+
+    private fun synchronizeProjectManifest(
+        binding: MutableWebProjectBinding,
+        projectFileTool: WebProjectFileTool
+    ) {
+        val planContent = projectFileTool.read(PROJECT_PLAN_FILE_NAME).content
+        val parsedManifest = WebProjectPlanParser.parse(planContent).manifest.copy(
+            projectId = binding.manifest.projectId,
+            stateFile = binding.manifest.stateFile
+        )
+        require(parsedManifest.entryPoint == binding.manifest.entryPoint) {
+            "项目入口在发布前发生变化"
+        }
+        binding.manifest = parsedManifest
+    }
+
+    private fun ensureProjectEntryIdentity(
+        binding: MutableWebProjectBinding,
+        projectFileTool: WebProjectFileTool
+    ) {
+        if (!binding.entryFile.isFile) return
+        val current = projectFileTool.read(binding.manifest.entryPoint).content
+        val identified = AppGenerator.ensureWebAppIdentity(current)
+        if (identified != current) {
+            projectFileTool.write(binding.manifest.entryPoint, identified)
+        }
+    }
+
+    private suspend fun completeGeneratedWebProject(
+        state: StreamingSessionState,
+        release: WebAppProjectSnapshot,
+        isModification: Boolean,
+        iteration: Int
+    ) {
+        val projectFiles = withContext(Dispatchers.IO) {
+            projectFilePaths(WebProjectFileTool(release.contentRoot))
+        }
+        val entryCode = withContext(Dispatchers.IO) { release.entryFile.readText() }
+        repository.markSessionAsGenerate(state.sessionId, release.entryFile.absolutePath)
+        withContext(Dispatchers.Main.immediate) {
+            val current = _generateTaskStates.value.orEmpty()[state.sessionId]
+            updateGenerateTaskState(
+                (current ?: GenerateTaskState(
+                    sessionId = state.sessionId,
+                    phase = GenerateTaskState.Phase.COMPLETED,
+                    status = "多文件项目已通过验证"
+                )).copy(
+                    phase = GenerateTaskState.Phase.COMPLETED,
+                    code = entryCode,
+                    filePath = release.entryFile.absolutePath,
+                    activeFilePath = release.manifest.entryPoint,
+                    projectFiles = projectFiles,
+                    status = "多文件项目已构建、测试并发布",
+                    isModification = isModification,
+                    harnessIteration = maxOf(current?.harnessIteration ?: 0, iteration),
+                    diagnostics = emptyList(),
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            removeStreamingPlaceholder(state)
+            state.thinkingContent.clear()
+        }
+        addFinalAssistantMessage(
+            state = state,
+            content = if (isModification) {
+                "项目修改已完成，并通过构建、WebView 检查、自测和测试集，点击下方查看 👇"
+            } else {
+                "多文件 Web 应用已生成，并通过完整 Harness，点击下方预览 👇"
+            },
+            appHtmlPath = release.entryFile.absolutePath
+        )
+        withContext(Dispatchers.Main.immediate) {
+            _appGenerated.value = release.entryFile.absolutePath
+        }
+    }
+
+    private suspend fun failGeneratedWebProject(
+        state: StreamingSessionState,
+        message: String,
+        diagnostics: List<String>,
+        entryPath: String?,
+        isModification: Boolean
+    ) {
+        val current = withContext(Dispatchers.Main.immediate) {
+            val base = _generateTaskStates.value.orEmpty()[state.sessionId]
+            val failed = (base ?: GenerateTaskState(
+                sessionId = state.sessionId,
+                phase = GenerateTaskState.Phase.ERROR,
+                status = message
+            )).copy(
+                phase = GenerateTaskState.Phase.ERROR,
+                filePath = entryPath ?: base?.filePath,
+                status = message,
+                isModification = isModification,
+                diagnostics = diagnostics,
+                updatedAt = System.currentTimeMillis()
+            )
+            updateGenerateTaskState(failed)
+            removeStreamingPlaceholder(state)
+            state.thinkingContent.clear()
+            _errorMessage.value = message
+            failed
+        }
+        if (!state.hasFinalAssistantMessage) {
+            addFinalAssistantMessage(
+                state = state,
+                content = "多文件 Web 项目未能完成：${current.status}"
+            )
+        }
+    }
+
+    private fun prepareHarnessWebView(webView: WebView) {
+        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
+        webView.settings.blockNetworkLoads = true
+        webView.settings.allowFileAccess = false
+        webView.settings.allowContentAccess = false
+        val metrics = getApplication<Application>().resources.displayMetrics
+        val width = metrics.widthPixels.coerceAtLeast(1)
+        val height = metrics.heightPixels.coerceAtLeast(1)
+        webView.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
+        )
+        webView.layout(0, 0, width, height)
+    }
+
+    private fun nextWebProjectRoot(displayName: String, projectId: String): File {
+        val generatedApps = File(getApplication<Application>().filesDir, AgentWorkspace.WEB_DIR)
+            .apply { mkdirs() }
+        val stem = displayName
+            .replace(Regex("[\\\\/:*?\"<>|]+"), "_")
+            .trim('_', '-', '.', ' ')
+            .take(WEB_PROJECT_DIRECTORY_NAME_MAX_CHARS)
+            .ifBlank { "馒头Web应用" }
+        val uniqueSuffix = projectId
+            .filter(Char::isLetterOrDigit)
+            .takeLast(WEB_PROJECT_DIRECTORY_ID_CHARS)
+            .ifBlank {
+                System.currentTimeMillis().toString().takeLast(WEB_PROJECT_DIRECTORY_ID_CHARS)
+            }
+        var candidate = File(generatedApps, "${stem}_$uniqueSuffix")
+        var suffix = 2
+        while (candidate.exists()) {
+            candidate = File(generatedApps, "${stem}_$suffix")
+            suffix++
+        }
+        return candidate
+    }
+
+    private fun projectFilePaths(projectFileTool: WebProjectFileTool): List<String> {
+        return projectFileTool.list(".", recursive = true)
+            .asSequence()
+            .filterNot { it.directory }
+            .map { it.path }
+            .sorted()
+            .toList()
+    }
+
+    private fun renderVisibleProjectPlan(manifest: WebAppProjectManifest): String {
+        val root = JsonObject().apply {
+            addProperty("schemaVersion", manifest.schemaVersion)
+            addProperty("name", manifest.displayName)
+            addProperty("entry", manifest.entryPoint)
+            add("files", JsonArray().apply {
+                manifest.files
+                    .asSequence()
+                    .filterNot { it.path == PROJECT_PLAN_FILE_NAME }
+                    .forEach { file ->
+                        add(JsonObject().apply {
+                            addProperty("path", file.path)
+                            addProperty("role", file.role.visiblePlanRole())
+                            addProperty("description", file.role.defaultDescription())
+                        })
+                    }
+            })
+        }
+        return WEB_PROJECT_PLAN_GSON.toJson(root) + "\n"
+    }
+
+    private fun projectRoleForPath(path: String): WebAppProjectFileRole {
+        return when (path.substringAfterLast('.', "").lowercase(Locale.US)) {
+            "html", "htm" -> WebAppProjectFileRole.OTHER
+            "css" -> WebAppProjectFileRole.STYLE
+            "js", "mjs" -> WebAppProjectFileRole.SCRIPT
+            "json" -> WebAppProjectFileRole.DATA
+            "svg", "png", "jpg", "jpeg", "gif", "webp", "avif", "ico" -> {
+                WebAppProjectFileRole.ASSET
+            }
+            else -> WebAppProjectFileRole.OTHER
+        }
+    }
+
+    private fun WebAppProjectFileRole.visiblePlanRole(): String {
+        return when (this) {
+            WebAppProjectFileRole.ENTRY -> "entry"
+            WebAppProjectFileRole.STYLE -> "style"
+            WebAppProjectFileRole.SCRIPT -> "script"
+            WebAppProjectFileRole.DATA -> "data"
+            WebAppProjectFileRole.ASSET -> "asset"
+            WebAppProjectFileRole.OTHER -> "other"
+        }
+    }
+
+    private fun WebAppProjectFileRole.defaultDescription(): String {
+        return when (this) {
+            WebAppProjectFileRole.ENTRY -> "页面语义结构与本地资源入口"
+            WebAppProjectFileRole.STYLE -> "视觉系统、布局与响应式样式"
+            WebAppProjectFileRole.SCRIPT -> "应用状态、交互逻辑与自测"
+            WebAppProjectFileRole.DATA -> "只读种子数据或项目配置"
+            WebAppProjectFileRole.ASSET -> "项目本地静态资源"
+            WebAppProjectFileRole.OTHER -> "项目辅助文件"
+        }
     }
 
     private suspend fun normalChatFlow(
@@ -473,15 +1538,37 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         requestMessage: String = userMessage
     ) {
         val sessionId = state.sessionId
+        val filteredInput = GenerationInputFilter.filter(userMessage)
+        val filteredRequest = GenerationInputFilter.filter(requestMessage)
+        val harnessIteration = qualityRetryCount + 1
         state.isGeneratingApp = true
         updateSessionLoadingIndicators()
         try {
-            updateGenerateTaskState(
-                GenerateTaskState(
-                    sessionId = sessionId,
-                    phase = GenerateTaskState.Phase.PREPARING,
-                    status = "正在准备初版应用"
+            if (qualityRetryCount == 0) {
+                replaceGenerateTaskState(
+                    GenerateTaskState(
+                        sessionId = state.sessionId,
+                        phase = GenerateTaskState.Phase.SANITIZING,
+                        status = "正在过滤生成需求"
+                    )
                 )
+            }
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.SANITIZING,
+                stage = GenerateTaskState.Stage.INPUT,
+                outcome = GenerateTaskState.Outcome.PASSED,
+                message = filteredInput.notices.firstOrNull() ?: "用户输入已过滤并建立安全边界",
+                iteration = harnessIteration,
+                diagnostics = filteredInput.notices
+            )
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.PROMPTING,
+                stage = GenerateTaskState.Stage.PROMPT,
+                outcome = GenerateTaskState.Outcome.RUNNING,
+                message = "正在合并 System Prompt、设备上下文和工具文档",
+                iteration = harnessIteration
             )
             state.thinkingContent.clear()
             addStreamingPlaceholder(state, status = "正在生成应用", useLoadingLayout = true)
@@ -490,12 +1577,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 buildAppGenerationProgressText(elapsedSeconds = 0, receivedChars = 0)
             )
 
+            val generationSystemPrompt = AppGenerator.buildSystemPrompt(
+                getApplication(),
+                filteredInput.content
+            )
+            val filteredSystemPrompt = GenerationInputFilter.filterSystemPrompt(
+                generationSystemPrompt
+            )
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.PROMPTING,
+                stage = GenerateTaskState.Stage.PROMPT,
+                outcome = GenerateTaskState.Outcome.PASSED,
+                message = "System Prompt 与用户需求已完成组装",
+                iteration = harnessIteration,
+                diagnostics = filteredSystemPrompt.notices
+            )
             val apiMessages = listOf(
                 ApiMessage(
                     role = "system",
-                    content = AppGenerator.buildSystemPrompt(getApplication(), userMessage)
+                    content = filteredSystemPrompt.content
                 ),
-                ApiMessage(role = ChatMessage.ROLE_USER, content = requestMessage)
+                ApiMessage(role = ChatMessage.ROLE_USER, content = filteredRequest.promptPayload)
             )
             val request = ChatRequest(
                 model = config.model,
@@ -510,6 +1613,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             val htmlBuffer = StringBuilder()
             startAppGenerationProgressHeartbeat(state, htmlBuffer)
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.REQUESTING_MODEL,
+                stage = GenerateTaskState.Stage.MODEL,
+                outcome = if (qualityRetryCount == 0) {
+                    GenerateTaskState.Outcome.RUNNING
+                } else {
+                    GenerateTaskState.Outcome.RETRYING
+                },
+                message = if (qualityRetryCount == 0) {
+                    "正在请求模型生成初版代码"
+                } else {
+                    "质量检查未通过，正在请求模型重新生成"
+                },
+                iteration = harnessIteration
+            )
 
             StreamingApiService.streamChatCompletion(config, request)
                 .catch { e ->
@@ -546,6 +1665,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                         is StreamingApiService.StreamEvent.Done -> {
                             stopAppGenerationProgressHeartbeat(state)
+                            updateHarnessStage(
+                                state = state,
+                                phase = GenerateTaskState.Phase.BUILDING,
+                                stage = GenerateTaskState.Stage.MODEL,
+                                outcome = GenerateTaskState.Outcome.PASSED,
+                                message = "模型已完成本轮代码输出",
+                                iteration = harnessIteration
+                            )
                             if (state.thinkingContent.isBlank()) {
                                 updateStreamingThinking(
                                     state,
@@ -553,94 +1680,134 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 )
                             }
                             try {
-                                val htmlContent = withContext(Dispatchers.IO) {
-                                    AppGenerator.extractHtml(htmlBuffer.toString())
-                                }
-                                if (htmlContent != null) {
-                                    val qualityIssues = withContext(Dispatchers.Default) {
-                                        AppGenerator.generatedWebAppQualityIssues(htmlContent)
-                                    }
-                                    if (qualityIssues.isNotEmpty() && qualityRetryCount == 0) {
+                                when (val decision = withContext(Dispatchers.Default) {
+                                    AppGenerator.decideInitialGeneration(
+                                        modelOutput = htmlBuffer.toString(),
+                                        attempt = harnessIteration
+                                    )
+                                }) {
+                                    is AppGenerator.InitialGenerationDecision.Retry -> {
+                                        updateHarnessStage(
+                                            state = state,
+                                            phase = GenerateTaskState.Phase.BUILDING,
+                                            stage = GenerateTaskState.Stage.BUILD,
+                                            outcome = GenerateTaskState.Outcome.FAILED,
+                                            message = "初始代码未达到可检查条件，准备受控重试",
+                                            iteration = harnessIteration,
+                                            diagnostics = decision.diagnostics
+                                        )
                                         updateGenerateTaskCode(
                                             state = state,
                                             code = htmlBuffer.toString(),
                                             phase = GenerateTaskState.Phase.PREPARING,
-                                            status = "质量检查未通过，准备重新生成",
+                                            status = "初始代码不完整，准备第 ${harnessIteration + 1} 次生成",
                                             force = true
                                         )
                                         updateStreamingThinking(
                                             state,
-                                            "初版缺少完整样式或交互，已自动要求模型从头重做...",
+                                            "初始代码未达到 Harness 可检查条件，正在要求模型从头重做...",
                                             force = true
                                         )
                                         generateAppFlow(
                                             state = state,
                                             config = config,
                                             userMessage = userMessage,
-                                            qualityRetryCount = 1,
+                                            qualityRetryCount = qualityRetryCount + 1,
                                             requestMessage = AppGenerator.buildQualityRetryUserPrompt(
                                                 userMessage,
-                                                qualityIssues
+                                                decision.diagnostics
                                             )
                                         )
                                         return@collect
                                     }
-                                    AppGenerator.validateGeneratedWebApp(htmlContent)
-                                    val file = withContext(Dispatchers.IO) {
-                                        AppGenerator.saveHtmlFile(getApplication(), htmlContent, userMessage)
-                                    }
-                                    val savedCode = withContext(Dispatchers.IO) { file.readText() }
-                                    repository.markSessionAsGenerate(sessionId, file.absolutePath)
-                                    updateGenerateTaskState(
-                                        GenerateTaskState(
-                                            sessionId = sessionId,
-                                            phase = GenerateTaskState.Phase.COMPLETED,
-                                            code = savedCode,
-                                            filePath = file.absolutePath,
-                                            status = if (qualityRetryCount == 0) {
-                                                "初版应用已写入本地"
-                                            } else {
-                                                "重生成应用已通过质量检查"
-                                            }
+
+                                    is AppGenerator.InitialGenerationDecision.Fail -> {
+                                        updateHarnessStage(
+                                            state = state,
+                                            phase = GenerateTaskState.Phase.BUILDING,
+                                            stage = GenerateTaskState.Stage.BUILD,
+                                            outcome = GenerateTaskState.Outcome.FAILED,
+                                            message = decision.reason,
+                                            iteration = harnessIteration,
+                                            diagnostics = decision.diagnostics
                                         )
-                                    )
-                                    removeStreamingPlaceholder(state)
-                                    state.thinkingContent.clear()
-                                    addFinalAssistantMessage(
-                                        state,
-                                        "已为你生成网页应用，点击下方预览或全屏查看 👇",
-                                        appHtmlPath = file.absolutePath
-                                    )
-                                    _appGenerated.value = file.absolutePath
-                                } else {
-                                    if (qualityRetryCount == 0) {
-                                        val qualityIssues = listOf("模型返回内容中未找到完整 HTML")
+                                        markGenerateTaskError(
+                                            state,
+                                            decision.reason,
+                                            htmlBuffer.toString()
+                                        )
+                                        handleApiError(
+                                            state,
+                                            config,
+                                            decision.reason,
+                                            "生成网页应用"
+                                        )
+                                    }
+
+                                    is AppGenerator.InitialGenerationDecision.RunHarness -> {
+                                        val htmlContent = decision.html
+                                        val hasQualityIssues = decision.diagnostics.isNotEmpty()
+                                        updateHarnessStage(
+                                            state = state,
+                                            phase = GenerateTaskState.Phase.BUILDING,
+                                            stage = GenerateTaskState.Stage.BUILD,
+                                            outcome = if (hasQualityIssues) {
+                                                GenerateTaskState.Outcome.RETRYING
+                                            } else {
+                                                GenerateTaskState.Outcome.PASSED
+                                            },
+                                            message = if (hasQualityIssues) {
+                                                "候选 HTML 已提取，交由 Harness 诊断并修复"
+                                            } else {
+                                                "HTML、CSS 与 JavaScript 预构建检查通过"
+                                            },
+                                            iteration = harnessIteration,
+                                            diagnostics = decision.diagnostics
+                                        )
+                                        updateHarnessStage(
+                                            state = state,
+                                            phase = GenerateTaskState.Phase.APPLYING_TOOL,
+                                            stage = GenerateTaskState.Stage.TOOL,
+                                            outcome = GenerateTaskState.Outcome.RUNNING,
+                                            message = "正在调用本地文件工具写入代码",
+                                            iteration = harnessIteration
+                                        )
+                                        val file = withContext(Dispatchers.IO) {
+                                            AppGenerator.saveHtmlFile(
+                                                getApplication(),
+                                                htmlContent,
+                                                filteredInput.content
+                                            )
+                                        }
+                                        val savedCode = withContext(Dispatchers.IO) { file.readText() }
+                                        repository.markSessionAsGenerate(sessionId, file.absolutePath)
                                         updateGenerateTaskCode(
                                             state = state,
-                                            code = htmlBuffer.toString(),
-                                            phase = GenerateTaskState.Phase.PREPARING,
-                                            status = "HTML 不完整，准备重新生成",
+                                            code = savedCode,
+                                            phase = GenerateTaskState.Phase.APPLYING_TOOL,
+                                            status = "代码工具已写入 ${file.name}",
+                                            filePath = file.absolutePath,
                                             force = true
                                         )
-                                        generateAppFlow(
+                                        updateHarnessStage(
+                                            state = state,
+                                            phase = GenerateTaskState.Phase.APPLYING_TOOL,
+                                            stage = GenerateTaskState.Stage.TOOL,
+                                            outcome = GenerateTaskState.Outcome.PASSED,
+                                            message = "本地代码文件已安全写入",
+                                            iteration = harnessIteration,
+                                            filePath = file.absolutePath
+                                        )
+                                        runGeneratedAppHarness(
                                             state = state,
                                             config = config,
-                                            userMessage = userMessage,
-                                            qualityRetryCount = 1,
-                                            requestMessage = AppGenerator.buildQualityRetryUserPrompt(
-                                                userMessage,
-                                                qualityIssues
-                                            )
+                                            userMessage = filteredInput.content,
+                                            htmlFile = file,
+                                            isModification = false,
+                                            startingIteration = harnessIteration,
+                                            initialCode = savedCode
                                         )
-                                        return@collect
                                     }
-                                    markGenerateTaskError(state, "模型返回内容中未找到合法 HTML", htmlBuffer.toString())
-                                    handleApiError(
-                                        state,
-                                        config,
-                                        "模型返回内容中未找到合法 HTML",
-                                        "生成网页应用"
-                                    )
                                 }
                             } catch (e: Exception) {
                                 if (e is CancellationException) throw e
@@ -689,6 +1856,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         previousFailure: String? = null
     ) {
         val sessionId = state.sessionId
+        val filteredInput = GenerationInputFilter.filter(userMessage)
+        val harnessIteration = diffRetryCount + 1
         state.isGeneratingApp = true
         updateSessionLoadingIndicators()
         val diffBuffer = StringBuilder()
@@ -698,15 +1867,41 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 LocalDiffFileTool(getApplication<Application>().filesDir)
             }
             val snapshot = withContext(Dispatchers.IO) { diffTool.readSnapshot(htmlFile) }
-            updateGenerateTaskState(
+            val initialTaskState =
                 GenerateTaskState(
                     sessionId = sessionId,
-                    phase = GenerateTaskState.Phase.PREPARING,
+                    phase = GenerateTaskState.Phase.SANITIZING,
                     code = snapshot.content,
                     filePath = htmlFile.absolutePath,
-                    status = if (diffRetryCount == 0) "正在读取现有应用" else "正在重新生成规范 DIFF",
-                    isModification = true
+                    status = if (diffRetryCount == 0) "正在过滤修改需求" else "正在重新过滤修复需求",
+                    isModification = true,
+                    harnessIteration = harnessIteration
                 )
+            if (diffRetryCount == 0) {
+                replaceGenerateTaskState(initialTaskState)
+            } else {
+                updateGenerateTaskState(initialTaskState)
+            }
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.SANITIZING,
+                stage = GenerateTaskState.Stage.INPUT,
+                outcome = GenerateTaskState.Outcome.PASSED,
+                message = "修改需求已过滤并建立安全边界",
+                iteration = harnessIteration,
+                diagnostics = filteredInput.notices,
+                filePath = htmlFile.absolutePath,
+                isModification = true
+            )
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.PROMPTING,
+                stage = GenerateTaskState.Stage.PROMPT,
+                outcome = GenerateTaskState.Outcome.RUNNING,
+                message = "正在组装当前文件上下文和修复提示词",
+                iteration = harnessIteration,
+                filePath = htmlFile.absolutePath,
+                isModification = true
             )
 
             state.thinkingContent.clear()
@@ -725,23 +1920,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 force = true
             )
 
+            val modificationSystemPrompt = GenerationInputFilter.filterSystemPrompt(
+                AppGenerator.buildModificationSystemPrompt(
+                    context = getApplication(),
+                    relativePath = snapshot.relativePath,
+                    expectedSha256 = snapshot.sha256,
+                    userMessage = filteredInput.content,
+                    includeTools = AppGenerator.modificationNeedsTools(filteredInput.content)
+                )
+            )
             val request = ChatRequest(
                 model = config.model,
                 messages = listOf(
                     ApiMessage(
                         role = "system",
-                        content = AppGenerator.buildModificationSystemPrompt(
-                            context = getApplication(),
-                            relativePath = snapshot.relativePath,
-                            expectedSha256 = snapshot.sha256,
-                            userMessage = userMessage,
-                            includeTools = AppGenerator.modificationNeedsTools(userMessage)
-                        )
+                        content = modificationSystemPrompt.content
                     ),
                     ApiMessage(
                         role = ChatMessage.ROLE_USER,
                         content = AppGenerator.buildModificationUserPrompt(
-                            userMessage,
+                            filteredInput.content,
                             snapshot,
                             previousFailure
                         )
@@ -753,6 +1951,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 ),
                 temperature = 0.2,
                 topP = 0.9
+            )
+
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.PROMPTING,
+                stage = GenerateTaskState.Stage.PROMPT,
+                outcome = GenerateTaskState.Outcome.PASSED,
+                message = "修复提示词已就绪",
+                iteration = harnessIteration,
+                diagnostics = modificationSystemPrompt.notices,
+                filePath = htmlFile.absolutePath,
+                isModification = true
+            )
+            updateHarnessStage(
+                state = state,
+                phase = GenerateTaskState.Phase.REQUESTING_MODEL,
+                stage = GenerateTaskState.Stage.MODEL,
+                outcome = if (diffRetryCount == 0) {
+                    GenerateTaskState.Outcome.RUNNING
+                } else {
+                    GenerateTaskState.Outcome.RETRYING
+                },
+                message = if (diffRetryCount == 0) "正在请求模型生成代码补丁" else "正在请求模型重算修复补丁",
+                iteration = harnessIteration,
+                filePath = htmlFile.absolutePath,
+                isModification = true
             )
 
             StreamingApiService.streamChatCompletion(config, request)
@@ -802,6 +2026,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
 
                         is StreamingApiService.StreamEvent.Done -> {
+                            updateHarnessStage(
+                                state = state,
+                                phase = GenerateTaskState.Phase.APPLYING_TOOL,
+                                stage = GenerateTaskState.Stage.MODEL,
+                                outcome = GenerateTaskState.Outcome.PASSED,
+                                message = "模型已完成本轮 DIFF 输出",
+                                iteration = harnessIteration,
+                                filePath = htmlFile.absolutePath,
+                                isModification = true
+                            )
                             updateGenerateTaskCode(
                                 state = state,
                                 code = diffBuffer.toString(),
@@ -821,24 +2055,34 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                                 val updatedCode = withContext(Dispatchers.IO) { htmlFile.readText() }
                                 repository.markSessionAsGenerate(sessionId, htmlFile.absolutePath)
-                                updateGenerateTaskState(
-                                    GenerateTaskState(
-                                        sessionId = sessionId,
-                                        phase = GenerateTaskState.Phase.COMPLETED,
-                                        code = updatedCode,
-                                        filePath = htmlFile.absolutePath,
-                                        status = "已应用 ${applyResult.hunkCount} 处修改 · +${applyResult.additions} -${applyResult.deletions}",
-                                        isModification = true
-                                    )
+                                updateGenerateTaskCode(
+                                    state = state,
+                                    code = updatedCode,
+                                    phase = GenerateTaskState.Phase.APPLYING_TOOL,
+                                    status = "代码工具已应用 ${applyResult.hunkCount} 处修改 · +${applyResult.additions} -${applyResult.deletions}",
+                                    filePath = htmlFile.absolutePath,
+                                    isModification = true,
+                                    force = true
                                 )
-                                removeStreamingPlaceholder(state)
-                                state.thinkingContent.clear()
-                                addFinalAssistantMessage(
+                                updateHarnessStage(
                                     state,
-                                    "已按你的要求增量修改应用，点击代码窗口可查看最新源码 👇",
-                                    appHtmlPath = htmlFile.absolutePath
+                                    phase = GenerateTaskState.Phase.APPLYING_TOOL,
+                                    stage = GenerateTaskState.Stage.TOOL,
+                                    outcome = GenerateTaskState.Outcome.PASSED,
+                                    message = "本地 diff 工具已应用修改",
+                                    iteration = harnessIteration,
+                                    filePath = htmlFile.absolutePath,
+                                    isModification = true
                                 )
-                                _appGenerated.value = htmlFile.absolutePath
+                                runGeneratedAppHarness(
+                                    state = state,
+                                    config = config,
+                                    userMessage = filteredInput.content,
+                                    htmlFile = htmlFile,
+                                    isModification = true,
+                                    startingIteration = harnessIteration,
+                                    initialCode = updatedCode
+                                )
                             } catch (error: Exception) {
                                 if (error is CancellationException) throw error
                                 logGeneratedAppDiffFailure(
@@ -932,13 +2176,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
         } catch (error: Exception) {
             if (error is CancellationException) throw error
-            markGenerateTaskError(
-                state,
-                error.message ?: "无法读取现有应用",
-                diffBuffer.toString(),
-                htmlFile.absolutePath,
-                isModification = true
-            )
+            val currentTask = _generateTaskStates.value.orEmpty()[sessionId]
+            if (currentTask?.phase != GenerateTaskState.Phase.ERROR) {
+                markGenerateTaskError(
+                    state,
+                    error.message ?: "无法读取现有应用",
+                    currentTask?.code?.ifBlank { null } ?: diffBuffer.toString(),
+                    htmlFile.absolutePath,
+                    isModification = true
+                )
+            }
             handleApiError(state, config, error.message ?: "无法读取现有应用", "增量修改网页应用")
         } finally {
             state.isGeneratingApp = false
@@ -977,6 +2224,562 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return true
     }
 
+    private suspend fun runGeneratedAppHarness(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        userMessage: String,
+        htmlFile: File,
+        isModification: Boolean,
+        startingIteration: Int,
+        initialCode: String? = null
+    ) {
+        var iteration = startingIteration.coerceAtLeast(1)
+        var code = initialCode ?: withContext(Dispatchers.IO) { htmlFile.readText() }
+
+        while (iteration <= GENERATED_APP_HARNESS_MAX_ITERATIONS) {
+            val inspectorWebView = withContext(Dispatchers.Main) {
+                WebView(getApplication<Application>())
+            }
+            val inspector = GeneratedAppWebViewInspector(
+                webView = inspectorWebView,
+                prepareWebView = { webView ->
+                    webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, true)
+                    webView.settings.blockNetworkLoads = true
+                    webView.settings.allowFileAccess = false
+                    webView.settings.allowContentAccess = false
+                    val metrics = getApplication<Application>().resources.displayMetrics
+                    val width = metrics.widthPixels.coerceAtLeast(1)
+                    val height = metrics.heightPixels.coerceAtLeast(1)
+                    webView.measure(
+                        View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
+                    )
+                    webView.layout(0, 0, width, height)
+                }
+            )
+
+            try {
+                updateHarnessStage(
+                    state = state,
+                    phase = GenerateTaskState.Phase.BUILDING,
+                    stage = GenerateTaskState.Stage.BUILD,
+                    outcome = GenerateTaskState.Outcome.RUNNING,
+                    message = "正在构建并检查 HTML/JavaScript",
+                    iteration = iteration,
+                    filePath = htmlFile.absolutePath,
+                    isModification = isModification
+                )
+                val buildReport = inspector.inspectBuild(code)
+                if (!buildReport.passed) {
+                    val diagnostics = GeneratedAppHarnessScripts.diagnostics(buildReport)
+                    updateHarnessFailure(
+                        state = state,
+                        phase = GenerateTaskState.Phase.BUILDING,
+                        stage = GenerateTaskState.Stage.BUILD,
+                        message = "构建失败，准备返回模型修复",
+                        iteration = iteration,
+                        diagnostics = diagnostics,
+                        htmlFile = htmlFile,
+                        isModification = isModification
+                    )
+                    code = repairGeneratedAppFromDiagnostics(
+                        state = state,
+                        config = config,
+                        userMessage = userMessage,
+                        htmlFile = htmlFile,
+                        failedStage = "build",
+                        diagnostics = diagnostics,
+                        iteration = iteration,
+                        isModification = isModification
+                    )
+                    iteration++
+                    continue
+                }
+                updateHarnessReportPassed(
+                    state,
+                    GenerateTaskState.Phase.BUILDING,
+                    GenerateTaskState.Stage.BUILD,
+                    "构建成功",
+                    iteration,
+                    buildReport,
+                    htmlFile,
+                    isModification
+                )
+
+                updateHarnessStage(
+                    state = state,
+                    phase = GenerateTaskState.Phase.INSPECTING,
+                    stage = GenerateTaskState.Stage.INSPECT,
+                    outcome = GenerateTaskState.Outcome.RUNNING,
+                    message = "正在通过 WebView 检查器读取运行错误",
+                    iteration = iteration,
+                    filePath = htmlFile.absolutePath,
+                    isModification = isModification
+                )
+                val runtimeReport = inspector.inspectRuntime(WebInspectionTarget.Html(code))
+                if (!runtimeReport.passed) {
+                    val diagnostics = GeneratedAppHarnessScripts.diagnostics(runtimeReport)
+                    updateHarnessFailure(
+                        state,
+                        GenerateTaskState.Phase.INSPECTING,
+                        GenerateTaskState.Stage.INSPECT,
+                        "WebView 运行检查失败，准备返回模型修复",
+                        iteration,
+                        diagnostics,
+                        htmlFile,
+                        isModification
+                    )
+                    code = repairGeneratedAppFromDiagnostics(
+                        state,
+                        config,
+                        userMessage,
+                        htmlFile,
+                        "runtime-inspection",
+                        diagnostics,
+                        iteration,
+                        isModification
+                    )
+                    iteration++
+                    continue
+                }
+                updateHarnessReportPassed(
+                    state,
+                    GenerateTaskState.Phase.INSPECTING,
+                    GenerateTaskState.Stage.INSPECT,
+                    "WebView 检查器未发现运行错误",
+                    iteration,
+                    runtimeReport,
+                    htmlFile,
+                    isModification
+                )
+
+                updateHarnessStage(
+                    state = state,
+                    phase = GenerateTaskState.Phase.SELF_TESTING,
+                    stage = GenerateTaskState.Stage.SELF_TEST,
+                    outcome = GenerateTaskState.Outcome.RUNNING,
+                    message = "正在运行页面自测",
+                    iteration = iteration,
+                    filePath = htmlFile.absolutePath,
+                    isModification = isModification
+                )
+                val selfTestReport = inspector.runSelfTests(
+                    target = WebInspectionTarget.Html(code),
+                    testScript = GeneratedAppHarnessScripts.selfTest
+                )
+                if (!selfTestReport.passed) {
+                    val diagnostics = GeneratedAppHarnessScripts.diagnostics(selfTestReport)
+                    updateHarnessFailure(
+                        state,
+                        GenerateTaskState.Phase.SELF_TESTING,
+                        GenerateTaskState.Stage.SELF_TEST,
+                        "页面自测未通过，准备返回模型修复",
+                        iteration,
+                        diagnostics,
+                        htmlFile,
+                        isModification
+                    )
+                    code = repairGeneratedAppFromDiagnostics(
+                        state,
+                        config,
+                        userMessage,
+                        htmlFile,
+                        "self-test",
+                        diagnostics,
+                        iteration,
+                        isModification
+                    )
+                    iteration++
+                    continue
+                }
+                updateHarnessReportPassed(
+                    state,
+                    GenerateTaskState.Phase.SELF_TESTING,
+                    GenerateTaskState.Stage.SELF_TEST,
+                    "页面自测通过",
+                    iteration,
+                    selfTestReport,
+                    htmlFile,
+                    isModification
+                )
+
+                updateHarnessStage(
+                    state = state,
+                    phase = GenerateTaskState.Phase.BUILDING,
+                    stage = GenerateTaskState.Stage.BUILD,
+                    outcome = GenerateTaskState.Outcome.RUNNING,
+                    message = "自测通过，正在执行交付前构建",
+                    iteration = iteration,
+                    filePath = htmlFile.absolutePath,
+                    isModification = isModification
+                )
+                val finalBuildReport = inspector.inspectBuild(code)
+                val finalBuildFailure = runCatching {
+                    AppGenerator.validateGeneratedWebApp(code)
+                }.exceptionOrNull()
+                if (!finalBuildReport.passed || finalBuildFailure != null) {
+                    val diagnostics = (
+                        GeneratedAppHarnessScripts.diagnostics(finalBuildReport) +
+                            listOfNotNull(
+                                finalBuildFailure?.message ?: finalBuildFailure?.let {
+                                    "交付前构建校验失败"
+                                }
+                            )
+                        ).distinct()
+                    updateHarnessFailure(
+                        state,
+                        GenerateTaskState.Phase.BUILDING,
+                        GenerateTaskState.Stage.BUILD,
+                        "交付前构建失败，准备返回模型修复",
+                        iteration,
+                        diagnostics,
+                        htmlFile,
+                        isModification
+                    )
+                    code = repairGeneratedAppFromDiagnostics(
+                        state,
+                        config,
+                        userMessage,
+                        htmlFile,
+                        "final-build",
+                        diagnostics,
+                        iteration,
+                        isModification
+                    )
+                    iteration++
+                    continue
+                }
+                updateHarnessReportPassed(
+                    state,
+                    GenerateTaskState.Phase.BUILDING,
+                    GenerateTaskState.Stage.BUILD,
+                    "交付前构建通过",
+                    iteration,
+                    finalBuildReport,
+                    htmlFile,
+                    isModification
+                )
+
+                updateHarnessStage(
+                    state = state,
+                    phase = GenerateTaskState.Phase.TESTING,
+                    stage = GenerateTaskState.Stage.TEST,
+                    outcome = GenerateTaskState.Outcome.RUNNING,
+                    message = "正在运行独立测试集",
+                    iteration = iteration,
+                    filePath = htmlFile.absolutePath,
+                    isModification = isModification
+                )
+                val testSuiteReport = inspector.runTestSuite(
+                    target = WebInspectionTarget.Html(code),
+                    testScript = GeneratedAppHarnessScripts.testSuite
+                )
+                if (!testSuiteReport.passed) {
+                    val diagnostics = GeneratedAppHarnessScripts.diagnostics(testSuiteReport)
+                    updateHarnessFailure(
+                        state,
+                        GenerateTaskState.Phase.TESTING,
+                        GenerateTaskState.Stage.TEST,
+                        "测试集未通过，准备返回代码阶段修复",
+                        iteration,
+                        diagnostics,
+                        htmlFile,
+                        isModification
+                    )
+                    code = repairGeneratedAppFromDiagnostics(
+                        state,
+                        config,
+                        userMessage,
+                        htmlFile,
+                        "test-suite",
+                        diagnostics,
+                        iteration,
+                        isModification
+                    )
+                    iteration++
+                    continue
+                }
+                updateHarnessReportPassed(
+                    state,
+                    GenerateTaskState.Phase.TESTING,
+                    GenerateTaskState.Stage.TEST,
+                    "独立测试集通过",
+                    iteration,
+                    testSuiteReport,
+                    htmlFile,
+                    isModification
+                )
+                completeGeneratedAppHarness(
+                    state = state,
+                    htmlFile = htmlFile,
+                    code = code,
+                    isModification = isModification,
+                    iteration = iteration
+                )
+                return
+            } finally {
+                withContext(NonCancellable + Dispatchers.Main) {
+                    inspector.cancelCurrentInspection()
+                    inspectorWebView.stopLoading()
+                    inspectorWebView.removeAllViews()
+                    inspectorWebView.destroy()
+                }
+            }
+        }
+
+        throw IllegalStateException("Harness 自动修复已达到 $GENERATED_APP_HARNESS_MAX_ITERATIONS 轮上限")
+    }
+
+    private fun updateHarnessFailure(
+        state: StreamingSessionState,
+        phase: GenerateTaskState.Phase,
+        stage: GenerateTaskState.Stage,
+        message: String,
+        iteration: Int,
+        diagnostics: List<String>,
+        htmlFile: File,
+        isModification: Boolean
+    ) {
+        updateHarnessStage(
+            state = state,
+            phase = phase,
+            stage = stage,
+            outcome = GenerateTaskState.Outcome.FAILED,
+            message = message,
+            iteration = iteration,
+            diagnostics = diagnostics.ifEmpty { listOf(message) },
+            filePath = htmlFile.absolutePath,
+            isModification = isModification
+        )
+    }
+
+    private fun updateHarnessReportPassed(
+        state: StreamingSessionState,
+        phase: GenerateTaskState.Phase,
+        stage: GenerateTaskState.Stage,
+        message: String,
+        iteration: Int,
+        report: WebInspectionReport,
+        htmlFile: File,
+        isModification: Boolean
+    ) {
+        val warnings = GeneratedAppHarnessScripts.diagnostics(report)
+        updateHarnessStage(
+            state = state,
+            phase = phase,
+            stage = stage,
+            outcome = GenerateTaskState.Outcome.PASSED,
+            message = "$message · ${report.durationMillis}ms",
+            iteration = iteration,
+            diagnostics = warnings,
+            filePath = htmlFile.absolutePath,
+            isModification = isModification
+        )
+    }
+
+    private suspend fun completeGeneratedAppHarness(
+        state: StreamingSessionState,
+        htmlFile: File,
+        code: String,
+        isModification: Boolean,
+        iteration: Int
+    ) {
+        updateGenerateTaskCode(
+            state = state,
+            code = code,
+            phase = GenerateTaskState.Phase.COMPLETED,
+            status = "构建、运行检查、自测与测试集均已通过",
+            filePath = htmlFile.absolutePath,
+            isModification = isModification,
+            force = true
+        )
+        repository.markSessionAsGenerate(state.sessionId, htmlFile.absolutePath)
+        removeStreamingPlaceholder(state)
+        state.thinkingContent.clear()
+        addFinalAssistantMessage(
+            state = state,
+            content = if (isModification) {
+                "已完成增量修改，并通过构建、WebView 检查、自测和测试集，点击下方查看 👇"
+            } else {
+                "应用已生成，并通过构建、WebView 检查、自测和测试集，点击下方预览 👇"
+            },
+            appHtmlPath = htmlFile.absolutePath
+        )
+        _appGenerated.value = htmlFile.absolutePath
+        updateHarnessStage(
+            state = state,
+            phase = GenerateTaskState.Phase.COMPLETED,
+            stage = GenerateTaskState.Stage.DELIVER,
+            outcome = GenerateTaskState.Outcome.PASSED,
+            message = "全部 Harness 阶段通过，可以交付",
+            iteration = iteration,
+            filePath = htmlFile.absolutePath,
+            isModification = isModification
+        )
+    }
+
+    private suspend fun repairGeneratedAppFromDiagnostics(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        userMessage: String,
+        htmlFile: File,
+        failedStage: String,
+        diagnostics: List<String>,
+        iteration: Int,
+        isModification: Boolean
+    ): String {
+        val nextIteration = iteration + 1
+        updateHarnessStage(
+            state = state,
+            phase = GenerateTaskState.Phase.REPAIRING,
+            stage = GenerateTaskState.Stage.MODEL,
+            outcome = GenerateTaskState.Outcome.RETRYING,
+            message = "正在把 $failedStage 诊断返回模型修复",
+            iteration = nextIteration,
+            diagnostics = diagnostics,
+            filePath = htmlFile.absolutePath,
+            isModification = isModification
+        )
+        val diffTool = withContext(Dispatchers.IO) {
+            LocalDiffFileTool(getApplication<Application>().filesDir)
+        }
+        var lastFailure: String? = null
+
+        repeat(GENERATED_APP_REPAIR_PATCH_ATTEMPTS) { attempt ->
+            val snapshot = withContext(Dispatchers.IO) { diffTool.readSnapshot(htmlFile) }
+            val repairSystemPrompt = GenerationInputFilter.filterSystemPrompt(
+                AppGenerator.buildModificationSystemPrompt(
+                    context = getApplication(),
+                    relativePath = snapshot.relativePath,
+                    expectedSha256 = snapshot.sha256,
+                    userMessage = userMessage,
+                    includeTools = AppGenerator.modificationNeedsTools(userMessage)
+                )
+            )
+            val request = ChatRequest(
+                model = config.model,
+                messages = listOf(
+                    ApiMessage(
+                        role = "system",
+                        content = repairSystemPrompt.content
+                    ),
+                    ApiMessage(
+                        role = ChatMessage.ROLE_USER,
+                        content = AppGenerator.buildHarnessRepairUserPrompt(
+                            userMessage = userMessage,
+                            snapshot = snapshot,
+                            failedStage = failedStage,
+                            diagnostics = diagnostics + listOfNotNull(lastFailure),
+                            iteration = nextIteration
+                        )
+                    )
+                ),
+                stream = true,
+                maxTokens = AppGenerator.resolveAppDiffOutputLimit(
+                    ContextLimitStore.getTokenLimit(getApplication())
+                ),
+                temperature = 0.15,
+                topP = 0.9
+            )
+            val diffBuffer = StringBuilder()
+            var streamFailure: String? = null
+
+            StreamingApiService.streamChatCompletion(config, request)
+                .catch { error ->
+                    if (error is CancellationException) throw error
+                    streamFailure = error.message ?: "模型修复请求失败"
+                }
+                .collect { event ->
+                    when (event) {
+                        is StreamingApiService.StreamEvent.Content -> {
+                            diffBuffer.append(event.text)
+                            updateGenerateTaskCode(
+                                state = state,
+                                code = diffBuffer,
+                                phase = GenerateTaskState.Phase.WRITING_DIFF,
+                                status = "正在写入 Harness 修复 DIFF · ${diffBuffer.length} 字符",
+                                filePath = htmlFile.absolutePath,
+                                isModification = true
+                            )
+                        }
+
+                        is StreamingApiService.StreamEvent.Disconnected -> streamFailure = event.message
+                        is StreamingApiService.StreamEvent.Error -> streamFailure = event.message
+                        else -> Unit
+                    }
+                }
+            if (streamFailure != null) {
+                lastFailure = streamFailure
+                if (attempt + 1 < GENERATED_APP_REPAIR_PATCH_ATTEMPTS) {
+                    updateHarnessStage(
+                        state = state,
+                        phase = GenerateTaskState.Phase.REPAIRING,
+                        stage = GenerateTaskState.Stage.MODEL,
+                        outcome = GenerateTaskState.Outcome.RETRYING,
+                        message = "模型修复请求中断，正在重试",
+                        iteration = nextIteration,
+                        diagnostics = listOf(streamFailure.orEmpty()),
+                        filePath = htmlFile.absolutePath,
+                        isModification = true
+                    )
+                }
+                return@repeat
+            }
+
+            val unifiedDiff = AppGenerator.extractUnifiedDiff(diffBuffer.toString())
+            if (unifiedDiff == null) {
+                lastFailure = "模型没有返回合法 unified diff"
+                return@repeat
+            }
+            val applyResult = runCatching {
+                withContext(Dispatchers.IO) {
+                    diffTool.apply(htmlFile, snapshot.sha256, unifiedDiff) { patchedContent ->
+                        AppGenerator.validatePatchedWebApp(snapshot.content, patchedContent)
+                    }
+                }
+            }
+            if (applyResult.isSuccess) {
+                val result = applyResult.getOrThrow()
+                val updatedCode = withContext(Dispatchers.IO) { htmlFile.readText() }
+                updateHarnessStage(
+                    state = state,
+                    phase = GenerateTaskState.Phase.APPLYING_TOOL,
+                    stage = GenerateTaskState.Stage.TOOL,
+                    outcome = GenerateTaskState.Outcome.PASSED,
+                    message = "修复工具已应用 ${result.hunkCount} 处修改，重新进入构建",
+                    iteration = nextIteration,
+                    filePath = htmlFile.absolutePath,
+                    isModification = true
+                )
+                updateGenerateTaskCode(
+                    state = state,
+                    code = updatedCode,
+                    phase = GenerateTaskState.Phase.BUILDING,
+                    status = "修复已写入，正在重新构建",
+                    filePath = htmlFile.absolutePath,
+                    isModification = true,
+                    force = true
+                )
+                return updatedCode
+            }
+            lastFailure = applyResult.exceptionOrNull()?.message ?: "修复补丁应用失败"
+            if (attempt + 1 < GENERATED_APP_REPAIR_PATCH_ATTEMPTS) {
+                updateHarnessStage(
+                    state = state,
+                    phase = GenerateTaskState.Phase.REPAIRING,
+                    stage = GenerateTaskState.Stage.TOOL,
+                    outcome = GenerateTaskState.Outcome.RETRYING,
+                    message = "修复补丁无效，正在要求模型重算 DIFF",
+                    iteration = nextIteration,
+                    diagnostics = listOf(lastFailure.orEmpty()),
+                    filePath = htmlFile.absolutePath,
+                    isModification = true
+                )
+            }
+        }
+        throw IllegalStateException(lastFailure ?: "Harness 修复补丁应用失败")
+    }
+
     private fun logGeneratedAppDiffFailure(
         state: StreamingSessionState,
         htmlFile: File,
@@ -1013,11 +2816,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         htmlBuffer: StringBuilder
     ) {
         stopAppGenerationProgressHeartbeat(state)
-        state.appGenerationProgressJob = viewModelScope.launch {
+        state.appGenerationProgressJob = fallbackScope.launch(Dispatchers.Main.immediate) {
             val startedAt = System.currentTimeMillis()
             while (isActive) {
+                val elapsedSeconds = ((System.currentTimeMillis() - startedAt) / 1000).toInt()
                 if (state.thinkingContent.isBlank()) {
-                    val elapsedSeconds = ((System.currentTimeMillis() - startedAt) / 1000).toInt()
                     updateStreamingThinking(
                         state,
                         buildAppGenerationProgressText(
@@ -1026,6 +2829,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     )
                 }
+                state.harnessProgressReporter?.report(
+                    message = if (htmlBuffer.isEmpty()) {
+                        "模型处理中 · 已等待 ${elapsedSeconds}s"
+                    } else {
+                        "正在接收 HTML · ${htmlBuffer.length} 字符 · ${elapsedSeconds}s"
+                    },
+                    stage = GenerateTaskState.Stage.MODEL.name,
+                    iteration = _generateTaskStates.value.orEmpty()[state.sessionId]
+                        ?.harnessIteration
+                        ?: 1,
+                    progress = (25 + htmlBuffer.length / 1_000).coerceAtMost(39)
+                )
                 delay(appGenerationProgressIntervalMs)
             }
         }
@@ -1086,8 +2901,211 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun updateGenerateTaskState(taskState: GenerateTaskState) {
         val states = _generateTaskStates.value.orEmpty().toMutableMap()
+        val previous = states[taskState.sessionId]
+        val storedState = if (previous != null && taskState.harnessEvents.isEmpty()) {
+            taskState.copy(
+                harnessIteration = maxOf(previous.harnessIteration, taskState.harnessIteration),
+                harnessEvents = previous.harnessEvents,
+                diagnostics = taskState.diagnostics.ifEmpty { previous.diagnostics }
+            )
+        } else {
+            taskState
+        }
+        states[taskState.sessionId] = storedState
+        _generateTaskStates.value = states
+        reportHarnessProgress(storedState)
+    }
+
+    private fun replaceGenerateTaskState(taskState: GenerateTaskState) {
+        val states = _generateTaskStates.value.orEmpty().toMutableMap()
         states[taskState.sessionId] = taskState
         _generateTaskStates.value = states
+        reportHarnessProgress(taskState)
+    }
+
+    private fun reportHarnessProgress(taskState: GenerateTaskState) {
+        val execution = streamingStates[taskState.sessionId] ?: return
+        val reporter = execution.harnessProgressReporter ?: return
+        val latestEvent = taskState.harnessEvents.lastOrNull()
+        val fingerprint = buildString {
+            append(taskState.phase.name).append('|')
+            append(latestEvent?.stage?.name).append('|')
+            append(latestEvent?.outcome?.name).append('|')
+            append(latestEvent?.timestamp)
+        }
+        val now = System.currentTimeMillis()
+        val isTerminal = taskState.phase == GenerateTaskState.Phase.COMPLETED ||
+            taskState.phase == GenerateTaskState.Phase.ERROR
+        val shouldReport = isTerminal ||
+            fingerprint != execution.lastHarnessProgressFingerprint ||
+            now - execution.lastHarnessProgressUpdateAt >= HARNESS_NOTIFICATION_UPDATE_INTERVAL_MS
+        if (!shouldReport) return
+
+        execution.lastHarnessProgressFingerprint = fingerprint
+        execution.lastHarnessProgressUpdateAt = now
+        when (taskState.phase) {
+            GenerateTaskState.Phase.COMPLETED -> reporter.succeed(
+                message = taskState.status,
+                diagnostics = taskState.diagnostics
+            )
+            GenerateTaskState.Phase.ERROR -> reporter.fail(
+                message = taskState.status,
+                diagnostics = taskState.diagnostics
+            )
+            else -> reporter.report(
+                message = taskState.status,
+                stage = latestEvent?.stage?.name ?: taskState.phase.name,
+                iteration = maxOf(taskState.harnessIteration, latestEvent?.iteration ?: 0),
+                progress = harnessProgressPercent(taskState, latestEvent),
+                diagnostics = taskState.diagnostics
+            )
+        }
+    }
+
+    private fun harnessProgressPercent(
+        taskState: GenerateTaskState,
+        latestEvent: GenerateTaskState.HarnessEvent?
+    ): Int {
+        return when (latestEvent?.stage) {
+            GenerateTaskState.Stage.INPUT -> 5
+            GenerateTaskState.Stage.PROMPT -> 10
+            GenerateTaskState.Stage.MODEL -> 25
+            GenerateTaskState.Stage.TOOL -> 40
+            GenerateTaskState.Stage.BUILD -> 55
+            GenerateTaskState.Stage.INSPECT -> 68
+            GenerateTaskState.Stage.SELF_TEST -> 78
+            GenerateTaskState.Stage.TEST -> 92
+            GenerateTaskState.Stage.DELIVER -> 100
+            null -> when (taskState.phase) {
+                GenerateTaskState.Phase.SANITIZING -> 5
+                GenerateTaskState.Phase.PROMPTING,
+                GenerateTaskState.Phase.PREPARING -> 10
+                GenerateTaskState.Phase.REQUESTING_MODEL,
+                GenerateTaskState.Phase.WRITING_INITIAL,
+                GenerateTaskState.Phase.WRITING_DIFF,
+                GenerateTaskState.Phase.REPAIRING -> 25
+                GenerateTaskState.Phase.APPLYING_DIFF,
+                GenerateTaskState.Phase.APPLYING_TOOL -> 40
+                GenerateTaskState.Phase.BUILDING -> 55
+                GenerateTaskState.Phase.INSPECTING -> 68
+                GenerateTaskState.Phase.SELF_TESTING -> 78
+                GenerateTaskState.Phase.TESTING -> 92
+                GenerateTaskState.Phase.COMPLETED -> 100
+                GenerateTaskState.Phase.ERROR -> 0
+            }
+        }
+    }
+
+    private fun updateHarnessStage(
+        state: StreamingSessionState,
+        phase: GenerateTaskState.Phase,
+        stage: GenerateTaskState.Stage,
+        outcome: GenerateTaskState.Outcome,
+        message: String,
+        iteration: Int = 1,
+        diagnostics: List<String> = emptyList(),
+        filePath: String? = null,
+        isModification: Boolean = false
+    ) {
+        val current = _generateTaskStates.value.orEmpty()[state.sessionId]
+        val base = current ?: GenerateTaskState(
+            sessionId = state.sessionId,
+            phase = phase,
+            status = message,
+            isModification = isModification
+        )
+        val next = base.copy(
+            phase = phase,
+            filePath = filePath ?: base.filePath,
+            status = message,
+            isModification = isModification || base.isModification,
+            harnessIteration = maxOf(base.harnessIteration, iteration),
+            diagnostics = diagnostics,
+            updatedAt = System.currentTimeMillis()
+        ).appendHarnessEvent(
+            GenerateTaskState.HarnessEvent(
+                stage = stage,
+                outcome = outcome,
+                message = message,
+                iteration = iteration,
+                diagnostics = diagnostics
+            )
+        )
+        updateGenerateTaskState(next)
+    }
+
+    private fun updateProjectHarnessEvent(
+        state: StreamingSessionState,
+        event: GenerateTaskState.HarnessEvent,
+        isModification: Boolean,
+        entryPath: String? = null,
+        projectFiles: List<String> = emptyList()
+    ) {
+        val phase = when (event.stage) {
+            GenerateTaskState.Stage.INPUT -> GenerateTaskState.Phase.SANITIZING
+            GenerateTaskState.Stage.PROMPT -> GenerateTaskState.Phase.PROMPTING
+            GenerateTaskState.Stage.MODEL -> GenerateTaskState.Phase.REQUESTING_MODEL
+            GenerateTaskState.Stage.TOOL -> GenerateTaskState.Phase.APPLYING_TOOL
+            GenerateTaskState.Stage.BUILD -> GenerateTaskState.Phase.BUILDING
+            GenerateTaskState.Stage.INSPECT -> GenerateTaskState.Phase.INSPECTING
+            GenerateTaskState.Stage.SELF_TEST -> GenerateTaskState.Phase.SELF_TESTING
+            GenerateTaskState.Stage.TEST -> GenerateTaskState.Phase.TESTING
+            GenerateTaskState.Stage.DELIVER -> if (
+                event.outcome == GenerateTaskState.Outcome.FAILED
+            ) {
+                GenerateTaskState.Phase.ERROR
+            } else {
+                GenerateTaskState.Phase.BUILDING
+            }
+        }
+        val current = _generateTaskStates.value.orEmpty()[state.sessionId]
+        val base = current ?: GenerateTaskState(
+            sessionId = state.sessionId,
+            phase = phase,
+            status = event.message,
+            isModification = isModification
+        )
+        updateGenerateTaskState(
+            base.copy(
+                phase = phase,
+                filePath = entryPath ?: base.filePath,
+                projectFiles = projectFiles.ifEmpty { base.projectFiles },
+                status = event.message,
+                isModification = isModification,
+                harnessIteration = maxOf(base.harnessIteration, event.iteration),
+                diagnostics = event.diagnostics,
+                updatedAt = event.timestamp
+            ).appendHarnessEvent(event)
+        )
+    }
+
+    private fun updateProjectFileState(
+        state: StreamingSessionState,
+        relativePath: String,
+        content: String,
+        entryPath: String?,
+        projectFiles: List<String>,
+        isModification: Boolean
+    ) {
+        val current = _generateTaskStates.value.orEmpty()[state.sessionId]
+        val base = current ?: GenerateTaskState(
+            sessionId = state.sessionId,
+            phase = GenerateTaskState.Phase.APPLYING_TOOL,
+            status = "正在生成多文件项目",
+            isModification = isModification
+        )
+        updateGenerateTaskState(
+            base.copy(
+                phase = GenerateTaskState.Phase.APPLYING_TOOL,
+                code = content,
+                filePath = entryPath ?: base.filePath,
+                activeFilePath = relativePath,
+                projectFiles = projectFiles,
+                status = "已写入 $relativePath · ${projectFiles.size} 个项目文件",
+                isModification = isModification,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
     }
 
     private fun markGenerateTaskError(
@@ -1111,6 +3129,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun restoreGenerateTaskState(sessionId: Long) {
         if (streamingStates[sessionId]?.isGeneratingApp == true) return
+        serviceProgressStates.values
+            .firstOrNull { it.sessionId == sessionId && it.isRunning }
+            ?.let { progress ->
+                mergeDetachedHarnessProgress(progress)
+                return
+            }
         viewModelScope.launch {
             val restored = withContext(Dispatchers.IO) {
                 val session = repository.getSessionById(sessionId) ?: return@withContext null
@@ -1119,23 +3143,54 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     .firstNotNullOfOrNull { it.appHtmlPath?.takeIf(String::isNotBlank) }
                 val path = session.appHtmlPath?.takeIf(String::isNotBlank) ?: legacyPath
                 if (!session.isGenerateTask && path == null) return@withContext null
-                if (!session.isGenerateTask) {
-                    repository.markSessionAsGenerate(sessionId, path)
+                val resolved = path
+                    ?.let(::File)
+                    ?.takeIf(File::exists)
+                    ?.let { input -> runCatching { WebAppProjectResolver.resolve(input) }.getOrNull() }
+                val managedProject = resolved?.takeUnless {
+                    it.kind == WebAppProjectSnapshotKind.LEGACY
                 }
-                val file = path?.let(::File)?.takeIf { it.isFile }
+                val restoredProject = resolved?.let { project ->
+                    if (project.kind == WebAppProjectSnapshotKind.LEGACY) {
+                        project
+                    } else {
+                        WebAppProjectWorkspace().activeRelease(project.projectRoot)
+                    }
+                }
+                if (managedProject != null && restoredProject == null) {
+                    return@withContext GenerateTaskState(
+                        sessionId = sessionId,
+                        phase = GenerateTaskState.Phase.ERROR,
+                        status = "项目尚无可用的已发布版本"
+                    )
+                }
+                val restoredPath = restoredProject?.entryFile?.absolutePath ?: path
+                if (!session.isGenerateTask || restoredPath != session.appHtmlPath) {
+                    repository.markSessionAsGenerate(sessionId, restoredPath)
+                }
+                val file = if (restoredProject != null) {
+                    restoredProject.entryFile.takeIf(File::isFile)
+                } else {
+                    path?.let(::File)?.takeIf(File::isFile)
+                }
                 if (file == null) {
                     GenerateTaskState(
                         sessionId = sessionId,
                         phase = GenerateTaskState.Phase.ERROR,
-                        filePath = path,
+                        filePath = restoredPath,
                         status = "生成任务尚无可用的 HTML 文件"
                     )
                 } else {
+                    val projectFiles = restoredProject?.let { project ->
+                        projectFilePaths(WebProjectFileTool(project.contentRoot))
+                    }.orEmpty()
                     GenerateTaskState(
                         sessionId = sessionId,
                         phase = GenerateTaskState.Phase.COMPLETED,
                         code = file.readText(),
                         filePath = file.absolutePath,
+                        activeFilePath = restoredProject?.manifest?.entryPoint ?: file.name,
+                        projectFiles = projectFiles,
                         status = "应用源码已载入"
                     )
                 }
@@ -1298,9 +3353,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun cancelStreaming(sessionId: Long, persistFallback: Boolean = false) {
-        val state = streamingStates.remove(sessionId) ?: return
+        val state = streamingStates.remove(sessionId)
+        if (state == null) {
+            serviceProgressStates.values
+                .firstOrNull { it.sessionId == sessionId && it.isRunning }
+                ?.let { progress ->
+                    HarnessForegroundServiceController.cancel(
+                        getApplication<Application>(),
+                        progress.runId,
+                        "生成任务已停止"
+                    )
+                }
+            updateSessionLoadingIndicators()
+            return
+        }
         state.job?.cancel()
         state.job = null
+        state.serviceRunId?.let { runId ->
+            HarnessForegroundServiceController.cancel(
+                getApplication<Application>(),
+                runId,
+                "生成任务已停止"
+            )
+        } ?: state.serviceJob?.cancel(CancellationException("生成任务已停止"))
+        state.serviceJob = null
+        state.serviceRunId = null
+        state.isServiceOwned = false
         stopAppGenerationProgressHeartbeat(state)
         if (state.isGeneratingApp) {
             val task = _generateTaskStates.value.orEmpty()[sessionId]
@@ -1329,8 +3407,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         updateSessionLoadingIndicators()
     }
 
-    private fun cancelAllStreaming(persistFallback: Boolean = false) {
+    private fun cancelAllStreaming(
+        persistFallback: Boolean = false,
+        includeServiceOwned: Boolean = true
+    ) {
         streamingStates.keys.toList().forEach { sessionId ->
+            if (!includeServiceOwned && streamingStates[sessionId]?.isServiceOwned == true) {
+                return@forEach
+            }
             cancelStreaming(sessionId, persistFallback = persistFallback)
         }
     }
@@ -1350,10 +3434,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun updateSessionLoadingIndicators() {
-        val runningIds = streamingStates.keys.toSet()
+        val serviceRunningIds = serviceProgressStates.values
+            .asSequence()
+            .filter(HarnessProgress::isRunning)
+            .mapNotNull(HarnessProgress::sessionId)
+            .toSet()
+        val runningIds = streamingStates.keys + serviceRunningIds
         _runningSessionIds.value = runningIds
         _isLoading.value = _currentSessionId.value?.let { it in runningIds } == true
-        _isGeneratingApp.value = streamingStates.values.any { it.isGeneratingApp }
+        _isGeneratingApp.value = streamingStates.values.any { it.isGeneratingApp } ||
+            serviceRunningIds.isNotEmpty()
     }
 
     private suspend fun addFinalAssistantMessage(
@@ -1526,7 +3616,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     val imageBase64List = loadImageBase64List(imagePath = editedMessage.imagePath)
                     generateResponseForPersistedUserMessage(state, config, content, imageBase64List)
                 } finally {
-                    finishStreamingState(state)
+                    if (!state.isServiceOwned) {
+                        finishStreamingState(state)
+                    }
                 }
             }
         }
@@ -1562,7 +3654,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        cancelAllStreaming(persistFallback = true)
+        cancelAllStreaming(persistFallback = true, includeServiceOwned = false)
         messagesJob?.cancel()
         super.onCleared()
     }
@@ -1570,10 +3662,51 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
 private const val WEB_APP_DIFF_LOG_TAG = "WebAppDiff"
 private const val APP_DIFF_LOG_PREVIEW_CHARS = 3_000
+private const val GENERATED_APP_HARNESS_MAX_ITERATIONS = 8
+private const val GENERATED_APP_REPAIR_PATCH_ATTEMPTS = 2
+private const val HARNESS_NOTIFICATION_UPDATE_INTERVAL_MS = 750L
+private const val PROJECT_PLAN_FILE_NAME = "project.json"
+private const val DEFAULT_PROJECT_STYLE_PATH = "styles/app.css"
+private const val DEFAULT_PROJECT_SCRIPT_PATH = "scripts/app.js"
+private const val WEB_PROJECT_PLAN_MAX_TOKENS = 8_000
+private const val WEB_PROJECT_MAX_PLANNED_FILES = 24
+private const val WEB_PROJECT_MAX_MODEL_TURNS = 40
+private const val WEB_PROJECT_MAX_TOOL_CALLS = 64
+private const val WEB_PROJECT_DIRECTORY_NAME_MAX_CHARS = 64
+private const val WEB_PROJECT_DIRECTORY_ID_CHARS = 8
+private val WEB_PROJECT_PLAN_GSON = GsonBuilder()
+    .setPrettyPrinting()
+    .disableHtmlEscaping()
+    .create()
+
+private data class PreparedWebProject(
+    val workspace: WebAppProjectWorkspace,
+    val snapshot: WebAppProjectSnapshot
+)
+
+private class MutableWebProjectBinding(
+    val workspace: WebAppProjectWorkspace,
+    val projectRoot: File,
+    val contentRoot: File,
+    manifest: WebAppProjectManifest,
+    val draftVersion: Long
+) {
+    var manifest: WebAppProjectManifest = manifest
+
+    val entryFile: File
+        get() = File(contentRoot, manifest.entryPoint).absoluteFile
+
+    val declaredPaths: Set<String>
+        get() = manifest.files.mapTo(linkedSetOf()) { it.path }
+}
 
 private data class StreamingSessionState(
     val sessionId: Long,
     var job: Job? = null,
+    var serviceJob: Job? = null,
+    var serviceRunId: String? = null,
+    var isServiceOwned: Boolean = false,
+    var harnessProgressReporter: HarnessProgressReporter? = null,
     var appGenerationProgressJob: Job? = null,
     var placeholder: ChatMessage? = null,
     val streamingContent: StringBuilder = StringBuilder(),
@@ -1584,6 +3717,8 @@ private data class StreamingSessionState(
     var lastStreamingContentUpdateAt: Long = 0L,
     var lastStreamingThinkingUpdateAt: Long = 0L,
     var lastGenerateTaskUpdateAt: Long = 0L,
+    var lastHarnessProgressUpdateAt: Long = 0L,
+    var lastHarnessProgressFingerprint: String = "",
     var reconnectPrefixPending: String = ""
 )
 

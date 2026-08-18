@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/harnessEventHeader"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@android:color/transparent"
+        android:foreground="?attr/selectableItemBackgroundBorderless"
+        android:gravity="center_vertical"
+        android:minHeight="44dp"
+        android:orientation="horizontal"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp">
+
+        <FrameLayout
+            android:layout_width="22dp"
+            android:layout_height="22dp">
+
+            <ProgressBar
+                android:id="@+id/progressHarnessEvent"
+                style="?android:attr/progressBarStyleSmall"
+                android:layout_width="17dp"
+                android:layout_height="17dp"
+                android:layout_gravity="center"
+                android:indeterminate="true"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
+            <ImageView
+                android:id="@+id/ivHarnessEventState"
+                android:layout_width="19dp"
+                android:layout_height="19dp"
+                android:layout_gravity="center"
+                android:contentDescription="@null"
+                android:src="@drawable/ic_harness_check"
+                app:tint="@color/mt_text_muted" />
+
+        </FrameLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tvHarnessEventText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="2"
+                android:textColor="@color/mt_text_secondary"
+                android:textSize="15sp"
+                tools:text="正在通过 WebView 检查器读取运行错误" />
+
+            <TextView
+                android:id="@+id/tvHarnessEventMeta"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:textColor="@color/mt_text_muted"
+                android:textSize="11sp"
+                tools:text="WebView 检查 · 第 1 轮" />
+
+        </LinearLayout>
+
+        <ImageView
+            android:id="@+id/ivHarnessEventExpand"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_marginStart="6dp"
+            android:contentDescription="@null"
+            android:src="@drawable/ic_chevron_down"
+            android:visibility="gone"
+            app:tint="@color/mt_text_muted"
+            tools:visibility="visible" />
+
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tvHarnessEventDiagnostics"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="32dp"
+        android:layout_marginTop="2dp"
+        android:layout_marginBottom="8dp"
+        android:background="@drawable/bg_harness_activity_details"
+        android:fontFamily="monospace"
+        android:lineSpacingExtra="2dp"
+        android:padding="10dp"
+        android:textColor="@color/mt_code_text"
+        android:textIsSelectable="true"
+        android:textSize="12sp"
+        android:visibility="gone"
+        tools:text="Console: Uncaught TypeError at app.js:42"
+        tools:visibility="visible" />
+
+</LinearLayout>

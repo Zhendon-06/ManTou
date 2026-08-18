@@ -109,9 +109,8 @@
         android:contentDescription="打开生成代码编辑器"
         android:elevation="8dp"
         android:focusable="true"
-        android:tag="glass:card"
         android:visibility="gone"
-        app:cardBackgroundColor="@android:color/transparent"
+        app:cardBackgroundColor="@color/mt_generate_surface"
         app:cardCornerRadius="11dp"
         app:cardElevation="8dp"
         app:layout_constraintBottom_toTopOf="@id/inputContainer"
@@ -133,23 +132,14 @@
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <ProgressBar
-                    android:id="@+id/generateCodeProgress"
-                    style="?android:attr/progressBarStyleSmall"
-                    android:layout_width="10dp"
-                    android:layout_height="10dp"
-                    android:indeterminate="true"
-                    android:indeterminateTint="@color/mt_generate_accent" />
-
                 <TextView
                     android:id="@+id/tvGenerateCodeTitle"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="5dp"
                     android:layout_weight="1"
                     android:ellipsize="end"
                     android:maxLines="1"
-                    android:text="正在写入 HTML"
+                    android:text="源码预览"
                     android:textColor="@color/mt_generate_text"
                     android:textSize="10sp"
                     android:textStyle="bold" />

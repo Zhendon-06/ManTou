@@ -19,7 +19,11 @@ object MantouWebViewRuntime {
     private const val TOOL_BRIDGE_PREFIX = "MantouApp_"
     private const val STORAGE_TOOL_NAME = "storage"
 
-    fun install(webView: WebView, htmlFile: File? = null) {
+    fun install(
+        webView: WebView,
+        htmlFile: File? = null,
+        storageFile: File? = null
+    ) {
         webView.settings.userAgentString =
             AppGenerator.withMantouWebAppUserAgent(webView.settings.userAgentString)
 
@@ -33,7 +37,11 @@ object MantouWebViewRuntime {
         for (tool in ToolRegistry.instances()) {
             webView.addJavascriptInterface(tool, TOOL_BRIDGE_PREFIX + tool.toolName)
         }
-        webView.addJavascriptInterface(StorageTool(webView.context, htmlFile), TOOL_BRIDGE_PREFIX + STORAGE_TOOL_NAME)
+        val resolvedStorageFile = storageFile ?: htmlFile?.let(AppGenerator::ensureWebAppDataFile)
+        webView.addJavascriptInterface(
+            StorageTool(webView.context, resolvedStorageFile),
+            TOOL_BRIDGE_PREFIX + STORAGE_TOOL_NAME
+        )
     }
 
     private object MainBridge {
@@ -61,10 +69,8 @@ object MantouWebViewRuntime {
     )
     private class StorageTool(
         context: android.content.Context,
-        htmlFile: File?
+        private val dataFile: File?
     ) : BaseTool(context.applicationContext) {
-
-        private val dataFile: File? = htmlFile?.let { AppGenerator.ensureWebAppDataFile(it) }
 
         @JavascriptInterface
         @ToolMethod(

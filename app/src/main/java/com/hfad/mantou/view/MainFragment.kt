@@ -40,6 +40,7 @@ import android.app.ActivityOptions
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.ColorUtils
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsAnimationCompat
@@ -59,6 +60,8 @@ import com.hfad.mantou.adapter.ChatAdapter
 import com.hfad.mantou.adapter.DesktopAppAdapter
 import com.hfad.mantou.adapter.SessionAdapter
 import com.hfad.mantou.adapter.WorkspaceFileAdapter
+import com.hfad.mantou.adapter.WorkspaceFileOpenMode
+import com.hfad.mantou.adapter.WorkspaceFileOpenPolicy
 import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.data.GenerateTaskState
 import com.hfad.mantou.data.api.VoiceInputConfig
@@ -103,7 +106,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         const val PAGE_WORKSPACE = 2
     }
 
-
     private var _binding: FragmentMainBinding? = null
     private val binding get() = _binding!!
     private var _chatBinding: LayoutChatPageBinding? = null
@@ -126,6 +128,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var forceScrollToLatestMessage = false
     private var isChatScrollActive = false
     private var pendingMessagesWhileScrolling: List<ChatMessage>? = null
+    private var latestChatMessages: List<ChatMessage> = emptyList()
+    private var latestChatMessagesSessionId: Long? = null
     private var isTaskRunning = false
     private val selectedImageUris = mutableListOf<Uri>()
     private var activeAppWebView: WebView? = null
@@ -136,6 +140,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var isVoiceRecording = false
     private var isVoiceTranscribing = false
     private var pendingVoiceStartAfterPermission = false
+    private var notificationPermissionRequestInFlight = false
     private val providerRepository by lazy {
         ProviderRepository(AppDatabase.getDatabase(requireContext().applicationContext).providerDao())
     }
@@ -164,6 +169,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var codeEditorBinding: DialogGenerateCodeEditorBinding? = null
     private var drawerSearchQuery: String = ""
     private var showArchivedSessions: Boolean = false
+    private var adaptiveTextColor: Int = Color.rgb(32, 37, 53)
 
     private val imagePickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -187,6 +193,12 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             pendingVoiceStartAfterPermission = false
             Toast.makeText(requireContext(), "需要麦克风权限才能语音输入", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private val requestNotificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        notificationPermissionRequestInFlight = false
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -453,7 +465,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun updateChatListScrollBoundary() {
-        val generateCardInset = if (currentGenerateTaskState != null) {
+        val generateCardInset = if (chatBinding.generateCodeCard.visibility == View.VISIBLE) {
             val layoutParams = chatBinding.generateCodeCard.layoutParams as? ViewGroup.MarginLayoutParams
             val cardHeight = layoutParams?.height?.takeIf { it > 0 }
                 ?: chatBinding.generateCodeCard.height
@@ -499,7 +511,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun renderChatMessages(messages: List<ChatMessage>) {
-        updateGreetingVisibility(messages.isNotEmpty())
+        updateGreetingVisibility(
+            messages.isNotEmpty() || currentGenerateTaskState?.harnessEvents?.isNotEmpty() == true
+        )
         if (forceScrollToLatestMessage) {
             pendingMessagesWhileScrolling = null
         }
@@ -512,7 +526,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val followNewMessages = forceScrollToLatestMessage || shouldFollowNewMessages()
         forceScrollToLatestMessage = false
         val anchor = if (followNewMessages) null else captureChatViewportAnchor()
-        chatAdapter.submitList(messages) {
+        val displayMessages = buildDisplayMessages(messages)
+        chatAdapter.submitList(displayMessages) {
             if (isChatScrollActive) {
                 pendingMessagesWhileScrolling = messages
                 return@submitList
@@ -523,6 +538,52 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             }
         }
         updateCurrentContextTokens(messages)
+    }
+
+    private fun buildDisplayMessages(messages: List<ChatMessage>): List<ChatMessage> {
+        val taskState = currentGenerateTaskState ?: return messages
+        if (taskState.sessionId != viewModel.currentSessionId.value) return messages
+        if (taskState.harnessEvents.isEmpty()) return messages
+
+        val placeholderId = -taskState.sessionId.coerceAtLeast(1L)
+        val visibleMessages = messages.filterNot { message ->
+            message.messageId == placeholderId && message.isStreaming && message.content.isBlank()
+        }.toMutableList()
+        val harnessState = taskState.copy(
+            phase = when (taskState.phase) {
+                GenerateTaskState.Phase.COMPLETED,
+                GenerateTaskState.Phase.ERROR -> taskState.phase
+                else -> GenerateTaskState.Phase.REQUESTING_MODEL
+            },
+            code = "",
+            filePath = null,
+            status = if (taskState.phase == GenerateTaskState.Phase.ERROR) taskState.status else "",
+            diagnostics = emptyList(),
+            updatedAt = taskState.harnessEvents.last().timestamp
+        )
+        val harnessMessage = ChatMessage(
+            messageId = harnessMessageId(taskState.sessionId),
+            role = ChatMessage.ROLE_HARNESS,
+            content = "",
+            timestamp = harnessState.updatedAt,
+            isStreaming = harnessState.isRunning,
+            generateTaskState = harnessState
+        )
+        val taskFilePath = taskState.filePath?.takeIf(String::isNotBlank)
+        val previewIndex = visibleMessages.lastIndex.takeIf { index ->
+            index >= 0 && taskFilePath != null &&
+                visibleMessages[index].appHtmlPath == taskFilePath
+        } ?: -1
+        if (previewIndex >= 0) {
+            visibleMessages.add(previewIndex, harnessMessage)
+        } else {
+            visibleMessages.add(harnessMessage)
+        }
+        return visibleMessages
+    }
+
+    private fun harnessMessageId(sessionId: Long): Long {
+        return Long.MIN_VALUE + sessionId.coerceAtLeast(1L)
     }
 
     private fun captureChatViewportAnchor(): ChatViewportAnchor? {
@@ -684,21 +745,21 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             return
         }
 
-        when (file.extension.lowercase(Locale.getDefault())) {
-            "html", "htm" -> {
+        when (WorkspaceFileOpenPolicy.modeFor(file.name)) {
+            WorkspaceFileOpenMode.WEB_APP -> {
                 val intent = Intent(requireContext(), VirtualAppActivity::class.java).apply {
                     putExtra(VirtualAppActivity.EXTRA_HTML_PATH, file.absolutePath)
                 }
                 startActivity(intent)
             }
-            "json" -> {
+            WorkspaceFileOpenMode.JSON -> {
                 val intent = Intent(requireContext(), JsonViewerActivity::class.java).apply {
                     putExtra(JsonViewerActivity.EXTRA_JSON_PATH, file.absolutePath)
                 }
                 startActivity(intent)
             }
-            "md", "txt" -> openTextFileEditor(file)
-            else -> {
+            WorkspaceFileOpenMode.TEXT -> openTextFileEditor(file)
+            WorkspaceFileOpenMode.UNSUPPORTED -> {
                 val typeName = file.extension.ifBlank { "该" }
                 Toast.makeText(requireContext(), "暂不支持打开 $typeName 类型文件", Toast.LENGTH_SHORT).show()
             }
@@ -1023,7 +1084,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun updateAppBarTabTint(selectedPage: Int) {
         val selectedTint = ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.mt_on_primary))
-        val idleTint = ColorStateList.valueOf(Color.rgb(82, 96, 120))
+        val idleTint = ColorStateList.valueOf(ColorUtils.setAlphaComponent(adaptiveTextColor, 190))
 
         binding.ivDesktopTab.imageTintList = if (selectedPage == PAGE_DESKTOP) selectedTint else idleTint
         binding.ivChatTab.imageTintList = if (selectedPage == PAGE_CHAT) selectedTint else idleTint
@@ -1065,7 +1126,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
             desktopBinding.root.setBackgroundColor(defaultBackground)
-            dispatchAutoTextColor(appearanceSettings, null)
+            updateNewChatAppearance()
+            val analysis = AutoContrastColor.analyze(requireContext(), appearanceSettings, null)
+            dispatchAutoTextColor(appearanceSettings, analysis)
             return
         }
 
@@ -1085,7 +1148,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             chatBinding.root.setBackgroundColor(defaultBackground)
             workspaceBinding.root.setBackgroundColor(defaultBackground)
             desktopBinding.root.setBackgroundColor(defaultBackground)
-            dispatchAutoTextColor(appearanceSettings, null)
+            updateNewChatAppearance()
+            val analysis = AutoContrastColor.analyze(requireContext(), appearanceSettings, null)
+            dispatchAutoTextColor(appearanceSettings, analysis)
             Toast.makeText(requireContext(), "壁纸读取失败，已恢复默认背景", Toast.LENGTH_SHORT).show()
             return
         }
@@ -1099,27 +1164,80 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 }
             )
         }
-        binding.wallpaperMask.visibility = View.VISIBLE
-        binding.wallpaperMask.setBackgroundColor(AppearanceSettingsStore.maskColor(appearanceSettings))
+        val analysis = AutoContrastColor.analyze(
+            requireContext(),
+            appearanceSettings,
+            binding.wallpaperBackground.drawable
+        )
+        binding.wallpaperMask.visibility =
+            if (Color.alpha(analysis.maskColor) > 0) View.VISIBLE else View.GONE
+        binding.wallpaperMask.setBackgroundColor(analysis.maskColor)
         mainPager.setBackgroundColor(Color.TRANSPARENT)
         chatBinding.root.setBackgroundColor(Color.TRANSPARENT)
         workspaceBinding.root.setBackgroundColor(Color.TRANSPARENT)
         desktopBinding.root.setBackgroundColor(Color.TRANSPARENT)
-        dispatchAutoTextColor(appearanceSettings, binding.wallpaperBackground.drawable)
+        updateNewChatAppearance()
+        dispatchAutoTextColor(appearanceSettings, analysis)
+    }
+
+    private fun updateNewChatAppearance() {
+        binding.newChat.tag = "glass:circle"
+        binding.newChat.setBackgroundColor(Color.TRANSPARENT)
+        binding.newChat.imageTintList = ColorStateList.valueOf(
+            ContextCompat.getColor(requireContext(), R.color.input_action_blue)
+        )
+        LiquidGlass.refresh(binding.root)
     }
 
     private fun dispatchAutoTextColor(
         settings: AppearanceSettingsStore.Settings,
-        wallpaperDrawable: android.graphics.drawable.Drawable?
+        analysis: AutoContrastColor.Analysis
     ) {
-        val autoColor = AutoContrastColor.resolve(requireContext(), settings, wallpaperDrawable)
+        val autoColor = analysis.textColor
         val effective = if (settings.hasFixedTextColor) settings.chatTextColor else autoColor
+        adaptiveTextColor = effective
         if (::chatAdapter.isInitialized) {
             chatAdapter.updateAutoTextColor(autoColor)
         }
         if (::desktopAppAdapter.isInitialized) {
             desktopAppAdapter.updateTextColor(effective)
         }
+        if (::workspaceFileAdapter.isInitialized) {
+            workspaceFileAdapter.updateTextColor(effective)
+        }
+        applyAdaptiveForeground(effective)
+        applySystemBarContrast(
+            analysis.statusBarTextColor,
+            analysis.navigationBarTextColor
+        )
+    }
+
+    private fun applyAdaptiveForeground(color: Int) {
+        val secondaryColor = ColorUtils.setAlphaComponent(color, 184)
+        val hintColor = ColorUtils.setAlphaComponent(color, 145)
+        chatBinding.tvGreeting.setTextColor(color)
+        chatBinding.chipStartTask.setTextColor(color)
+        chatBinding.chipLongTermMemory.setTextColor(color)
+        chatBinding.etInput.setTextColor(color)
+        chatBinding.etInput.setHintTextColor(hintColor)
+        desktopBinding.tvDesktopEmpty.setTextColor(secondaryColor)
+        workspaceBinding.tvWorkspacePath.setTextColor(color)
+        workspaceBinding.ivWorkspacePathIcon.imageTintList = ColorStateList.valueOf(secondaryColor)
+        binding.ivMenu.imageTintList = ColorStateList.valueOf(secondaryColor)
+        updateAppBarTabTint(currentPagerPage)
+
+        for (index in 0 until chatBinding.selectedImageChipGroup.childCount) {
+            val chip = chatBinding.selectedImageChipGroup.getChildAt(index) as? Chip ?: continue
+            chip.setTextColor(color)
+            chip.closeIconTint = ColorStateList.valueOf(secondaryColor)
+        }
+    }
+
+    private fun applySystemBarContrast(statusBarColor: Int, navigationBarColor: Int) {
+        (activity as? MainActivity)?.updateSystemBarIconAppearance(
+            darkStatusBarIcons = ColorUtils.calculateLuminance(statusBarColor) < 0.5,
+            darkNavigationBarIcons = ColorUtils.calculateLuminance(navigationBarColor) < 0.5
+        )
     }
 
     /**
@@ -1654,6 +1772,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private fun observeViewModel() {
         // 观察消息列表
         viewModel.messages.observe(viewLifecycleOwner) { messages ->
+            latestChatMessages = messages
+            latestChatMessagesSessionId = viewModel.currentSessionId.value
             renderChatMessages(messages)
         }
 
@@ -1689,11 +1809,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         viewModel.isGeneratingApp.observe(viewLifecycleOwner) { isGeneratingApp ->
             setKeepScreenOn(isGeneratingApp)
+            if (isGeneratingApp) ensureHarnessNotificationPermission()
         }
 
         viewModel.generateTaskStates.observe(viewLifecycleOwner) { states ->
             generateTaskStates = states
             renderGenerateTaskState(states[viewModel.currentSessionId.value])
+            if (::chatAdapter.isInitialized) {
+                renderChatMessages(latestChatMessages)
+            }
         }
 
         // 观察错误消息
@@ -1708,8 +1832,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         viewModel.currentSessionId.observe(viewLifecycleOwner) { sessionId ->
             pendingMessagesWhileScrolling = null
             forceScrollToLatestMessage = true
+            if (latestChatMessagesSessionId != sessionId) {
+                latestChatMessages = emptyList()
+                latestChatMessagesSessionId = sessionId
+            }
             updateSendButtonState(sessionId != null && sessionId in runningSessionIds)
             renderGenerateTaskState(sessionId?.let(generateTaskStates::get))
+            if (::chatAdapter.isInitialized) {
+                renderChatMessages(latestChatMessages)
+            }
             // 可以在这里更新 UI，显示当前会话信息
         }
 
@@ -1741,36 +1872,64 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun renderGenerateTaskState(taskState: GenerateTaskState?) {
-        val visibilityChanged = (currentGenerateTaskState != null) != (taskState != null)
+        val wasCodePreviewVisible = chatBinding.generateCodeCard.visibility == View.VISIBLE
+        val hasCodePreview = taskState?.code?.isNotBlank() == true
+        val visibilityChanged = wasCodePreviewVisible != hasCodePreview
         val shouldKeepLatestMessageVisible = visibilityChanged &&
             ::chatAdapter.isInitialized && shouldFollowNewMessages()
         currentGenerateTaskState = taskState
-        if (visibilityChanged) {
-            updateChatListScrollBoundary()
-        }
-        if (taskState == null) {
+        if (!hasCodePreview) {
             chatBinding.generateCodeCard.visibility = View.GONE
             codeEditorDialog?.dismiss()
+            if (visibilityChanged) updateChatListScrollBoundary()
             if (shouldKeepLatestMessageVisible) scrollChatToBottom()
             return
         }
 
         chatBinding.generateCodeCard.visibility = View.VISIBLE
-        chatBinding.generateCodeProgress.visibility =
-            if (taskState.isRunning) View.VISIBLE else View.GONE
-        chatBinding.tvGenerateCodeLanguage.text = taskState.languageLabel
-        chatBinding.tvGenerateCodeTitle.text = when (taskState.phase) {
-            GenerateTaskState.Phase.PREPARING -> "正在准备代码"
-            GenerateTaskState.Phase.WRITING_INITIAL -> "正在写入 HTML"
-            GenerateTaskState.Phase.WRITING_DIFF -> "正在写入 DIFF"
-            GenerateTaskState.Phase.APPLYING_DIFF -> "正在应用修改"
-            GenerateTaskState.Phase.COMPLETED -> if (taskState.isModification) "应用源码已更新" else "应用源码"
-            GenerateTaskState.Phase.ERROR -> "生成任务出错"
+        val language = codePreviewLanguage(taskState)
+        val metadata = codePreviewMetadata(taskState)
+        chatBinding.tvGenerateCodeLanguage.text = language
+        chatBinding.tvGenerateCodeTitle.text = if (taskState.projectFiles.size > 1) {
+            "项目源码 · ${taskState.projectFiles.size} 文件"
+        } else {
+            "源码预览"
         }
-        chatBinding.tvGenerateCodeStatus.text = taskState.status
+        chatBinding.tvGenerateCodeStatus.text = metadata
         chatBinding.tvGenerateCodePreview.text = buildGenerateCodePreview(taskState)
+        chatBinding.generateCodeCard.contentDescription = "打开源码预览，$language，$metadata"
         updateGenerateCodeEditor(taskState)
+        if (visibilityChanged) updateChatListScrollBoundary()
         if (shouldKeepLatestMessageVisible) scrollChatToBottom()
+    }
+
+    private fun codePreviewLanguage(taskState: GenerateTaskState): String {
+        val code = taskState.code
+        val looksLikeDiff = code.lineSequence().take(8).any { line ->
+            line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("@@ ")
+        }
+        if (looksLikeDiff) return "DIFF"
+        return taskState.activeFilePath
+            ?.substringAfterLast('/')
+            ?.substringAfterLast('\\')
+            ?.substringAfterLast('.', missingDelimiterValue = "")
+            ?.takeIf(String::isNotBlank)
+            ?.uppercase(Locale.ROOT)
+            ?: taskState.filePath
+            ?.substringAfterLast('.', missingDelimiterValue = "")
+            ?.takeIf(String::isNotBlank)
+            ?.uppercase(Locale.ROOT)
+            ?: "HTML"
+    }
+
+    private fun codePreviewMetadata(taskState: GenerateTaskState): String {
+        val code = taskState.code
+        val lineCount = if (code.isEmpty()) 0 else code.count { it == '\n' } + 1
+        val metrics = "$lineCount 行 · ${code.length} 字符"
+        return taskState.activeFilePath
+            ?.takeIf(String::isNotBlank)
+            ?.let { "$it · $metrics" }
+            ?: metrics
     }
 
     private fun buildGenerateCodePreview(taskState: GenerateTaskState): String {
@@ -1813,7 +1972,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         codeEditorDialog = dialog
         editorBinding.tvCodeEditorLines.bindTo(editorBinding.tvCodeEditorContent)
         dialog.show()
-        LiquidGlass.decorate(dialog)
         dialog.window?.apply {
             setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             statusBarColor = ContextCompat.getColor(requireContext(), R.color.mt_generate_surface)
@@ -1826,21 +1984,18 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val editorBinding = codeEditorBinding ?: return
         if (codeEditorDialog?.isShowing != true) return
 
-        val title = taskState.filePath
+        val title = taskState.activeFilePath
+            ?.takeIf(String::isNotBlank)
+            ?: taskState.filePath
             ?.let(::File)
             ?.name
             ?.takeIf(String::isNotBlank)
             ?: if (taskState.isModification) "应用修改.diff" else "生成应用.html"
         editorBinding.tvCodeEditorTitle.text = title
-        editorBinding.tvCodeEditorStatus.text = taskState.status
-        editorBinding.tvCodeEditorLanguage.text = taskState.languageLabel
+        editorBinding.tvCodeEditorStatus.text = codePreviewMetadata(taskState)
+        editorBinding.tvCodeEditorLanguage.text = codePreviewLanguage(taskState)
         editorBinding.tvCodeEditorContent.text = taskState.code
         editorBinding.tvCodeEditorLines.refreshLineNumbers()
-        if (taskState.isRunning) {
-            editorBinding.codeEditorVerticalScroll.post {
-                editorBinding.codeEditorVerticalScroll.fullScroll(View.FOCUS_DOWN)
-            }
-        }
     }
 
     private fun openImagePicker() {
@@ -1895,12 +2050,14 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 isCloseIconVisible = true
                 isClickable = true
                 isCheckable = false
-                setTextColor(Color.rgb(44, 83, 122))
+                setTextColor(adaptiveTextColor)
                 textSize = 13f
                 chipBackgroundColor = android.content.res.ColorStateList.valueOf(Color.TRANSPARENT)
                 chipStrokeColor = android.content.res.ColorStateList.valueOf(Color.argb(120, 255, 255, 255))
                 chipStrokeWidth = dp(1).toFloat()
-                closeIconTint = android.content.res.ColorStateList.valueOf(Color.rgb(44, 131, 216))
+                closeIconTint = android.content.res.ColorStateList.valueOf(
+                    ColorUtils.setAlphaComponent(adaptiveTextColor, 184)
+                )
                 setOnCloseIconClickListener {
                     selectedImageUris.remove(uri)
                     renderSelectedImageChips()
@@ -2651,7 +2808,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         lateinit var saveLimitAction: (Int, Boolean) -> Unit
 
         val scroll = ScrollView(requireContext()).apply {
-            tag = "glass:sheet"
+            background = glassDialogSurface(26f)
             isFillViewport = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
@@ -3160,10 +3317,18 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     override fun onResume() {
         super.onResume()
+        (activity as? MainActivity)?.dispatchHarnessNotificationIntent()
         viewModel.refreshActiveModel()
         refreshWorkspaceTree()
         refreshDesktopApps()
         applyWallpaper()
+    }
+
+    internal fun openHarnessSessionFromNotification(sessionId: Long) {
+        viewModel.switchToSession(sessionId)
+        if (::mainPager.isInitialized) {
+            mainPager.setCurrentItem(PAGE_CHAT, false)
+        }
     }
 
     override fun onDestroyView() {
@@ -3193,6 +3358,20 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
+    }
+
+    private fun ensureHarnessNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(
+                requireContext(),
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        if (notificationPermissionRequestInFlight) return
+        notificationPermissionRequestInFlight = true
+        requestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private data class ChatViewportAnchor(

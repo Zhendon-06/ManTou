@@ -144,7 +144,7 @@
                 android:layout_width="38dp"
                 android:layout_height="38dp"
                 android:layout_gravity="start|center_vertical"
-                android:background="@android:color/transparent"
+                android:background="@drawable/bg_appbar_action_default"
                 android:contentDescription="菜单"
                 android:foreground="?attr/selectableItemBackgroundBorderless"
                 android:padding="10dp"
@@ -158,13 +158,13 @@
                 android:layout_width="38dp"
                 android:layout_height="38dp"
                 android:layout_gravity="end|center_vertical"
-                android:background="@drawable/bg_drawer_action_circle"
+                android:background="@android:color/transparent"
                 android:contentDescription="新建会话"
                 android:foreground="?attr/selectableItemBackgroundBorderless"
                 android:padding="7dp"
                 android:scaleType="center"
                 android:src="@drawable/ic_appbar_new_chat"
-                android:tag="glass:accent"
+                android:tag="glass:circle"
                 android:tint="@color/input_action_blue" />
         </FrameLayout>
     </FrameLayout>

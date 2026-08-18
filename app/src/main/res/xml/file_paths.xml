@@ -7,8 +7,10 @@
     <files-path
         name="generated_apps"
         path="generated_apps/" />
+    <cache-path
+        name="shared_web_apps"
+        path="shared_web_apps/" />
 </paths>
-
 
 
 

@@ -7,6 +7,8 @@ import android.provider.OpenableColumns
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -14,6 +16,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
 import com.hfad.mantou.R
 import com.hfad.mantou.databinding.VirtualappBinding
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
@@ -21,6 +24,15 @@ import com.hfad.mantou.tool.impl.CameraPhotoHost
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.AppGenerator
 import com.hfad.mantou.utils.MantouWebViewRuntime
+import com.hfad.mantou.utils.WebProjectContentServer
+import com.hfad.mantou.utils.project.WebAppProjectExporter
+import com.hfad.mantou.utils.project.WebAppProjectResolver
+import com.hfad.mantou.utils.project.WebAppProjectSnapshot
+import com.hfad.mantou.utils.project.WebAppProjectSnapshotKind
+import com.hfad.mantou.utils.project.WebAppProjectWorkspace
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
@@ -33,6 +45,7 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
     private lateinit var webView: WebView
     private lateinit var cameraPhotoHost: CameraPhotoHost
     private var currentHtmlPath: String? = null
+    private var currentSnapshot: WebAppProjectSnapshot? = null
 
     private val takePictureLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
         cameraPhotoHost.onCameraPhotoResult(success)
@@ -44,6 +57,8 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
 
     companion object {
         const val EXTRA_HTML_PATH = "html_path"
+        private const val SHARED_PROJECTS_CACHE_DIR = "shared_web_apps"
+        private const val MAX_ARCHIVE_NAME_CHARS = 80
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -93,14 +108,11 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
             }
         }
 
-        currentHtmlPath = (htmlPath ?: resolveSharedHtmlPath(intent))?.let { path ->
-            ensureStoredWebAppIdentity(File(path), "打开准备失败")?.absolutePath
-        }
-        if (!currentHtmlPath.isNullOrEmpty()) {
-            MantouWebViewRuntime.install(webView, File(currentHtmlPath!!))
-            webView.loadUrl("file://$currentHtmlPath")
-        } else {
+        val requestedPath = htmlPath ?: resolveSharedHtmlPath(intent)
+        if (requestedPath.isNullOrEmpty()) {
             Toast.makeText(this, "没有可打开的网页应用", Toast.LENGTH_SHORT).show()
+        } else {
+            loadWebApp(requestedPath)
         }
 
         binding.btnSmallscreen.setOnClickListener {
@@ -114,6 +126,74 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
 
     override fun requestCameraPhoto(callbackName: String?) {
         cameraPhotoHost.requestCameraPhoto(callbackName)
+    }
+
+    private fun loadWebApp(path: String): Boolean {
+        val snapshot = runCatching {
+            WebAppProjectResolver.resolve(File(path))
+        }.getOrElse { error ->
+            Toast.makeText(this, "打开准备失败: ${error.message}", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        return if (snapshot.kind == WebAppProjectSnapshotKind.LEGACY) {
+            loadLegacyWebApp(snapshot)
+        } else {
+            loadManagedWebApp(snapshot)
+        }
+    }
+
+    private fun loadLegacyWebApp(snapshot: WebAppProjectSnapshot): Boolean {
+        val entryFile = ensureStoredWebAppIdentity(snapshot.entryFile, "打开准备失败")
+            ?: return false
+        currentHtmlPath = entryFile.absolutePath
+        currentSnapshot = snapshot
+        webView.apply {
+            webViewClient = WebViewClient()
+            settings.allowFileAccess = true
+            settings.allowContentAccess = true
+            MantouWebViewRuntime.install(this, entryFile)
+            loadUrl("file://${entryFile.absolutePath}")
+        }
+        return true
+    }
+
+    private fun loadManagedWebApp(snapshot: WebAppProjectSnapshot): Boolean {
+        val contentServer = runCatching {
+            WebProjectContentServer.create(
+                projectRoot = snapshot.contentRoot,
+                entryFile = snapshot.entryFile,
+                projectId = snapshot.manifest.projectId,
+                revision = snapshot.version?.let { version ->
+                    val prefix = if (snapshot.kind == WebAppProjectSnapshotKind.DRAFT) "d" else "r"
+                    "$prefix-$version"
+                }
+            )
+        }.getOrElse { error ->
+            Toast.makeText(this, "项目预览准备失败: ${error.message}", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        currentHtmlPath = snapshot.entryFile.absolutePath
+        currentSnapshot = snapshot
+        webView.apply {
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView,
+                    request: WebResourceRequest
+                ): WebResourceResponse? {
+                    return runCatching { contentServer.intercept(request) }.getOrNull()
+                        ?: super.shouldInterceptRequest(view, request)
+                }
+            }
+            settings.allowFileAccess = false
+            settings.allowContentAccess = false
+            MantouWebViewRuntime.install(
+                webView = this,
+                htmlFile = snapshot.entryFile,
+                storageFile = WebAppProjectWorkspace.runtimeStateFile(snapshot.projectRoot)
+            )
+            loadUrl(contentServer.entryUrl)
+        }
+        return true
     }
 
     private fun resolveSharedHtmlPath(intent: Intent): String? {
@@ -165,6 +245,12 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
     }
 
     private fun shareCurrentWebApp() {
+        val snapshot = currentSnapshot
+        if (snapshot != null && snapshot.kind != WebAppProjectSnapshotKind.LEGACY) {
+            shareManagedWebApp(snapshot)
+            return
+        }
+
         val htmlPath = currentHtmlPath
         if (htmlPath.isNullOrEmpty()) {
             Toast.makeText(this, "没有可分享的网页应用", Toast.LENGTH_SHORT).show()
@@ -178,19 +264,56 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
         }
 
         val shareFile = ensureStoredWebAppIdentity(htmlFile, "分享准备失败") ?: return
-        val htmlUri = FileProvider.getUriForFile(
+        launchFileShare(shareFile, "text/html", "分享网页应用")
+    }
+
+    private fun shareManagedWebApp(snapshot: WebAppProjectSnapshot) {
+        binding.btnShare.isEnabled = false
+        lifecycleScope.launch {
+            val archiveResult = withContext(Dispatchers.IO) {
+                runCatching {
+                    WebAppProjectExporter.exportZip(
+                        snapshot = snapshot,
+                        destination = managedArchiveFile(snapshot)
+                    )
+                }
+            }
+            binding.btnShare.isEnabled = true
+            archiveResult.onSuccess { archive ->
+                launchFileShare(archive, "application/zip", "分享网页应用项目")
+            }.onFailure { error ->
+                Toast.makeText(
+                    this@VirtualAppActivity,
+                    "项目打包失败: ${error.message}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    private fun managedArchiveFile(snapshot: WebAppProjectSnapshot): File {
+        val safeName = snapshot.manifest.displayName
+            .replace(Regex("[\\\\/:*?\"<>|]+"), "_")
+            .trim('_', '-', '.', ' ')
+            .ifBlank { "mantou-webapp" }
+            .take(MAX_ARCHIVE_NAME_CHARS)
+        val kind = snapshot.kind.name.lowercase(Locale.US)
+        val version = snapshot.version?.let { "-v${it.toString().padStart(6, '0')}" }.orEmpty()
+        return File(File(cacheDir, SHARED_PROJECTS_CACHE_DIR), "$safeName-$kind$version.zip")
+    }
+
+    private fun launchFileShare(file: File, mimeType: String, chooserTitle: String) {
+        val uri = FileProvider.getUriForFile(
             this,
             "$packageName.fileprovider",
-            shareFile
+            file
         )
-
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/html"
-            putExtra(Intent.EXTRA_STREAM, htmlUri)
+            type = mimeType
+            putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-
-        startActivity(Intent.createChooser(shareIntent, "分享网页应用"))
+        startActivity(Intent.createChooser(shareIntent, chooserTitle))
     }
 
     private fun ensureStoredWebAppIdentity(file: File, failurePrefix: String): File? {
@@ -334,4 +457,5 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
         }
         super.onDestroy()
     }
+
 }
