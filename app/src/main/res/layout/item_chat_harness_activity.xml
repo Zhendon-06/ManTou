@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@android:color/transparent"
+    android:orientation="vertical"
+    android:paddingStart="22dp"
+    android:paddingTop="8dp"
+    android:paddingEnd="22dp"
+    android:paddingBottom="18dp">
+
+    <TextView
+        android:id="@+id/tvHarnessLead"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:lineSpacingExtra="4dp"
+        android:textColor="@color/mt_text_primary"
+        android:textIsSelectable="true"
+        android:textSize="16sp"
+        tools:text="我会先整理输入与系统指令，再让模型调用本地工具修改代码；随后持续构建、检查和测试，直到可以交付。" />
+
+    <LinearLayout
+        android:id="@+id/harnessEventContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:orientation="vertical"
+        tools:ignore="UselessLeaf" />
+
+    <TextView
+        android:id="@+id/tvHarnessResult"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:lineSpacingExtra="4dp"
+        android:textColor="@color/mt_text_primary"
+        android:textIsSelectable="true"
+        android:textSize="16sp"
+        android:visibility="gone"
+        tools:text="代码已经通过构建、WebView 检查、自测和测试集，可以交付。"
+        tools:visibility="visible" />
+
+</LinearLayout>

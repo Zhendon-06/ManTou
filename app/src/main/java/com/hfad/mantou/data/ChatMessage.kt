@@ -13,12 +13,13 @@ data class ChatMessage(
     val appHtmlPath: String? = null,
     val thinking: String? = null,
     val statusText: String? = null,
-    val showStatusLoader: Boolean = false
+    val showStatusLoader: Boolean = false,
+    val generateTaskState: GenerateTaskState? = null
 ) {
     companion object {
         const val ROLE_USER = "user"
         const val ROLE_ASSISTANT = "assistant"
+        const val ROLE_HARNESS = "harness"
     }
 }
-
 

@@ -26,28 +26,43 @@
 
 - 用户直接描述想法，例如“帮我做一个番茄钟”
 - 馒头会自动判断这是普通聊天还是 App 生成需求
-- 生成的网页 App 会保存在本地 workspace
+- 先用独立请求生成项目计划，再通过多轮单文件请求逐步实现 HTML、CSS、JavaScript、JSON、SVG 等资源
+- 生成的网页 App 会以带版本的多文件项目保存在本地 workspace
 - 支持聊天内预览和全屏打开
-- 支持分享生成的 HTML；非馒头环境打开时会提示使用馒头 App
-- 每个网页 App 自动绑定一个同名 JSON 数据文件，用于持久化待办、笔记、设置、进度等数据
-- `generated_apps` 目录按项目分组：一个项目一个二级目录，HTML 和关联 JSON 放在同一个目录中
+- 支持把完整项目分享为 ZIP；旧版单 HTML App 仍保持兼容
+- 每个项目绑定独立的 `.mantou/app-state.json`，用于持久化待办、笔记、设置、进度等运行数据
+- 草稿与发布版本隔离；只有完整 Harness 通过后才会原子发布并更新预览
+- 内置可观察的代码生成 Harness：输入过滤、提示词组装、模型生成、文件工具写入、构建、WebView 运行检查、自测、测试集和交付阶段都会实时显示
+- 构建、运行检查、自测或测试集失败时，会把结构化诊断返回模型，让模型按单动作协议逐文件修复，直到通过或达到安全迭代上限
 示例：<img width="300" height="669" alt="c249d138e3ea57e4dd90c5872294ee3e" src="https://github.com/user-attachments/assets/359fda27-2463-4942-975b-8c363cf1ec64" />
 
 示例结构：
 
 ```text
 generated_apps/
-  todo_20260615_120000/
-    todo_20260615_120000.html
-    todo_20260615_120000.json
+  馒头待办_a1b2c3d4/
+    .mantou/
+      project.json
+      workspace.json
+      app-state.json
+    drafts/v000001/
+      project.json
+      index.html
+      styles/app.css
+      scripts/app.js
+    releases/v000001/
+      project.json
+      index.html
+      styles/app.css
+      scripts/app.js
 ```
 
 
 ### Workspace 文件与记忆
 
 - 内置 workspace 文件树，展示 `generated_apps`、`ManTou_Tool`、`agent`、`memory`
-- 支持打开生成的 HTML App
-- 支持 JSON 富文本查看器，方便查看网页 App 的状态数据
+- 支持打开已发布的 Web App，并查看 CSS、JavaScript、MJS、SVG 等项目源码
+- 支持 JSON 富文本查看器，方便查看项目数据与配置
 - 支持编辑文本和 Markdown 文件
 - 支持 Workspace 记忆设置页，可编辑：
   - `SOUL.md`：Agent 灵魂/身份
@@ -150,6 +165,22 @@ API Key 可以留空，适用于本地模型代理或无鉴权服务。
 
 ## Web App 运行时桥
 
+### 代码生成 Harness
+
+网页 App 使用“规划请求 + 多轮单文件动作 + Harness 修复”的任务编排：
+
+```text
+输入过滤 → 独立项目规划 → 多轮读取/写入项目文件
+  → 开发构建 → WebView 运行检查 → 页面自测
+  → 交付前构建 → 独立测试集 → 原子发布
+```
+
+Harness 使用独立的隐藏 WebView 作为检查器，捕获 JavaScript 语法错误、`console` 错误、未处理 Promise、资源/HTTP/SSL 加载错误和渲染进程异常。检查器禁用网络、文件与 Content Provider 访问；`MantouApp` 运行在 dry-run 沙箱中，保持 Tool 调用协议可验证，但不会真的触发闹钟、相机、手电筒等系统副作用。页面自测负责基本渲染和交互可用性，独立测试集负责重复 ID、远程依赖、移动端 viewport、横向溢出、MantouApp 工具桥和页面标题等交付约束。
+
+任一门禁失败都会将有界诊断回传模型。模型每次只能读取、列出、写入或删除一个项目文件，写入时提交该文件的完整最终内容；本地文件工具限制路径、类型、大小和项目边界，然后重新进入构建阶段。入口必须真实加载非空的独立 CSS 与 JavaScript，不能用空文件伪装多文件拆分。单次任务默认最多自动修复 8 轮，避免不可恢复问题造成无限请求。
+
+应用生成、增量修改和 Harness 验证由 `HarnessForegroundService` 的独立任务作用域继续执行。切到后台或熄屏时，每个并行任务都有独立前台通知，实时显示当前阶段、轮次和进度，并可单独停止；点击通知会返回对应会话。Android 13 及以上首次运行会请求通知权限。用户强制停止 App 或系统终止整个进程后，内存中的模型流无法原地续传，需要重新发起任务。
+
 生成的网页 App 在馒头 WebView 中运行时，可以访问：
 
 ```js
@@ -174,7 +205,7 @@ if (window.MantouApp && window.MantouApp.isMantouApp && window.MantouApp.isManto
 
 ### Storage 持久化
 
-每个生成的 HTML App 都会绑定一个同名 JSON 文件。网页可以通过 `window.MantouApp.storage` 读写它。
+每个托管项目都绑定 `.mantou/app-state.json`；旧版单 HTML App 继续使用同名 JSON。网页统一通过 `window.MantouApp.storage` 读写，不依赖具体存储路径。
 
 常用方法：
 

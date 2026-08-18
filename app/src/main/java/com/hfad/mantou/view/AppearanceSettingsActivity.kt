@@ -25,6 +25,7 @@ import com.hfad.mantou.R
 import com.hfad.mantou.data.preferences.AppearanceSettingsStore
 import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.ActivityAppearanceSettingsBinding
+import com.hfad.mantou.utils.AutoContrastColor
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -154,6 +155,8 @@ class AppearanceSettingsActivity : AppCompatActivity() {
                         setCustomColorText(AppearanceSettingsStore.colorToHex(color))
                     }
                     refreshColorOptions()
+                    updateLabels()
+                    updatePreviewEffects()
                 }
             }
             binding.colorOptions.addView(option)
@@ -173,6 +176,8 @@ class AppearanceSettingsActivity : AppCompatActivity() {
                 selectedTextColor = color
                 AppearanceSettingsStore.setChatTextColor(this@AppearanceSettingsActivity, color)
                 refreshColorOptions()
+                updateLabels()
+                updatePreviewEffects()
             }
         })
     }
@@ -194,7 +199,8 @@ class AppearanceSettingsActivity : AppCompatActivity() {
     private fun updateLabels() {
         val settings = AppearanceSettingsStore.getSettings(this)
         binding.tvBlurTitle.text = "背景柔化  ${formatNumber(settings.backgroundBlur, 2)}"
-        binding.tvMaskStrengthTitle.text = "蒙版强度  ${formatNumber(settings.maskStrength, 2)}"
+        val maskStrengthLabel = if (settings.hasFixedTextColor) "蒙版强度" else "蒙版强度上限"
+        binding.tvMaskStrengthTitle.text = "$maskStrengthLabel  ${formatNumber(settings.maskStrength, 2)}"
         binding.tvMaskToneTitle.text = "蒙版明暗  ${formatNumber(settings.maskTone, 2)}"
         binding.tvTextSizeTitle.text = "聊天文本大小  ${formatNumber(settings.chatTextSizeSp, 1)}sp"
     }
@@ -211,9 +217,14 @@ class AppearanceSettingsActivity : AppCompatActivity() {
                 }
             )
         }
-        binding.wallpaperPreviewMask.setBackgroundColor(
-            AppearanceSettingsStore.maskColor(settings)
-        )
+        val analysis = AutoContrastColor.analyze(this, settings, binding.ivWallpaperPreview.drawable)
+        binding.wallpaperPreviewMask.setBackgroundColor(analysis.maskColor)
+        binding.wallpaperPreviewMask.visibility =
+            if (binding.ivWallpaperPreview.visibility == View.VISIBLE && Color.alpha(analysis.maskColor) > 0) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
     }
 
     private fun refreshColorOptions() {

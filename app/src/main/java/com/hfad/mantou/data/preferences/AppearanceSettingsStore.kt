@@ -78,9 +78,9 @@ object AppearanceSettingsStore {
         return "#%06X".format(0xFFFFFF and color)
     }
 
-    fun maskColor(settings: Settings): Int {
+    fun maskColor(settings: Settings, strength: Float = settings.maskStrength): Int {
         val channel = (((settings.maskTone.coerceIn(-1f, 1f) + 1f) / 2f) * 255).roundToInt()
-        val alpha = (settings.maskStrength.coerceIn(0f, 0.8f) * 255).roundToInt()
+        val alpha = (strength.coerceIn(0f, 0.8f) * 255).roundToInt()
         return Color.argb(alpha, channel, channel, channel)
     }
 

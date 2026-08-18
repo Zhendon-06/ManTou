@@ -19,11 +19,15 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.platform.ComposeView
@@ -320,6 +324,22 @@ internal class GlassHostView(
                         if (style == GlassStyle.Accent) {
                             drawRect(Color(0xFF1687FF).copy(alpha = 0.16f), blendMode = BlendMode.Color)
                         }
+                    },
+                    onDrawFront = {
+                        val strokeWidth = 0.75f.dp.toPx()
+                        val inset = strokeWidth / 2f
+                        val outlineSize = Size(
+                            width = (size.width - strokeWidth).coerceAtLeast(0f),
+                            height = (size.height - strokeWidth).coerceAtLeast(0f)
+                        )
+                        val outlineRadius = (cornerRadius.toPx() - inset).coerceAtLeast(0f)
+                        drawRoundRect(
+                            color = style.outlineColor,
+                            topLeft = Offset(inset, inset),
+                            size = outlineSize,
+                            cornerRadius = CornerRadius(outlineRadius, outlineRadius),
+                            style = Stroke(width = strokeWidth)
+                        )
                     }
                 )
         ) {

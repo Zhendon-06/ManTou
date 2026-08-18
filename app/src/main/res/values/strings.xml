@@ -2,4 +2,7 @@
     <string name="app_name">ManTou</string>
     <!-- TODO: Remove or change this placeholder text -->
     <string name="hello_blank_fragment">Hello blank fragment</string>
+    <string name="harness_notification_channel_name">Harness 运行进度</string>
+    <string name="harness_notification_channel_description">后台 Harness 构建、检查与自动修复进度</string>
+    <string name="harness_notification_cancel">停止</string>
 </resources>
