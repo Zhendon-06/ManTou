@@ -8,8 +8,15 @@ import com.hfad.mantou.data.api.ApiMessage
 import com.hfad.mantou.data.api.ChatCallConfig
 import com.hfad.mantou.data.api.ChatRequest
 import com.hfad.mantou.data.api.StreamingApiService
+import com.hfad.mantou.data.logging.ApiDiagnosticContext
+import com.hfad.mantou.data.logging.HarnessTraceLogger
+import com.hfad.mantou.data.logging.HarnessTraceStatus
+import com.hfad.mantou.data.logging.elapsedMillisSince
+import com.hfad.mantou.data.logging.record
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 
@@ -22,14 +29,52 @@ class StreamingWebProjectPlanner(
     private val config: ChatCallConfig,
     private val maxTokens: Int = DEFAULT_MAX_TOKENS,
     private val onThinking: suspend (String) -> Unit = {},
-    private val onProgress: suspend (Int) -> Unit = {}
+    private val onProgress: suspend (Int) -> Unit = {},
+    private val traceLogger: HarnessTraceLogger = HarnessTraceLogger {},
+    private val streamChatCompletion: (
+        ChatCallConfig,
+        ChatRequest
+    ) -> Flow<StreamingApiService.StreamEvent> = StreamingApiService::streamChatCompletion
 ) {
 
     init {
         require(maxTokens > 0)
     }
 
-    suspend fun plan(userRequirement: String): WebProjectPlanningResult {
+    suspend fun plan(
+        userRequirement: String,
+        runId: String? = null
+    ): WebProjectPlanningResult {
+        val startedAt = System.nanoTime()
+        val diagnosticRunId = runId?.trim()?.takeIf(String::isNotEmpty)
+        val traceRunId = diagnosticRunId ?: UNCORRELATED_RUN_ID
+        var phase = PlannerPhase.STREAM
+        var completed = false
+        var firstPayloadRecorded = false
+        var contentChunks = 0
+        var thinkingChunks = 0
+        var thinkingChars = 0
+        var failureDetails = emptyMap<String, String>()
+        val response = StringBuilder()
+
+        traceLogger.record(
+            runId = traceRunId,
+            component = "PLANNER",
+            operation = "plan",
+            status = HarnessTraceStatus.STARTED,
+            message = "项目规划请求开始",
+            iteration = 0,
+            details = mapOf(
+                "model" to config.model,
+                "api_format" to config.apiFormat,
+                "max_tokens" to maxTokens.toString(),
+                "requirement_chars" to userRequirement.length.toString(),
+                "requirement_sha256" to sha256(userRequirement),
+                "system_prompt_chars" to PLANNING_PROMPT.length.toString(),
+                "system_prompt_sha256" to sha256(PLANNING_PROMPT)
+            )
+        )
+
         val request = ChatRequest(
             model = config.model,
             messages = listOf(
@@ -39,33 +84,241 @@ class StreamingWebProjectPlanner(
             stream = true,
             maxTokens = maxTokens,
             temperature = 0.2,
-            topP = 0.9
+            topP = 0.9,
+            diagnosticContext = ApiDiagnosticContext(
+                runId = diagnosticRunId,
+                operation = "harness.plan",
+                iteration = 0
+            )
         )
-        val response = StringBuilder()
-        var completed = false
-        StreamingApiService.streamChatCompletion(config, request).collect { event ->
-            when (event) {
-                is StreamingApiService.StreamEvent.Thinking -> onThinking(event.text)
-                is StreamingApiService.StreamEvent.Content -> {
-                    response.append(event.text)
-                    onProgress(response.length)
+
+        try {
+            streamChatCompletion(config, request).collect { event ->
+                when (event) {
+                    is StreamingApiService.StreamEvent.Start -> {
+                        traceLogger.record(
+                            runId = traceRunId,
+                            component = "PLANNER_STREAM",
+                            operation = "upstream_started",
+                            status = HarnessTraceStatus.PROGRESS,
+                            message = "项目规划上游流已建立",
+                            iteration = 0,
+                            durationMs = elapsedMillisSince(startedAt)
+                        )
+                    }
+
+                    is StreamingApiService.StreamEvent.Thinking -> {
+                        thinkingChunks++
+                        thinkingChars += event.text.length
+                        if (!firstPayloadRecorded) {
+                            firstPayloadRecorded = true
+                            traceLogger.record(
+                                runId = traceRunId,
+                                component = "PLANNER_STREAM",
+                                operation = "first_payload",
+                                status = HarnessTraceStatus.PROGRESS,
+                                message = "收到项目规划首个流片段",
+                                iteration = 0,
+                                durationMs = elapsedMillisSince(startedAt),
+                                details = mapOf("payload_type" to "thinking")
+                            )
+                        }
+                        onThinking(event.text)
+                    }
+
+                    is StreamingApiService.StreamEvent.Content -> {
+                        contentChunks++
+                        if (!firstPayloadRecorded) {
+                            firstPayloadRecorded = true
+                            traceLogger.record(
+                                runId = traceRunId,
+                                component = "PLANNER_STREAM",
+                                operation = "first_payload",
+                                status = HarnessTraceStatus.PROGRESS,
+                                message = "收到项目规划首个流片段",
+                                iteration = 0,
+                                durationMs = elapsedMillisSince(startedAt),
+                                details = mapOf("payload_type" to "content")
+                            )
+                        }
+                        response.append(event.text)
+                        onProgress(response.length)
+                    }
+
+                    is StreamingApiService.StreamEvent.Done -> {
+                        completed = true
+                        traceLogger.record(
+                            runId = traceRunId,
+                            component = "PLANNER_STREAM",
+                            operation = "stream_complete",
+                            status = HarnessTraceStatus.SUCCEEDED,
+                            message = "项目规划流接收完成",
+                            iteration = 0,
+                            durationMs = elapsedMillisSince(startedAt),
+                            details = responseDetails(
+                                response = response,
+                                contentChunks = contentChunks,
+                                thinkingChunks = thinkingChunks,
+                                thinkingChars = thinkingChars
+                            )
+                        )
+                    }
+
+                    is StreamingApiService.StreamEvent.Disconnected -> {
+                        failureDetails = buildMap {
+                            put("stream_event", "disconnected")
+                            event.diagnosticId?.let { put("diagnostic_id", it) }
+                        }
+                        throw WebAppProjectException(event.message)
+                    }
+
+                    is StreamingApiService.StreamEvent.Error -> {
+                        failureDetails = buildMap {
+                            put("stream_event", "error")
+                            put("retryable", event.retryable.toString())
+                            event.httpStatus?.let { put("http_status", it.toString()) }
+                            event.diagnosticId?.let { put("diagnostic_id", it) }
+                            event.upstreamRequestId?.let { put("upstream_request_id", it) }
+                        }
+                        throw WebAppProjectException(event.message)
+                    }
                 }
-                is StreamingApiService.StreamEvent.Done -> completed = true
-                is StreamingApiService.StreamEvent.Disconnected -> {
-                    throw WebAppProjectException(event.message)
-                }
-                is StreamingApiService.StreamEvent.Error -> {
-                    throw WebAppProjectException(event.message)
-                }
-                is StreamingApiService.StreamEvent.Start -> Unit
             }
+            if (!completed) throw WebAppProjectException("项目规划请求在返回完整计划前结束")
+
+            phase = PlannerPhase.PARSE
+            traceLogger.record(
+                runId = traceRunId,
+                component = "PLANNER_PARSE",
+                operation = "parse_plan",
+                status = HarnessTraceStatus.STARTED,
+                message = "开始解析项目规划",
+                iteration = 0,
+                details = responseDetails(
+                    response = response,
+                    contentChunks = contentChunks,
+                    thinkingChunks = thinkingChunks,
+                    thinkingChars = thinkingChars
+                )
+            )
+            val result = WebProjectPlanParser.parse(response.toString())
+            val parseDetails = responseDetails(
+                response = response,
+                contentChunks = contentChunks,
+                thinkingChunks = thinkingChunks,
+                thinkingChars = thinkingChars
+            ) + mapOf(
+                "project_id" to result.manifest.projectId,
+                "entry_point" to result.manifest.entryPoint,
+                "file_count" to result.manifest.files.size.toString(),
+                "display_name_chars" to result.manifest.displayName.length.toString(),
+                "display_name_sha256" to sha256(result.manifest.displayName)
+            )
+            traceLogger.record(
+                runId = traceRunId,
+                component = "PLANNER_PARSE",
+                operation = "parse_plan",
+                status = HarnessTraceStatus.SUCCEEDED,
+                message = "项目规划解析完成",
+                iteration = 0,
+                durationMs = elapsedMillisSince(startedAt),
+                details = parseDetails
+            )
+            traceLogger.record(
+                runId = traceRunId,
+                component = "PLANNER",
+                operation = "plan",
+                status = HarnessTraceStatus.SUCCEEDED,
+                message = "项目规划完成",
+                iteration = 0,
+                durationMs = elapsedMillisSince(startedAt),
+                details = parseDetails
+            )
+            return result
+        } catch (error: CancellationException) {
+            traceLogger.record(
+                runId = traceRunId,
+                component = "PLANNER",
+                operation = "plan",
+                status = HarnessTraceStatus.CANCELLED,
+                message = "项目规划已取消",
+                iteration = 0,
+                durationMs = elapsedMillisSince(startedAt),
+                details = responseDetails(
+                    response = response,
+                    contentChunks = contentChunks,
+                    thinkingChunks = thinkingChunks,
+                    thinkingChars = thinkingChars
+                ) + mapOf("phase" to phase.logValue)
+            )
+            throw error
+        } catch (error: Exception) {
+            val errorDetails = responseDetails(
+                response = response,
+                contentChunks = contentChunks,
+                thinkingChunks = thinkingChunks,
+                thinkingChars = thinkingChars
+            ) + failureDetails + mapOf(
+                "phase" to phase.logValue,
+                "stream_completed" to completed.toString(),
+                "error_type" to error::class.java.simpleName
+            )
+            if (phase == PlannerPhase.PARSE) {
+                traceLogger.record(
+                    runId = traceRunId,
+                    component = "PLANNER_PARSE",
+                    operation = "parse_plan",
+                    status = HarnessTraceStatus.FAILED,
+                    message = "项目规划解析失败",
+                    iteration = 0,
+                    durationMs = elapsedMillisSince(startedAt),
+                    details = errorDetails
+                )
+            }
+            traceLogger.record(
+                runId = traceRunId,
+                component = "PLANNER",
+                operation = "plan",
+                status = HarnessTraceStatus.FAILED,
+                message = if (phase == PlannerPhase.PARSE) {
+                    "项目规划解析失败"
+                } else {
+                    "项目规划请求失败"
+                },
+                iteration = 0,
+                durationMs = elapsedMillisSince(startedAt),
+                details = errorDetails
+            )
+            throw error
         }
-        if (!completed) throw WebAppProjectException("项目规划请求在返回完整计划前结束")
-        return WebProjectPlanParser.parse(response.toString())
+    }
+
+    private fun responseDetails(
+        response: CharSequence,
+        contentChunks: Int,
+        thinkingChunks: Int,
+        thinkingChars: Int
+    ): Map<String, String> {
+        val responseText = response.toString()
+        return mapOf(
+            "response_chars" to responseText.length.toString(),
+            "response_sha256" to sha256(responseText),
+            "content_chunks" to contentChunks.toString(),
+            "thinking_chunks" to thinkingChunks.toString(),
+            "thinking_chars" to thinkingChars.toString()
+        )
     }
 
     private companion object {
         const val DEFAULT_MAX_TOKENS = 8_000
+        const val UNCORRELATED_RUN_ID = "planner-unscoped"
+
+        fun sha256(content: String): String {
+            return MessageDigest.getInstance("SHA-256")
+                .digest(content.toByteArray(Charsets.UTF_8))
+                .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        }
+
         val PLANNING_PROMPT = """
             你是 Web 项目架构规划器。根据用户需求规划一个无需 Node.js、npm、服务器或远程依赖、可直接在移动 WebView 中运行的多文件静态项目。
 
@@ -88,6 +341,11 @@ class StreamingWebProjectPlanner(
             - 不要规划 package.json、构建配置、CDN 或任何需要安装依赖的文件。
             - description 要明确该文件职责，让后续逐文件生成请求可以独立完成实现。
         """.trimIndent()
+    }
+
+    private enum class PlannerPhase(val logValue: String) {
+        STREAM("stream"),
+        PARSE("parse")
     }
 }
 

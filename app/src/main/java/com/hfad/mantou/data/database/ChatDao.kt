@@ -71,6 +71,20 @@ interface ChatDao {
         taskType: String,
         appHtmlPath: String?
     )
+
+    @Query(
+        """
+        UPDATE chat_sessions
+        SET consumedTokens = consumedTokens + :tokens,
+            tokenUsageIncludesEstimate = tokenUsageIncludesEstimate OR :estimated
+        WHERE sessionId = :sessionId
+        """
+    )
+    suspend fun addSessionTokenUsage(
+        sessionId: Long,
+        tokens: Long,
+        estimated: Boolean
+    )
     
     /**
      * 删除所有会话
@@ -164,7 +178,6 @@ interface ChatDao {
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY timestamp DESC LIMIT 1")
     suspend fun getLastMessage(sessionId: Long): ChatMessageEntity?
 }
-
 
 
 

@@ -99,7 +99,8 @@ data class HarnessToolResult(
     val output: String,
     val diagnostics: List<String> = emptyList(),
     val changedFiles: List<String> = emptyList(),
-    val artifactPath: String? = null
+    val artifactPath: String? = null,
+    val metadata: Map<String, String> = emptyMap()
 )
 
 fun interface HarnessFileTool {
@@ -146,19 +147,25 @@ fun interface HarnessTestRunner {
 
 data class HarnessLimits(
     val maxCodeIterations: Int = 8,
-    val maxModelTurnsPerIteration: Int = 32,
-    val maxToolCallsPerIteration: Int = 64,
+    val maxSelfTestFailuresBeforeBypass: Int = 2,
     val maxModelRequestRetries: Int = 2,
+    val modelRetryBaseDelayMs: Long = 600,
+    val modelRetryMaxDelayMs: Long = 2_400,
     val maxDiagnostics: Int = 40,
     val maxDiagnosticChars: Int = 24_000
 ) {
     init {
         require(maxCodeIterations > 0)
-        require(maxModelTurnsPerIteration > 0)
-        require(maxToolCallsPerIteration > 0)
-        require(maxModelRequestRetries >= 0)
+        require(maxSelfTestFailuresBeforeBypass > 0)
+        require(maxModelRequestRetries in 0..MAX_MODEL_REQUEST_RETRIES)
+        require(modelRetryBaseDelayMs >= 0)
+        require(modelRetryMaxDelayMs >= modelRetryBaseDelayMs)
         require(maxDiagnostics > 0)
         require(maxDiagnosticChars > 0)
+    }
+
+    private companion object {
+        const val MAX_MODEL_REQUEST_RETRIES = 10
     }
 }
 
@@ -171,7 +178,8 @@ sealed class HarnessRunResult {
         override val runId: String,
         override val iterations: Int,
         override val artifactPath: String?,
-        val filteredUserInput: String
+        val filteredUserInput: String,
+        val selfTestBypassed: Boolean = false
     ) : HarnessRunResult()
 
     data class Failed(

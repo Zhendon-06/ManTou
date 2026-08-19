@@ -13,21 +13,25 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
 
 @RunWith(AndroidJUnit4::class)
 class GeneratedAppWebViewInspectorInstrumentedTest {
 
     private lateinit var webView: WebView
     private lateinit var inspector: GeneratedAppWebViewInspector
+    private val inspectionEvents = CopyOnWriteArrayList<WebInspectionEvent>()
 
     @Before
     fun setUp() {
+        inspectionEvents.clear()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.runOnMainSync {
             webView = WebView(instrumentation.targetContext)
             inspector = GeneratedAppWebViewInspector(
                 webView = webView,
-                prepareWebView = ::prepareWebView
+                prepareWebView = ::prepareWebView,
+                onEvent = inspectionEvents::add
             )
         }
     }
@@ -66,6 +70,36 @@ class GeneratedAppWebViewInspectorInstrumentedTest {
         assertEquals(WebInspectionStage.TEST_SUITE, testSuite.stage)
         assertTrue(selfTest.selfTests.isNotEmpty())
         assertTrue(testSuite.selfTests.isNotEmpty())
+        assertTrue(
+            inspectionEvents.filterIsInstance<WebInspectionEvent.PageFinished>()
+                .any { it.status == WebInspectionEvent.Status.SUCCEEDED }
+        )
+        assertTrue(
+            inspectionEvents.filterIsInstance<WebInspectionEvent.ProbeStarted>()
+                .map { it.probe }
+                .containsAll(WebInspectionEvent.Probe.entries)
+        )
+        assertTrue(
+            inspectionEvents.filterIsInstance<WebInspectionEvent.ProbeResult>()
+                .filter { it.probe != WebInspectionEvent.Probe.RUNTIME_HARNESS }
+                .all {
+                    it.status == WebInspectionEvent.Status.SUCCEEDED &&
+                        it.parseStatus == WebInspectionEvent.Status.SUCCEEDED
+                }
+        )
+        assertEquals(
+            2,
+            inspectionEvents.filterIsInstance<WebInspectionEvent.SelfTestRoot>().size
+        )
+        assertTrue(
+            inspectionEvents.filterIsInstance<WebInspectionEvent.SelfTestCaseResult>()
+                .all { it.status == WebInspectionEvent.Status.SUCCEEDED }
+        )
+        assertEquals(
+            4,
+            inspectionEvents.filterIsInstance<WebInspectionEvent.Decision>()
+                .count { it.status == WebInspectionEvent.Status.SUCCEEDED }
+        )
     }
 
     @Test
@@ -137,6 +171,20 @@ class GeneratedAppWebViewInspectorInstrumentedTest {
                     it.category == WebDiagnosticCategory.TEST_SUITE
             }
         )
+        val rootEvent = inspectionEvents.filterIsInstance<WebInspectionEvent.SelfTestRoot>()
+            .single()
+        val caseEvent = inspectionEvents.filterIsInstance<WebInspectionEvent.SelfTestCaseResult>()
+            .single()
+        val decisionEvent = inspectionEvents.filterIsInstance<WebInspectionEvent.Decision>()
+            .single()
+        assertEquals(WebInspectionEvent.Status.FAILED, rootEvent.status)
+        assertEquals(WebInspectionEvent.Status.FAILED, caseEvent.status)
+        assertEquals("SELF_TEST_FAILED", caseEvent.diagnosticCode)
+        assertEquals("forced-failure".length, caseEvent.nameCharacterCount)
+        assertFalse(caseEvent.toString().contains("forced-failure"))
+        assertEquals(WebInspectionEvent.Status.FAILED, decisionEvent.status)
+        assertTrue(decisionEvent.hasErrorDiagnostics)
+        assertEquals(1, decisionEvent.failedSelfTestCount)
     }
 
     @Test
@@ -207,6 +255,17 @@ class GeneratedAppWebViewInspectorInstrumentedTest {
 
             assertPassed(runtime)
             assertPassed(testSuite)
+            val interceptorEvents = inspectionEvents
+                .filterIsInstance<WebInspectionEvent.InterceptorResult>()
+            assertTrue(
+                interceptorEvents.any { it.status == WebInspectionEvent.Status.INTERCEPTED }
+            )
+            assertTrue(
+                interceptorEvents.all {
+                    it.url == null || it.url.length <= WEB_INSPECTION_EVENT_URL_LIMIT
+                }
+            )
+            assertTrue(interceptorEvents.filter { it.url != null }.all { it.urlSha256?.length == 64 })
         } finally {
             projectRoot.deleteRecursively()
         }

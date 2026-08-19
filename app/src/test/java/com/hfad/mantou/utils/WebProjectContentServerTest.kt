@@ -1,5 +1,8 @@
 package com.hfad.mantou.utils
 
+import com.hfad.mantou.data.logging.HarnessTraceEvent
+import com.hfad.mantou.data.logging.HarnessTraceLogger
+import com.hfad.mantou.data.logging.HarnessTraceStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -145,16 +148,122 @@ class WebProjectContentServerTest {
         val root = temporaryFolder.newFolder("limited-project")
         val entry = write(root, "index.html", "<!DOCTYPE html><html></html>")
         write(root, "app.js", "window.ready = true;")
+        val events = mutableListOf<HarnessTraceEvent>()
 
         val error = assertThrows(IllegalArgumentException::class.java) {
             WebProjectContentServer.create(
                 projectRoot = root,
                 entryFile = entry,
-                limits = WebProjectContentServer.Limits(maxFiles = 1)
+                limits = WebProjectContentServer.Limits(maxFiles = 1),
+                runId = "limit-run",
+                iteration = 2,
+                traceLogger = HarnessTraceLogger(events::add)
             )
         }
 
         assertTrue(error.message.orEmpty().contains("more than 1 files"))
+        assertTrue(events.any {
+            it.operation == "scan_project" && it.status == HarnessTraceStatus.FAILED
+        })
+        assertTrue(events.any {
+            it.operation == "create" && it.status == HarnessTraceStatus.FAILED
+        })
+    }
+
+    @Test
+    fun recordsCreateAndResolutionMetadataWithoutRequestOrFileContent() {
+        val root = temporaryFolder.newFolder("traced-project")
+        val source = "<!DOCTYPE html><html><body>private-file-content</body></html>"
+        val entry = write(root, "index.html", source)
+        val events = mutableListOf<HarnessTraceEvent>()
+        val server = WebProjectContentServer.create(
+            projectRoot = root,
+            entryFile = entry,
+            projectId = "traced-project",
+            htmlTransformer = { "$it<!-- transformed -->" },
+            runId = "trace-run",
+            iteration = 7,
+            traceLogger = HarnessTraceLogger(events::add)
+        )
+
+        val scanSucceeded = events.single {
+            it.operation == "scan_project" && it.status == HarnessTraceStatus.SUCCEEDED
+        }
+        assertEquals("trace-run", scanSucceeded.runId)
+        assertEquals(7, scanSucceeded.iteration)
+        assertEquals("1", scanSucceeded.details["file_count"])
+        assertEquals(entry.length().toString(), scanSucceeded.details["total_bytes"])
+        assertNotNull(scanSucceeded.durationMs)
+
+        val createSucceeded = events.single {
+            it.operation == "create" && it.status == HarnessTraceStatus.SUCCEEDED
+        }
+        assertEquals("CONTENT_SERVER", createSucceeded.component)
+        assertEquals("index.html", createSucceeded.details["entry_relative_path"])
+        assertEquals("true", createSucceeded.details["html_transformer"])
+
+        server.resolve(server.entryUrl + "?token=private-query-value")
+        server.resolve(server.entryUrl, method = "HEAD")
+        server.resolve("https://example.com/private-external-path.js")
+        server.resolve("data:text/plain,private-data-value")
+
+        val resolveEvents = events.filter { it.operation == "resolve" }
+        assertEquals(4, resolveEvents.size)
+        val served = resolveEvents.first { it.details["method"] == "GET" && it.details["resolution"] == "served" }
+        assertEquals(HarnessTraceStatus.SUCCEEDED, served.status)
+        assertEquals("project:/index.html", served.details["target"])
+        assertEquals("index.html", served.details["relative_path"])
+        assertEquals("200", served.details["response_status"])
+        assertEquals(WebProjectContentServer.MIME_HTML, served.details["mime"])
+        assertEquals(entry.length().toString(), served.details["bytes"])
+        assertEquals("source", served.details["bytes_kind"])
+        assertEquals("true", served.details["transform_html"])
+        assertEquals("false", served.details["head"])
+        assertNotNull(served.durationMs)
+
+        val head = resolveEvents.first { it.details["method"] == "HEAD" }
+        assertEquals("0", head.details["bytes"])
+        assertEquals("true", head.details["head"])
+
+        val blocked = resolveEvents.first { it.details["resolution"] == "error" }
+        assertEquals(HarnessTraceStatus.FAILED, blocked.status)
+        assertEquals("external-origin", blocked.details["target"])
+        assertEquals("403", blocked.details["response_status"])
+
+        val passthrough = resolveEvents.first { it.details["resolution"] == "passthrough" }
+        assertEquals(HarnessTraceStatus.SUCCEEDED, passthrough.status)
+        assertEquals("scheme:data", passthrough.details["target"])
+        assertEquals("passthrough", passthrough.details["response_status"])
+
+        val traceText = events.joinToString("\n")
+        assertFalse(traceText.contains("private-file-content"))
+        assertFalse(traceText.contains("private-query-value"))
+        assertFalse(traceText.contains("private-external-path"))
+        assertFalse(traceText.contains("private-data-value"))
+    }
+
+    @Test
+    fun recordsCreateValidationFailure() {
+        val events = mutableListOf<HarnessTraceEvent>()
+        val missingRoot = File(temporaryFolder.root, "missing-project")
+
+        assertThrows(IllegalArgumentException::class.java) {
+            WebProjectContentServer.create(
+                projectRoot = missingRoot,
+                entryFile = File(missingRoot, "index.html"),
+                runId = "invalid-run",
+                iteration = 1,
+                traceLogger = HarnessTraceLogger(events::add)
+            )
+        }
+
+        val createFailed = events.single {
+            it.operation == "create" && it.status == HarnessTraceStatus.FAILED
+        }
+        assertEquals("invalid-run", createFailed.runId)
+        assertEquals(1, createFailed.iteration)
+        assertEquals("IllegalArgumentException", createFailed.details["error_type"])
+        assertNotNull(createFailed.durationMs)
     }
 
     private fun write(root: File, path: String, content: String): File {

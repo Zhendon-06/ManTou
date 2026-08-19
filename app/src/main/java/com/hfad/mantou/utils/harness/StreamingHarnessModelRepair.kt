@@ -5,6 +5,11 @@ import com.hfad.mantou.data.api.ApiMessage
 import com.hfad.mantou.data.api.ChatCallConfig
 import com.hfad.mantou.data.api.ChatRequest
 import com.hfad.mantou.data.api.StreamingApiService
+import com.hfad.mantou.data.logging.ApiDiagnosticContext
+import com.hfad.mantou.data.logging.HarnessTraceLogger
+import com.hfad.mantou.data.logging.HarnessTraceStatus
+import com.hfad.mantou.data.logging.elapsedMillisSince
+import com.hfad.mantou.data.logging.record
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
@@ -18,6 +23,7 @@ class StreamingHarnessModelRepair(
     private val topP: Double = ApiConfig.TOP_P,
     private val onThinking: suspend (String) -> Unit = {},
     private val onProgress: suspend (HarnessModelStreamProgress) -> Unit = {},
+    private val traceLogger: HarnessTraceLogger = HarnessTraceLogger {},
     private val streamChatCompletion: (ChatCallConfig, ChatRequest) -> Flow<StreamingApiService.StreamEvent> =
         StreamingApiService::streamChatCompletion
 ) : HarnessModelRepair {
@@ -31,25 +37,80 @@ class StreamingHarnessModelRepair(
     }
 
     override suspend fun requestTurn(request: HarnessModelRequest): HarnessModelTurn {
+        val startedAt = System.nanoTime()
+        val turnSequence = callSequence.incrementAndGet()
         val apiRequest = ChatRequest(
             model = config.model,
             messages = HarnessSingleActionProtocol.toApiMessages(request.messages),
             stream = true,
             maxTokens = maxTokens,
             temperature = temperature,
-            topP = topP
+            topP = topP,
+            diagnosticContext = ApiDiagnosticContext(
+                runId = request.runId,
+                operation = "harness.${request.purpose.name.lowercase()}",
+                iteration = request.iteration
+            )
         )
         val response = StringBuilder()
         var completed = false
+        var contentChunks = 0
+        var thinkingChunks = 0
+        var thinkingChars = 0
+        var firstPayloadRecorded = false
+
+        traceLogger.record(
+            runId = request.runId,
+            component = "MODEL_STREAM",
+            operation = request.purpose.name,
+            status = HarnessTraceStatus.STARTED,
+            message = "模型流开始",
+            iteration = request.iteration,
+            details = mapOf(
+                "turn_sequence" to turnSequence.toString(),
+                "model" to config.model,
+                "message_count" to request.messages.size.toString(),
+                "message_chars" to request.messages.sumOf { it.content.length }.toString(),
+                "max_tokens" to maxTokens.toString()
+            )
+        )
 
         try {
             streamChatCompletion(config, apiRequest).collect { event ->
                 when (event) {
                     is StreamingApiService.StreamEvent.Start -> {
+                        traceLogger.record(
+                            runId = request.runId,
+                            component = "MODEL_STREAM",
+                            operation = "upstream_started",
+                            status = HarnessTraceStatus.PROGRESS,
+                            message = "模型上游已开始返回流",
+                            iteration = request.iteration,
+                            durationMs = elapsedMillisSince(startedAt),
+                            details = mapOf("turn_sequence" to turnSequence.toString())
+                        )
                         onProgress(request.progress(HarnessModelStreamPhase.STARTED))
                     }
 
                     is StreamingApiService.StreamEvent.Thinking -> {
+                        thinkingChunks++
+                        thinkingChars += event.text.length
+                        if (!firstPayloadRecorded) {
+                            firstPayloadRecorded = true
+                            traceLogger.record(
+                                runId = request.runId,
+                                component = "MODEL_STREAM",
+                                operation = "first_payload",
+                                status = HarnessTraceStatus.PROGRESS,
+                                message = "收到模型首个流片段",
+                                iteration = request.iteration,
+                                durationMs = elapsedMillisSince(startedAt),
+                                details = mapOf(
+                                    "turn_sequence" to turnSequence.toString(),
+                                    "payload_type" to "thinking"
+                                )
+                            )
+                        }
                         onThinking(event.text)
                         onProgress(
                             request.progress(
@@ -61,6 +122,23 @@ class StreamingHarnessModelRepair(
                     }
 
                     is StreamingApiService.StreamEvent.Content -> {
+                        contentChunks++
+                        if (!firstPayloadRecorded) {
+                            firstPayloadRecorded = true
+                            traceLogger.record(
+                                runId = request.runId,
+                                component = "MODEL_STREAM",
+                                operation = "first_payload",
+                                status = HarnessTraceStatus.PROGRESS,
+                                message = "收到模型首个流片段",
+                                iteration = request.iteration,
+                                durationMs = elapsedMillisSince(startedAt),
+                                details = mapOf(
+                                    "turn_sequence" to turnSequence.toString(),
+                                    "payload_type" to "content"
+                                )
+                            )
+                        }
                         response.append(event.text)
                         onProgress(
                             request.progress(
@@ -71,21 +149,102 @@ class StreamingHarnessModelRepair(
                         )
                     }
 
-                    is StreamingApiService.StreamEvent.Done -> completed = true
+                    is StreamingApiService.StreamEvent.Done -> {
+                        completed = true
+                        traceLogger.record(
+                            runId = request.runId,
+                            component = "MODEL_STREAM",
+                            operation = "stream_done",
+                            status = HarnessTraceStatus.PROGRESS,
+                            message = "模型流收到完成标记",
+                            iteration = request.iteration,
+                            durationMs = elapsedMillisSince(startedAt),
+                            details = mapOf(
+                                "turn_sequence" to turnSequence.toString(),
+                                "response_chars" to response.length.toString(),
+                                "content_chunks" to contentChunks.toString(),
+                                "thinking_chars" to thinkingChars.toString(),
+                                "thinking_chunks" to thinkingChunks.toString()
+                            )
+                        )
+                    }
                     is StreamingApiService.StreamEvent.Disconnected -> {
-                        throw HarnessModelTransportException(event.message)
+                        throw HarnessModelTransportException(
+                            message = event.message,
+                            isNetworkFailure = true,
+                            diagnosticId = event.diagnosticId
+                        )
                     }
 
                     is StreamingApiService.StreamEvent.Error -> {
-                        throw HarnessModelTransportException(event.message)
+                        throw HarnessModelTransportException(
+                            message = event.message,
+                            isNetworkFailure = event.retryable,
+                            httpStatus = event.httpStatus,
+                            upstreamRequestId = event.upstreamRequestId,
+                            diagnosticId = event.diagnosticId
+                        )
                     }
                 }
             }
             if (!completed) {
-                throw HarnessModelTransportException("模型流在完成单动作响应前结束")
+                throw HarnessModelTransportException(
+                    message = "模型流在完成单动作响应前结束",
+                    isNetworkFailure = true
+                )
             }
-            val callId = buildCallId(request)
+            traceLogger.record(
+                runId = request.runId,
+                component = "MODEL_STREAM",
+                operation = request.purpose.name,
+                status = HarnessTraceStatus.SUCCEEDED,
+                message = "模型流接收完成",
+                iteration = request.iteration,
+                durationMs = elapsedMillisSince(startedAt),
+                details = mapOf(
+                    "turn_sequence" to turnSequence.toString(),
+                    "response_chars" to response.length.toString(),
+                    "response_sha256" to sha256(response.toString()),
+                    "content_chunks" to contentChunks.toString(),
+                    "thinking_chunks" to thinkingChunks.toString(),
+                    "thinking_chars" to thinkingChars.toString()
+                )
+            )
+            val callId = buildCallId(request, turnSequence)
+            traceLogger.record(
+                runId = request.runId,
+                component = "MODEL_PROTOCOL",
+                operation = "parse_single_action",
+                status = HarnessTraceStatus.STARTED,
+                message = "开始解析模型单动作协议",
+                iteration = request.iteration,
+                details = mapOf(
+                    "turn_sequence" to turnSequence.toString(),
+                    "call_id" to callId,
+                    "response_chars" to response.length.toString(),
+                    "response_sha256" to sha256(response.toString())
+                )
+            )
             val turn = HarnessSingleActionProtocol.parse(response.toString(), callId)
+            traceLogger.record(
+                runId = request.runId,
+                component = "MODEL_PROTOCOL",
+                operation = "parse_single_action",
+                status = HarnessTraceStatus.SUCCEEDED,
+                message = "模型单动作协议解析完成",
+                iteration = request.iteration,
+                durationMs = elapsedMillisSince(startedAt),
+                details = buildMap {
+                    put("turn_sequence", turnSequence.toString())
+                    put("call_id", callId)
+                    put("response_chars", response.length.toString())
+                    put("response_sha256", sha256(response.toString()))
+                    put("action", turn.toolCalls.singleOrNull()?.name ?: "finish")
+                    turn.toolCalls.singleOrNull()?.arguments?.get("path")?.let { put("path", it) }
+                    put("content_chunks", contentChunks.toString())
+                    put("thinking_chars", thinkingChars.toString())
+                }
+            )
             onProgress(
                 request.progress(
                     phase = HarnessModelStreamPhase.COMPLETED,
@@ -94,8 +253,56 @@ class StreamingHarnessModelRepair(
             )
             return turn
         } catch (error: CancellationException) {
+            traceLogger.record(
+                runId = request.runId,
+                component = "MODEL_STREAM",
+                operation = request.purpose.name,
+                status = HarnessTraceStatus.CANCELLED,
+                message = "模型流已取消",
+                iteration = request.iteration,
+                durationMs = elapsedMillisSince(startedAt),
+                details = mapOf(
+                    "turn_sequence" to turnSequence.toString(),
+                    "response_chars" to response.length.toString()
+                )
+            )
             throw error
         } catch (error: Exception) {
+            traceLogger.record(
+                runId = request.runId,
+                component = if (error is HarnessModelProtocolException) {
+                    "MODEL_PROTOCOL"
+                } else {
+                    "MODEL_STREAM"
+                },
+                operation = if (error is HarnessModelProtocolException) {
+                    "parse_single_action"
+                } else {
+                    request.purpose.name
+                },
+                status = HarnessTraceStatus.FAILED,
+                message = if (error is HarnessModelProtocolException) {
+                    "模型单动作协议解析失败"
+                } else {
+                    "模型流失败"
+                },
+                iteration = request.iteration,
+                durationMs = elapsedMillisSince(startedAt),
+                details = buildMap {
+                    put("turn_sequence", turnSequence.toString())
+                    put("error_type", error::class.java.simpleName)
+                    put("stream_completed", completed.toString())
+                    put("response_chars", response.length.toString())
+                    put("response_sha256", sha256(response.toString()))
+                    put("content_chunks", contentChunks.toString())
+                    put("thinking_chars", thinkingChars.toString())
+                    if (error is HarnessModelTransportException) {
+                        error.httpStatus?.let { put("http_status", it.toString()) }
+                        error.diagnosticId?.let { put("diagnostic_id", it) }
+                        error.upstreamRequestId?.let { put("upstream_request_id", it) }
+                    }
+                }
+            )
             onProgress(
                 request.progress(
                     phase = HarnessModelStreamPhase.FAILED,
@@ -107,13 +314,19 @@ class StreamingHarnessModelRepair(
         }
     }
 
-    private fun buildCallId(request: HarnessModelRequest): String {
+    private fun buildCallId(request: HarnessModelRequest, turnSequence: Long): String {
         val safeRunId = request.runId
             .replace(UNSAFE_CALL_ID_CHARS, "-")
             .trim('-')
             .ifBlank { "run" }
             .take(MAX_CALL_ID_RUN_CHARS)
-        return "mantou-$safeRunId-${request.iteration}-${callSequence.incrementAndGet()}"
+        return "mantou-$safeRunId-${request.iteration}-$turnSequence"
+    }
+
+    private fun sha256(content: String): String {
+        return MessageDigest.getInstance("SHA-256")
+            .digest(content.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 
     private fun HarnessModelRequest.progress(
@@ -160,7 +373,13 @@ data class HarnessModelStreamProgress(
 
 open class StreamingHarnessModelException(message: String) : IllegalStateException(message)
 
-class HarnessModelTransportException(message: String) : StreamingHarnessModelException(message)
+class HarnessModelTransportException(
+    message: String,
+    val httpStatus: Int? = null,
+    val isNetworkFailure: Boolean = StreamingApiService.isRetryableFailure(httpStatus, message),
+    val upstreamRequestId: String? = null,
+    val diagnosticId: String? = null
+) : StreamingHarnessModelException(message)
 
 class HarnessModelProtocolException(message: String) : StreamingHarnessModelException(message)
 

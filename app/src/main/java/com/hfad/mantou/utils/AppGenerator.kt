@@ -126,15 +126,18 @@ object AppGenerator {
             """
                 1. 第一轮必须调用 `<mantou-list path="."/>`，随后读取 `project.json` 和与需求有关的文件。
                 2. 只修改完成本轮需求所必需的文件；每次响应只执行一个动作。
-                3. 保持现有入口、数据格式、MantouApp 调用和用户数据兼容；如需增删文件，先更新 `project.json`。
-                4. 所有修改完成后返回 `<mantou-finish/>`，交由 Harness 重新构建和测试。
+                3. 修改 HTML、CSS 或 JavaScript 前必须读取互相关联的文件；class、id、data-*、CSS 选择器和 DOM 查询名称是跨文件接口，必须同步修改。
+                4. 保持现有入口、数据格式、MantouApp 调用和用户数据兼容；如需增删文件，先更新 `project.json`。
+                5. 所有修改完成后返回 `<mantou-finish/>`，交由 Harness 重新构建和测试。
             """.trimIndent()
         } else {
             """
                 1. 独立规划请求已经生成 `project.json`；第一轮必须读取它，再按计划开始实现。
                 2. 后续轮次严格按依赖顺序逐个生成文件；每次响应只读或写一个文件。
-                3. 至少包含入口 HTML、独立 CSS 和独立 JavaScript；确有静态数据时再增加 JSON，图形资源优先使用本地 SVG。
-                4. 所有计划文件写完后返回 `<mantou-finish/>`，交由 Harness 构建和测试。
+                3. 写 CSS 或 JavaScript 前必须读取已生成的入口和相关文件，写回 HTML 前也必须读取关联样式与脚本；不能只凭历史摘要重建命名。
+                4. class、id、data-*、CSS 选择器和 DOM 查询名称是跨文件接口，所有文件必须使用同一套名称。
+                5. 至少包含入口 HTML、独立 CSS 和独立 JavaScript；确有静态数据时再增加 JSON，图形资源优先使用本地 SVG。
+                6. 所有计划文件写完后返回 `<mantou-finish/>`，交由 Harness 构建和测试。
             """.trimIndent()
         }
         val basePrompt = """
@@ -149,6 +152,7 @@ object AppGenerator {
             - 不得使用 CDN、网络字体、远程脚本、远程样式或远程图片。
             - 允许 ES modules 和 `fetch()` 读取同项目 JSON；路径必须相对于当前项目。
             - HTML 负责语义结构，CSS 负责完整视觉系统，JavaScript 负责真实交互；不要把大量 CSS/JS 重新内联回 HTML。
+            - 跨文件的 class、id、data-*、CSS 选择器和 DOM 查询必须逐项一致；不得让 HTML 与 CSS/JavaScript 使用不同版本的结构命名。
             - 应用命名使用“馒头xxx”的自然名称，入口必须包含移动端 viewport、非空 title、清晰主任务、空状态和完整交互。
             - 触控目标不小于 44px，布局适配 ${metrics.widthPixels}x${metrics.heightPixels}、$orientation、安全区和内容滚动。
             - 不能留下 TODO、占位实现、空函数或只展示不能操作的界面。

@@ -14,16 +14,25 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.data.GenerateTaskState
+import com.hfad.mantou.data.SessionTokenUsage
 import com.hfad.mantou.data.api.ApiConfig
 import com.hfad.mantou.data.api.ApiMessage
 import com.hfad.mantou.data.api.ChatCallConfig
 import com.hfad.mantou.data.api.ChatRequest
+import com.hfad.mantou.data.api.ModelTokenUsage
 import com.hfad.mantou.data.api.ContentPart
 import com.hfad.mantou.data.api.ImageUrl
 import com.hfad.mantou.data.api.StreamingApiService
 import com.hfad.mantou.data.database.AppDatabase
 import com.hfad.mantou.data.database.ChatMessageEntity
 import com.hfad.mantou.data.database.ChatSessionEntity
+import com.hfad.mantou.data.logging.ApiDiagnosticContext
+import com.hfad.mantou.data.logging.ApiLogRedactor
+import com.hfad.mantou.data.logging.HarnessTraceEvent
+import com.hfad.mantou.data.logging.HarnessTraceLogger
+import com.hfad.mantou.data.logging.HarnessTraceStatus
+import com.hfad.mantou.data.logging.elapsedMillisSince
+import com.hfad.mantou.data.logging.record
 import com.hfad.mantou.data.preferences.ContextLimitStore
 import com.hfad.mantou.data.repository.ChatRepository
 import com.hfad.mantou.service.HarnessForegroundServiceController
@@ -51,6 +60,7 @@ import com.hfad.mantou.utils.harness.HarnessRunResult
 import com.hfad.mantou.utils.harness.HarnessToolResult
 import com.hfad.mantou.utils.harness.StreamingHarnessModelRepair
 import com.hfad.mantou.utils.harness.WebInspectionReport
+import com.hfad.mantou.utils.harness.WebInspectionEvent
 import com.hfad.mantou.utils.harness.WebInspectionTarget
 import com.hfad.mantou.utils.harness.WebViewHarnessInspectorAdapter
 import com.hfad.mantou.utils.project.StreamingWebProjectPlanner
@@ -74,9 +84,13 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.security.MessageDigest
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -122,6 +136,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _noModelConfigured = MutableLiveData(false)
     val noModelConfigured: LiveData<Boolean> = _noModelConfigured
 
+    private val _currentSessionTokenUsage = MutableLiveData(SessionTokenUsage())
+    val currentSessionTokenUsage: LiveData<SessionTokenUsage> = _currentSessionTokenUsage
+    private var currentTokenUsageSessionId: Long? = null
+
     private var messagesJob: Job? = null
     private val streamingStates = mutableMapOf<Long, StreamingSessionState>()
     private val appGenerationProgressIntervalMs = 1_500L
@@ -132,6 +150,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val requestFailedSuffix = "\n\n出错了，请稍后重试。"
     private val assistantStreamingPlaceholder = "\u200B"
     private var serviceProgressStates: Map<String, HarnessProgress> = emptyMap()
+    private val tokenUsageMutex = Mutex()
 
     init {
         AgentWorkspace.ensureWorkspace(application)
@@ -191,6 +210,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val lastEvent = projected.harnessEvents.lastOrNull()
         if (eventStage != null && (
                 lastEvent?.stage != eventStage ||
+                    lastEvent.operation != progress.operation ||
                     lastEvent.outcome != outcome ||
                     lastEvent.message != progress.message
                 )
@@ -201,6 +221,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     outcome = outcome,
                     message = progress.message,
                     iteration = progress.iteration,
+                    operation = progress.operation,
                     diagnostics = progress.diagnostics,
                     timestamp = progress.updatedAt
                 )
@@ -252,6 +273,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val sessionId = repository.createSession("新会话")
             _currentSessionId.value = sessionId
             _messages.value = emptyList()
+            currentTokenUsageSessionId = sessionId
+            _currentSessionTokenUsage.value = SessionTokenUsage()
             loadMessages(sessionId)
             updateSessionLoadingIndicators()
         }
@@ -260,6 +283,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun switchToSession(sessionId: Long) {
         messagesJob?.cancel()
         _currentSessionId.value = sessionId
+        currentTokenUsageSessionId = sessionId
+        _currentSessionTokenUsage.value = SessionTokenUsage()
+        loadCurrentSessionTokenUsage(sessionId)
         loadMessages(sessionId)
         restoreGenerateTaskState(sessionId)
         updateSessionLoadingIndicators()
@@ -282,6 +308,61 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             dbMessages + streamingMessage
         } else {
             dbMessages
+        }
+    }
+
+    private fun loadCurrentSessionTokenUsage(sessionId: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val session = repository.getSessionById(sessionId)
+            val usage = SessionTokenUsage(
+                totalTokens = session?.consumedTokens ?: 0L,
+                includesEstimate = session?.tokenUsageIncludesEstimate ?: false
+            )
+            withContext(Dispatchers.Main.immediate) {
+                if (_currentSessionId.value == sessionId &&
+                    currentTokenUsageSessionId == sessionId
+                ) {
+                    val displayed = _currentSessionTokenUsage.value ?: SessionTokenUsage()
+                    if (usage.totalTokens >= displayed.totalTokens) {
+                        _currentSessionTokenUsage.value = usage
+                    }
+                }
+            }
+        }
+    }
+
+    private fun trackedChatStream(
+        sessionId: Long,
+        config: ChatCallConfig,
+        request: ChatRequest
+    ): Flow<StreamingApiService.StreamEvent> {
+        val trackedRequest = request.copy(
+            tokenUsageListener = { usage -> recordSessionTokenUsage(sessionId, usage) }
+        )
+        return StreamingApiService.streamChatCompletion(config, trackedRequest)
+    }
+
+    private fun recordSessionTokenUsage(sessionId: Long, usage: ModelTokenUsage) {
+        if (usage.totalTokens <= 0L) return
+        fallbackScope.launch {
+            tokenUsageMutex.withLock {
+                repository.addSessionTokenUsage(
+                    sessionId = sessionId,
+                    tokens = usage.totalTokens,
+                    estimated = usage.estimated
+                )
+                val session = repository.getSessionById(sessionId) ?: return@withLock
+                withContext(Dispatchers.Main.immediate) {
+                    if (_currentSessionId.value == sessionId &&
+                        currentTokenUsageSessionId == sessionId
+                    ) {
+                        _currentSessionTokenUsage.value = SessionTokenUsage(
+                            totalTokens = session.consumedTokens,
+                            includesEstimate = session.tokenUsageIncludesEstimate
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -378,6 +459,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 config = config,
                 userMessage = content,
                 hasGeneratedAppInSession = false,
+                tokenUsageListener = { usage -> recordSessionTokenUsage(state.sessionId, usage) },
+                diagnosticContext = ApiDiagnosticContext(
+                    runId = "session-${state.sessionId}",
+                    operation = "intent.classify"
+                ),
             )
         }
 
@@ -406,6 +492,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (state.serviceJob?.isActive == true) return
 
         val runId = "harness-${state.sessionId}-${System.currentTimeMillis()}"
+        val traceLogger = createHarnessTraceLogger(state.sessionId, runId)
+        val serviceStartedAt = System.nanoTime()
         val request = HarnessServiceRequest(
             runId = runId,
             sessionId = state.sessionId,
@@ -421,6 +509,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         state.isServiceOwned = true
         state.isGeneratingApp = true
         updateSessionLoadingIndicators()
+        traceLogger.record(
+            runId = runId,
+            component = "SERVICE",
+            operation = "launch",
+            status = HarnessTraceStatus.PROGRESS,
+            message = "已请求启动 Harness 前台服务",
+            iteration = 0,
+            details = mapOf(
+                "session_id" to state.sessionId.toString(),
+                "is_modification" to (existingFile != null).toString(),
+                "existing_artifact" to existingFile?.absolutePath.orEmpty()
+            )
+        )
 
         try {
             state.serviceJob = HarnessForegroundServiceController.launch(
@@ -429,21 +530,52 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ) { reporter ->
                 state.harnessProgressReporter = reporter
                 var workerFailure: Throwable? = null
+                val workerStartedAt = System.nanoTime()
+                traceLogger.record(
+                    runId = runId,
+                    component = "SERVICE",
+                    operation = "worker",
+                    status = HarnessTraceStatus.STARTED,
+                    message = "Harness 后台任务开始执行",
+                    iteration = 0,
+                    durationMs = elapsedMillisSince(serviceStartedAt)
+                )
                 try {
                     generateWebProjectFlow(
                         state = state,
                         config = config,
                         userMessage = userMessage,
-                        existingFile = existingFile
+                        existingFile = existingFile,
+                        runId = runId,
+                        traceLogger = traceLogger
                     )
                 } catch (error: Throwable) {
                     workerFailure = error
+                    traceLogger.record(
+                        runId = runId,
+                        component = "SERVICE",
+                        operation = "worker",
+                        status = if (error is CancellationException) {
+                            HarnessTraceStatus.CANCELLED
+                        } else {
+                            HarnessTraceStatus.FAILED
+                        },
+                        message = if (error is CancellationException) {
+                            "Harness 后台任务已取消"
+                        } else {
+                            "Harness 后台任务失败"
+                        },
+                        iteration = 0,
+                        durationMs = elapsedMillisSince(workerStartedAt),
+                        details = mapOf("error_type" to error::class.java.simpleName)
+                    )
                     throw error
                 } finally {
                     withContext(NonCancellable + Dispatchers.Main.immediate) {
                         state.harnessProgressReporter = null
                         state.serviceJob = null
                         state.isServiceOwned = false
+                        state.serviceRunId = null
                         val unfinishedState = _generateTaskStates.value.orEmpty()[state.sessionId]
                         if (unfinishedState?.isRunning != false) {
                             val terminalMessage = when (workerFailure) {
@@ -489,10 +621,44 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 else -> reporter.fail("生成任务未完成")
                             }
                         }
+                        if (workerFailure == null) {
+                            val terminalState = _generateTaskStates.value.orEmpty()[state.sessionId]
+                            val succeeded = terminalState?.phase == GenerateTaskState.Phase.COMPLETED
+                            traceLogger.record(
+                                runId = runId,
+                                component = "SERVICE",
+                                operation = "worker",
+                                status = if (succeeded) {
+                                    HarnessTraceStatus.SUCCEEDED
+                                } else {
+                                    HarnessTraceStatus.FAILED
+                                },
+                                message = if (succeeded) {
+                                    "Harness 后台任务成功结束"
+                                } else {
+                                    "Harness 后台任务未成功完成"
+                                },
+                                iteration = terminalState?.harnessIteration ?: 0,
+                                durationMs = elapsedMillisSince(workerStartedAt),
+                                details = mapOf(
+                                    "terminal_phase" to (terminalState?.phase?.name ?: "MISSING")
+                                )
+                            )
+                        }
                     }
                 }
             }
         } catch (error: Exception) {
+            traceLogger.record(
+                runId = runId,
+                component = "SERVICE",
+                operation = "launch",
+                status = HarnessTraceStatus.FAILED,
+                message = "Harness 前台服务启动失败，切回页面任务",
+                iteration = 0,
+                durationMs = elapsedMillisSince(serviceStartedAt),
+                details = mapOf("error_type" to error::class.java.simpleName)
+            )
             state.serviceRunId = null
             state.isServiceOwned = false
             state.isGeneratingApp = false
@@ -509,7 +675,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 state = state,
                 config = config,
                 userMessage = userMessage,
-                existingFile = existingFile
+                existingFile = existingFile,
+                runId = runId,
+                traceLogger = traceLogger
             )
         }
     }
@@ -518,10 +686,44 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         state: StreamingSessionState,
         config: ChatCallConfig,
         userMessage: String,
-        existingFile: File? = null
+        existingFile: File? = null,
+        runId: String,
+        traceLogger: HarnessTraceLogger
     ) {
         val application = getApplication<Application>()
+        val flowStartedAt = System.nanoTime()
+        traceLogger.record(
+            runId = runId,
+            component = "FLOW",
+            operation = "generate_web_project",
+            status = HarnessTraceStatus.STARTED,
+            message = "Web 项目生成流程开始",
+            iteration = 0,
+            details = mapOf(
+                "session_id" to state.sessionId.toString(),
+                "is_modification" to (existingFile != null).toString(),
+                "input_chars" to userMessage.length.toString(),
+                "input_sha256" to traceSha256(userMessage),
+                "existing_artifact" to existingFile?.absolutePath.orEmpty()
+            )
+        )
+        val filterStartedAt = System.nanoTime()
         val filteredInput = GenerationInputFilter.filter(userMessage)
+        traceLogger.record(
+            runId = runId,
+            component = "INPUT_FILTER",
+            operation = "sanitize",
+            status = HarnessTraceStatus.SUCCEEDED,
+            message = "生成输入过滤完成",
+            iteration = 0,
+            durationMs = elapsedMillisSince(filterStartedAt),
+            details = mapOf(
+                "input_chars" to userMessage.length.toString(),
+                "filtered_chars" to filteredInput.content.length.toString(),
+                "filtered_sha256" to traceSha256(filteredInput.content),
+                "notice_count" to filteredInput.notices.size.toString()
+            )
+        )
         val isModification = existingFile != null
         var inspector: GeneratedAppWebViewInspector? = null
         var inspectorWebView: WebView? = null
@@ -568,10 +770,66 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         try {
             val preparedProject = if (existingFile == null) {
-                planAndCreateWebProject(state, config, filteredInput.promptPayload)
+                planAndCreateWebProject(
+                    state = state,
+                    config = config,
+                    userRequirement = filteredInput.promptPayload,
+                    runId = runId,
+                    traceLogger = traceLogger
+                )
             } else {
-                withContext(Dispatchers.IO) {
-                    prepareExistingWebProject(existingFile)
+                val prepareStartedAt = System.nanoTime()
+                traceLogger.record(
+                    runId = runId,
+                    component = "WORKSPACE",
+                    operation = "prepare_existing",
+                    status = HarnessTraceStatus.STARTED,
+                    message = "开始解析现有 Web 项目",
+                    iteration = 0,
+                    details = mapOf("input_path" to existingFile.absolutePath)
+                )
+                try {
+                    withContext(Dispatchers.IO) {
+                        prepareExistingWebProject(existingFile)
+                    }
+                } catch (error: Throwable) {
+                    traceLogger.record(
+                        runId = runId,
+                        component = "WORKSPACE",
+                        operation = "prepare_existing",
+                        status = if (error is CancellationException) {
+                            HarnessTraceStatus.CANCELLED
+                        } else {
+                            HarnessTraceStatus.FAILED
+                        },
+                        message = if (error is CancellationException) {
+                            "现有 Web 项目准备已取消"
+                        } else {
+                            "现有 Web 项目准备失败"
+                        },
+                        iteration = 0,
+                        durationMs = elapsedMillisSince(prepareStartedAt),
+                        details = mapOf("error_type" to error::class.java.simpleName)
+                    )
+                    throw error
+                }.also { prepared ->
+                    traceLogger.record(
+                        runId = runId,
+                        component = "WORKSPACE",
+                        operation = "prepare_existing",
+                        status = HarnessTraceStatus.SUCCEEDED,
+                        message = "现有 Web 项目草稿准备完成",
+                        iteration = 0,
+                        durationMs = elapsedMillisSince(prepareStartedAt),
+                        details = mapOf(
+                            "project_root" to prepared.snapshot.projectRoot.absolutePath,
+                            "content_root" to prepared.snapshot.contentRoot.absolutePath,
+                            "entry" to prepared.snapshot.manifest.entryPoint,
+                            "project_id" to prepared.snapshot.manifest.projectId,
+                            "snapshot_kind" to prepared.snapshot.kind.name,
+                            "draft_version" to prepared.snapshot.version.toString()
+                        )
+                    )
                 }
             }
             val binding = MutableWebProjectBinding(
@@ -591,6 +849,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val initialProjectFiles = withContext(Dispatchers.IO) {
                 projectFilePaths(projectFileTool)
             }
+            traceLogger.record(
+                runId = runId,
+                component = "WORKSPACE",
+                operation = "draft_ready",
+                status = HarnessTraceStatus.SUCCEEDED,
+                message = "项目草稿和文件工具已就绪",
+                iteration = 0,
+                details = mapOf(
+                    "project_root" to binding.projectRoot.absolutePath,
+                    "content_root" to binding.contentRoot.absolutePath,
+                    "entry" to binding.manifest.entryPoint,
+                    "project_id" to binding.manifest.projectId,
+                    "draft_version" to binding.draftVersion.toString(),
+                    "file_count" to initialProjectFiles.size.toString()
+                )
+            )
             val initialPreview = withContext(Dispatchers.IO) {
                 when {
                     binding.entryFile.isFile -> projectFileTool.read(binding.manifest.entryPoint).content
@@ -625,13 +899,57 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
 
-            val projectSystemPrompt = withContext(Dispatchers.Default) {
-                AppGenerator.buildProjectSystemPrompt(
-                    context = application,
-                    userMessage = filteredInput.content,
-                    isModification = isModification
+            val promptStartedAt = System.nanoTime()
+            traceLogger.record(
+                runId = runId,
+                component = "PROMPT",
+                operation = "build_project_system_prompt",
+                status = HarnessTraceStatus.STARTED,
+                message = "开始组装项目系统提示词",
+                iteration = 0
+            )
+            val projectSystemPrompt = try {
+                withContext(Dispatchers.Default) {
+                    AppGenerator.buildProjectSystemPrompt(
+                        context = application,
+                        userMessage = filteredInput.content,
+                        isModification = isModification
+                    )
+                }
+            } catch (error: Throwable) {
+                traceLogger.record(
+                    runId = runId,
+                    component = "PROMPT",
+                    operation = "build_project_system_prompt",
+                    status = if (error is CancellationException) {
+                        HarnessTraceStatus.CANCELLED
+                    } else {
+                        HarnessTraceStatus.FAILED
+                    },
+                    message = if (error is CancellationException) {
+                        "项目系统提示词组装已取消"
+                    } else {
+                        "项目系统提示词组装失败"
+                    },
+                    iteration = 0,
+                    durationMs = elapsedMillisSince(promptStartedAt),
+                    details = mapOf("error_type" to error::class.java.simpleName)
                 )
+                throw error
             }
+            traceLogger.record(
+                runId = runId,
+                component = "PROMPT",
+                operation = "build_project_system_prompt",
+                status = HarnessTraceStatus.SUCCEEDED,
+                message = "项目系统提示词组装完成",
+                iteration = 0,
+                durationMs = elapsedMillisSince(promptStartedAt),
+                details = mapOf(
+                    "prompt_chars" to projectSystemPrompt.length.toString(),
+                    "prompt_sha256" to traceSha256(projectSystemPrompt)
+                )
+            )
             val modelRepair = StreamingHarnessModelRepair(
                 config = config,
                 maxTokens = AppGenerator.resolveProjectFileOutputLimit(
@@ -660,6 +978,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             progress = 25
                         )
                     }
+                },
+                traceLogger = traceLogger,
+                streamChatCompletion = { callConfig, request ->
+                    trackedChatStream(state.sessionId, callConfig, request)
                 }
             )
             val harnessFileTool = createWebProjectHarnessFileTool(
@@ -674,13 +996,86 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             inspector = GeneratedAppWebViewInspector(
                 webView = inspectorWebView,
-                prepareWebView = ::prepareHarnessWebView
-            )
-            val inspectionAdapter = WebViewHarnessInspectorAdapter(inspector)
-            val projectBuilder = HarnessBuilder { checkRequest ->
-                val validation = withContext(Dispatchers.IO) {
-                    WebAppProjectValidator().validate(binding.manifest, binding.contentRoot)
+                prepareWebView = ::prepareHarnessWebView,
+                onEvent = { event ->
+                    recordWebInspectionEvent(
+                        traceLogger = traceLogger,
+                        runId = runId,
+                        iteration = currentHarnessIteration(state),
+                        event = event
+                    )
                 }
+            )
+            val inspectionAdapter = WebViewHarnessInspectorAdapter(
+                inspector = inspector,
+                traceLogger = traceLogger
+            )
+            val projectBuilder = HarnessBuilder { checkRequest ->
+                val validationStartedAt = System.nanoTime()
+                traceLogger.record(
+                    runId = runId,
+                    component = "PROJECT_VALIDATOR",
+                    operation = checkRequest.kind.name,
+                    status = HarnessTraceStatus.STARTED,
+                    message = "项目清单与本地依赖校验开始",
+                    iteration = checkRequest.iteration,
+                    details = mapOf(
+                        "entry" to binding.manifest.entryPoint,
+                        "declared_file_count" to binding.manifest.files.size.toString()
+                    )
+                )
+                val validation = try {
+                    withContext(Dispatchers.IO) {
+                        WebAppProjectValidator().validate(binding.manifest, binding.contentRoot)
+                    }
+                } catch (error: Throwable) {
+                    traceLogger.record(
+                        runId = runId,
+                        component = "PROJECT_VALIDATOR",
+                        operation = checkRequest.kind.name,
+                        status = if (error is CancellationException) {
+                            HarnessTraceStatus.CANCELLED
+                        } else {
+                            HarnessTraceStatus.FAILED
+                        },
+                        message = if (error is CancellationException) {
+                            "项目清单与本地依赖校验已取消"
+                        } else {
+                            "项目清单与本地依赖校验异常"
+                        },
+                        iteration = checkRequest.iteration,
+                        durationMs = elapsedMillisSince(validationStartedAt),
+                        details = mapOf("error_type" to error::class.java.simpleName)
+                    )
+                    throw error
+                }
+                traceLogger.record(
+                    runId = runId,
+                    component = "PROJECT_VALIDATOR",
+                    operation = checkRequest.kind.name,
+                    status = if (validation.passed) {
+                        HarnessTraceStatus.SUCCEEDED
+                    } else {
+                        HarnessTraceStatus.FAILED
+                    },
+                    message = if (validation.passed) {
+                        "项目清单与本地依赖校验通过"
+                    } else {
+                        "项目清单或本地依赖校验失败"
+                    },
+                    iteration = checkRequest.iteration,
+                    durationMs = elapsedMillisSince(validationStartedAt),
+                    details = mapOf(
+                        "passed" to validation.passed.toString(),
+                        "file_count" to validation.fileCount.toString(),
+                        "total_bytes" to validation.totalBytes.toString(),
+                        "diagnostic_count" to validation.diagnostics.size.toString(),
+                        "diagnostic_codes" to validation.diagnostics
+                            .map { it.code }
+                            .distinct()
+                            .joinToString(",")
+                    )
+                )
                 if (!validation.passed) {
                     HarnessCheckResult(
                         passed = false,
@@ -706,13 +1101,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 inspector = inspectionAdapter,
                 testRunner = inspectionAdapter,
                 limits = HarnessLimits(
-                    maxCodeIterations = GENERATED_APP_HARNESS_MAX_ITERATIONS,
-                    maxModelTurnsPerIteration = WEB_PROJECT_MAX_MODEL_TURNS,
-                    maxToolCallsPerIteration = WEB_PROJECT_MAX_TOOL_CALLS
-                )
+                    maxCodeIterations = GENERATED_APP_HARNESS_MAX_ITERATIONS
+                ),
+                eventLogger = { eventRunId, event ->
+                    logHarnessEvent(state.sessionId, eventRunId, event)
+                },
+                traceLogger = traceLogger
             )
-            val runId = state.serviceRunId
-                ?: "harness-${state.sessionId}-${System.currentTimeMillis()}"
             val result = withContext(Dispatchers.Default) {
                 orchestrator.run(
                     HarnessRunRequest(
@@ -743,24 +1138,102 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             when (result) {
                 is HarnessRunResult.Delivered -> {
-                    val release = withContext(Dispatchers.IO) {
-                        synchronizeProjectManifest(binding, projectFileTool)
-                        ensureProjectEntryIdentity(binding, projectFileTool)
-                        binding.workspace.publishDraft(
-                            projectRoot = binding.projectRoot,
-                            draftVersion = binding.draftVersion,
-                            manifest = binding.manifest
+                    val publishStartedAt = System.nanoTime()
+                    traceLogger.record(
+                        runId = runId,
+                        component = "PUBLISH",
+                        operation = "publish_draft",
+                        status = HarnessTraceStatus.STARTED,
+                        message = "项目草稿开始原子发布",
+                        iteration = result.iterations,
+                        details = mapOf(
+                            "project_root" to binding.projectRoot.absolutePath,
+                            "draft_version" to binding.draftVersion.toString(),
+                            "project_id" to binding.manifest.projectId
                         )
+                    )
+                    val release = try {
+                        withContext(Dispatchers.IO) {
+                            synchronizeProjectManifest(binding, projectFileTool)
+                            ensureProjectEntryIdentity(binding, projectFileTool)
+                            binding.workspace.publishDraft(
+                                projectRoot = binding.projectRoot,
+                                draftVersion = binding.draftVersion,
+                                manifest = binding.manifest
+                            )
+                        }
+                    } catch (error: Throwable) {
+                        traceLogger.record(
+                            runId = runId,
+                            component = "PUBLISH",
+                            operation = "publish_draft",
+                            status = if (error is CancellationException) {
+                                HarnessTraceStatus.CANCELLED
+                            } else {
+                                HarnessTraceStatus.FAILED
+                            },
+                            message = if (error is CancellationException) {
+                                "项目草稿发布已取消"
+                            } else {
+                                "项目草稿发布失败"
+                            },
+                            iteration = result.iterations,
+                            durationMs = elapsedMillisSince(publishStartedAt),
+                            details = mapOf("error_type" to error::class.java.simpleName)
+                        )
+                        throw error
                     }
+                    traceLogger.record(
+                        runId = runId,
+                        component = "PUBLISH",
+                        operation = "publish_draft",
+                        status = HarnessTraceStatus.SUCCEEDED,
+                        message = "项目草稿原子发布完成",
+                        iteration = result.iterations,
+                        durationMs = elapsedMillisSince(publishStartedAt),
+                        details = mapOf(
+                            "release_version" to release.version.toString(),
+                            "release_root" to release.contentRoot.absolutePath,
+                            "entry" to release.entryFile.absolutePath,
+                            "self_test_bypassed" to result.selfTestBypassed.toString()
+                        )
+                    )
                     completeGeneratedWebProject(
                         state = state,
                         release = release,
                         isModification = isModification,
-                        iteration = result.iterations
+                        iteration = result.iterations,
+                        selfTestBypassed = result.selfTestBypassed
+                    )
+                    traceLogger.record(
+                        runId = runId,
+                        component = "FLOW",
+                        operation = "generate_web_project",
+                        status = HarnessTraceStatus.SUCCEEDED,
+                        message = "Web 项目生成流程完成",
+                        iteration = result.iterations,
+                        durationMs = elapsedMillisSince(flowStartedAt),
+                        details = mapOf(
+                            "artifact" to release.entryFile.absolutePath,
+                            "self_test_bypassed" to result.selfTestBypassed.toString()
+                        )
                     )
                 }
 
                 is HarnessRunResult.Failed -> {
+                    traceLogger.record(
+                        runId = runId,
+                        component = "FLOW",
+                        operation = "generate_web_project",
+                        status = HarnessTraceStatus.FAILED,
+                        message = "Web 项目生成流程未通过 Harness",
+                        iteration = result.iterations,
+                        durationMs = elapsedMillisSince(flowStartedAt),
+                        details = mapOf(
+                            "artifact" to result.artifactPath.orEmpty(),
+                            "diagnostic_count" to result.diagnostics.size.toString()
+                        )
+                    )
                     failGeneratedWebProject(
                         state = state,
                         message = result.reason,
@@ -771,7 +1244,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         } catch (error: Throwable) {
-            if (error is CancellationException) throw error
+            if (error is CancellationException) {
+                traceLogger.record(
+                    runId = runId,
+                    component = "FLOW",
+                    operation = "generate_web_project",
+                    status = HarnessTraceStatus.CANCELLED,
+                    message = "Web 项目生成流程已取消",
+                    iteration = currentHarnessIteration(state),
+                    durationMs = elapsedMillisSince(flowStartedAt)
+                )
+                throw error
+            }
+            traceLogger.record(
+                runId = runId,
+                component = "FLOW",
+                operation = "generate_web_project",
+                status = HarnessTraceStatus.FAILED,
+                message = "Web 项目生成流程异常",
+                iteration = currentHarnessIteration(state),
+                durationMs = elapsedMillisSince(flowStartedAt),
+                details = mapOf("error_type" to error::class.java.simpleName)
+            )
             failGeneratedWebProject(
                 state = state,
                 message = error.message ?: "多文件项目生成失败",
@@ -781,6 +1275,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             )
             throw error
         } finally {
+            val cleanupStartedAt = System.nanoTime()
+            traceLogger.record(
+                runId = runId,
+                component = "CLEANUP",
+                operation = "webview",
+                status = HarnessTraceStatus.STARTED,
+                message = "Harness WebView 清理开始",
+                iteration = currentHarnessIteration(state),
+                details = mapOf("webview_created" to (inspectorWebView != null).toString())
+            )
             withContext(NonCancellable + Dispatchers.Main.immediate) {
                 inspector?.cancelCurrentInspection()
                 inspectorWebView?.let { webView ->
@@ -791,13 +1295,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 state.isGeneratingApp = false
                 updateSessionLoadingIndicators()
             }
+            traceLogger.record(
+                runId = runId,
+                component = "CLEANUP",
+                operation = "webview",
+                status = HarnessTraceStatus.SUCCEEDED,
+                message = "Harness WebView 清理完成",
+                iteration = currentHarnessIteration(state),
+                durationMs = elapsedMillisSince(cleanupStartedAt)
+            )
         }
     }
 
     private suspend fun planAndCreateWebProject(
         state: StreamingSessionState,
         config: ChatCallConfig,
-        userRequirement: String
+        userRequirement: String,
+        runId: String,
+        traceLogger: HarnessTraceLogger
     ): PreparedWebProject {
         withContext(Dispatchers.Main.immediate) {
             updateHarnessStage(
@@ -835,25 +1350,82 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         progress = 12
                     )
                 }
+            },
+            traceLogger = traceLogger,
+            streamChatCompletion = { callConfig, request ->
+                trackedChatStream(state.sessionId, callConfig, request)
             }
         )
         val planningResult = withContext(Dispatchers.Default) {
-            planner.plan(userRequirement)
+            planner.plan(userRequirement, runId)
         }
         val workspace = WebAppProjectWorkspace()
-        val snapshot = withContext(Dispatchers.IO) {
-            val projectRoot = nextWebProjectRoot(
-                displayName = planningResult.manifest.displayName,
-                projectId = planningResult.manifest.projectId
+        val workspaceStartedAt = System.nanoTime()
+        traceLogger.record(
+            runId = runId,
+            component = "WORKSPACE",
+            operation = "create_draft",
+            status = HarnessTraceStatus.STARTED,
+            message = "开始创建规划后的项目草稿",
+            iteration = 0,
+            details = mapOf(
+                "project_id" to planningResult.manifest.projectId,
+                "entry" to planningResult.manifest.entryPoint,
+                "declared_file_count" to planningResult.manifest.files.size.toString()
             )
-            workspace.create(projectRoot, planningResult.manifest).also { draft ->
-                WebProjectFileTool(draft.contentRoot).write(
-                    path = PROJECT_PLAN_FILE_NAME,
-                    content = planningResult.projectPlanJson,
-                    createOnly = true
+        )
+        val snapshot = try {
+            withContext(Dispatchers.IO) {
+                val projectRoot = nextWebProjectRoot(
+                    displayName = planningResult.manifest.displayName,
+                    projectId = planningResult.manifest.projectId
                 )
+                workspace.create(projectRoot, planningResult.manifest).also { draft ->
+                    WebProjectFileTool(draft.contentRoot).write(
+                        path = PROJECT_PLAN_FILE_NAME,
+                        content = planningResult.projectPlanJson,
+                        createOnly = true
+                    )
+                }
             }
+        } catch (error: Throwable) {
+            traceLogger.record(
+                runId = runId,
+                component = "WORKSPACE",
+                operation = "create_draft",
+                status = if (error is CancellationException) {
+                    HarnessTraceStatus.CANCELLED
+                } else {
+                    HarnessTraceStatus.FAILED
+                },
+                message = if (error is CancellationException) {
+                    "规划后的项目草稿创建已取消"
+                } else {
+                    "规划后的项目草稿创建失败"
+                },
+                iteration = 0,
+                durationMs = elapsedMillisSince(workspaceStartedAt),
+                details = mapOf("error_type" to error::class.java.simpleName)
+            )
+            throw error
         }
+        traceLogger.record(
+            runId = runId,
+            component = "WORKSPACE",
+            operation = "create_draft",
+            status = HarnessTraceStatus.SUCCEEDED,
+            message = "规划后的项目草稿创建完成",
+            iteration = 0,
+            durationMs = elapsedMillisSince(workspaceStartedAt),
+            details = mapOf(
+                "project_root" to snapshot.projectRoot.absolutePath,
+                "content_root" to snapshot.contentRoot.absolutePath,
+                "entry" to snapshot.entryFile.absolutePath,
+                "draft_version" to snapshot.version.toString(),
+                "project_plan_chars" to planningResult.projectPlanJson.length.toString(),
+                "project_plan_sha256" to traceSha256(planningResult.projectPlanJson)
+            )
+        )
         withContext(Dispatchers.Main.immediate) {
             updateHarnessStage(
                 state = state,
@@ -1001,7 +1573,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
                         success = false,
                         output = "project.json 由编排器维护，不能删除",
-                        diagnostics = listOf("PROJECT_PLAN_DELETE_FORBIDDEN")
+                        diagnostics = listOf("PROJECT_PLAN_DELETE_FORBIDDEN"),
+                        metadata = toolPolicyMetadata(
+                            tool = call.name,
+                            path = requestedPath,
+                            policyCode = "PROJECT_PLAN_DELETE_FORBIDDEN"
+                        )
                     )
                 }
 
@@ -1015,7 +1592,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
                         success = false,
                         output = "写入新文件前必须先把路径加入 project.json：$requestedPath",
-                        diagnostics = listOf("PROJECT_FILE_NOT_DECLARED: $requestedPath")
+                        diagnostics = listOf("PROJECT_FILE_NOT_DECLARED: $requestedPath"),
+                        metadata = toolPolicyMetadata(
+                            tool = call.name,
+                            path = requestedPath,
+                            policyCode = "PROJECT_FILE_NOT_DECLARED"
+                        )
                     )
                 }
 
@@ -1024,7 +1606,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
                         success = false,
                         output = "删除文件前必须先从 project.json 移除声明：$requestedPath",
-                        diagnostics = listOf("PROJECT_FILE_STILL_DECLARED: $requestedPath")
+                        diagnostics = listOf("PROJECT_FILE_STILL_DECLARED: $requestedPath"),
+                        metadata = toolPolicyMetadata(
+                            tool = call.name,
+                            path = requestedPath,
+                            policyCode = "PROJECT_FILE_STILL_DECLARED"
+                        )
                     )
                 }
 
@@ -1067,9 +1654,22 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 output = result.output,
                 diagnostics = result.diagnostics,
                 changedFiles = result.changedFiles,
-                artifactPath = binding.entryFile.absolutePath
+                artifactPath = binding.entryFile.absolutePath,
+                metadata = result.metadata
             )
         }
+    }
+
+    private fun toolPolicyMetadata(
+        tool: String,
+        path: String?,
+        policyCode: String
+    ): Map<String, String> = buildMap {
+        put("tool", tool)
+        path?.let { put("path", it) }
+        put("error_type", "PolicyRejected")
+        put("failure_stage", "policy")
+        put("policy_code", policyCode)
     }
 
     private fun updateVisibleProjectPlan(
@@ -1081,7 +1681,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ?: return com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
                 success = false,
                 output = "write_file requires argument: content",
-                diagnostics = listOf("PROJECT_PLAN_CONTENT_MISSING")
+                diagnostics = listOf("PROJECT_PLAN_CONTENT_MISSING"),
+                metadata = mapOf(
+                    "tool" to WebProjectFileTool.TOOL_WRITE_FILE,
+                    "path" to PROJECT_PLAN_FILE_NAME,
+                    "error_type" to "MissingArgument",
+                    "failure_stage" to "arguments",
+                    "policy_code" to "PROJECT_PLAN_CONTENT_MISSING"
+                )
             )
         val parsedManifest = runCatching {
             WebProjectPlanParser.parse(content).manifest.copy(
@@ -1092,14 +1699,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
                 success = false,
                 output = error.message ?: "project.json 格式无效",
-                diagnostics = listOf("PROJECT_PLAN_INVALID: ${error.message.orEmpty()}")
+                diagnostics = listOf("PROJECT_PLAN_INVALID: ${error.message.orEmpty()}"),
+                metadata = toolPolicyMetadata(
+                    tool = WebProjectFileTool.TOOL_WRITE_FILE,
+                    path = PROJECT_PLAN_FILE_NAME,
+                    policyCode = "PROJECT_PLAN_INVALID"
+                ) + ("error_type" to error::class.java.simpleName)
             )
         }
         if (parsedManifest.entryPoint != binding.manifest.entryPoint) {
             return com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
                 success = false,
                 output = "当前任务不能改变项目入口 ${binding.manifest.entryPoint}",
-                diagnostics = listOf("PROJECT_ENTRY_CHANGE_FORBIDDEN")
+                diagnostics = listOf("PROJECT_ENTRY_CHANGE_FORBIDDEN"),
+                metadata = toolPolicyMetadata(
+                    tool = WebProjectFileTool.TOOL_WRITE_FILE,
+                    path = PROJECT_PLAN_FILE_NAME,
+                    policyCode = "PROJECT_ENTRY_CHANGE_FORBIDDEN"
+                )
             )
         }
 
@@ -1143,7 +1760,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         state: StreamingSessionState,
         release: WebAppProjectSnapshot,
         isModification: Boolean,
-        iteration: Int
+        iteration: Int,
+        selfTestBypassed: Boolean = false
     ) {
         val projectFiles = withContext(Dispatchers.IO) {
             projectFilePaths(WebProjectFileTool(release.contentRoot))
@@ -1163,7 +1781,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     filePath = release.entryFile.absolutePath,
                     activeFilePath = release.manifest.entryPoint,
                     projectFiles = projectFiles,
-                    status = "多文件项目已构建、测试并发布",
+                    status = if (selfTestBypassed) {
+                        "多文件项目已构建、运行检查和测试并发布（自测非阻塞放行）"
+                    } else {
+                        "多文件项目已构建、测试并发布"
+                    },
                     isModification = isModification,
                     harnessIteration = maxOf(current?.harnessIteration ?: 0, iteration),
                     diagnostics = emptyList(),
@@ -1176,9 +1798,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         addFinalAssistantMessage(
             state = state,
             content = if (isModification) {
-                "项目修改已完成，并通过构建、WebView 检查、自测和测试集，点击下方查看 👇"
+                if (selfTestBypassed) {
+                    "项目修改已完成，并通过构建、WebView 检查和测试集；自测非阻塞放行，点击下方查看 👇"
+                } else {
+                    "项目修改已完成，并通过构建、WebView 检查、自测和测试集，点击下方查看 👇"
+                }
             } else {
-                "多文件 Web 应用已生成，并通过完整 Harness，点击下方预览 👇"
+                if (selfTestBypassed) {
+                    "多文件 Web 应用已生成，并通过构建、WebView 检查和测试集；自测非阻塞放行，点击下方预览 👇"
+                } else {
+                    "多文件 Web 应用已生成，并通过完整 Harness，点击下方预览 👇"
+                }
             },
             appHtmlPath = release.entryFile.absolutePath
         )
@@ -1363,7 +1993,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             var finished = false
             var handledError = false
 
-            StreamingApiService.streamChatCompletion(config, activeRequest)
+            trackedChatStream(state.sessionId, config, activeRequest)
                 .catch { e ->
                     if (e is CancellationException) throw e
                     handledError = true
@@ -1630,7 +2260,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 iteration = harnessIteration
             )
 
-            StreamingApiService.streamChatCompletion(config, request)
+            trackedChatStream(state.sessionId, config, request)
                 .catch { e ->
                     if (e is CancellationException) throw e
                     stopAppGenerationProgressHeartbeat(state)
@@ -1979,7 +2609,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 isModification = true
             )
 
-            StreamingApiService.streamChatCompletion(config, request)
+            trackedChatStream(state.sessionId, config, request)
                 .catch { error ->
                     if (error is CancellationException) throw error
                     val message = error.message ?: "生成 diff 时出错"
@@ -2684,7 +3314,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val diffBuffer = StringBuilder()
             var streamFailure: String? = null
 
-            StreamingApiService.streamChatCompletion(config, request)
+            trackedChatStream(state.sessionId, config, request)
                 .catch { error ->
                     if (error is CancellationException) throw error
                     streamFailure = error.message ?: "模型修复请求失败"
@@ -2799,6 +3429,359 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             WEB_APP_DIFF_LOG_TAG,
             "Model diff response preview:\n${buildDiffLogPreview(response)}"
         )
+    }
+
+    private fun logHarnessEvent(
+        sessionId: Long,
+        runId: String,
+        event: GenerateTaskState.HarnessEvent
+    ) {
+        val diagnosticCodes = event.diagnostics.asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .map { it.substringBefore(':').substringBefore(' ').take(80) }
+            .distinct()
+            .joinToString(",")
+        val logMessage = buildString {
+            append("run_id=").append(runId)
+            append(" session_id=").append(sessionId)
+            append(" stage=").append(event.stage.name)
+            append(" operation=").append(event.operation ?: "-")
+            append(" outcome=").append(event.outcome.name)
+            append(" iteration=").append(event.iteration)
+            append(" trace_format=legacy_ui_event")
+            append(" message_chars=").append(event.message.length)
+            append(" message_sha256=").append(traceSha256(event.message))
+            append(" diagnostic_count=").append(event.diagnostics.size)
+            if (diagnosticCodes.isNotBlank()) {
+                append(" diagnostic_codes=").append(diagnosticCodes)
+            }
+        }
+        when (event.outcome) {
+            GenerateTaskState.Outcome.FAILED -> Log.e(WEB_HARNESS_LOG_TAG, logMessage)
+            GenerateTaskState.Outcome.RETRYING -> Log.w(WEB_HARNESS_LOG_TAG, logMessage)
+            else -> Log.i(WEB_HARNESS_LOG_TAG, logMessage)
+        }
+    }
+
+    private fun createHarnessTraceLogger(
+        sessionId: Long,
+        expectedRunId: String
+    ): HarnessTraceLogger {
+        val sequence = AtomicLong()
+        return HarnessTraceLogger { event ->
+            logHarnessTraceEvent(
+                sessionId = sessionId,
+                expectedRunId = expectedRunId,
+                sequence = sequence.incrementAndGet(),
+                event = event
+            )
+        }
+    }
+
+    private fun logHarnessTraceEvent(
+        sessionId: Long,
+        expectedRunId: String,
+        sequence: Long,
+        event: HarnessTraceEvent
+    ) {
+        val details = buildMap {
+            putAll(event.details)
+            if (event.runId != expectedRunId) put("expected_run_id", expectedRunId)
+        }.toSortedMap().entries.joinToString(",") { (key, value) ->
+            "${sanitizeHarnessLogValue(key)}=${sanitizeHarnessLogValue(value)}"
+        }.take(HARNESS_TRACE_DETAILS_CHARS)
+        val logMessage = buildString {
+            append("run_id=").append(sanitizeHarnessLogValue(event.runId))
+            append(" seq=").append(sequence)
+            append(" session_id=").append(sessionId)
+            append(" component=").append(sanitizeHarnessLogValue(event.component))
+            append(" operation=").append(sanitizeHarnessLogValue(event.operation))
+            append(" status=").append(event.status.name)
+            append(" iteration=").append(event.iteration ?: 0)
+            append(" duration_ms=").append(event.durationMs ?: -1)
+            append(" message=").append(sanitizeHarnessLogValue(event.message))
+            if (details.isNotBlank()) append(" details={").append(details).append('}')
+        }
+        when (event.status) {
+            HarnessTraceStatus.FAILED -> Log.e(WEB_HARNESS_LOG_TAG, logMessage)
+            HarnessTraceStatus.CANCELLED -> Log.w(WEB_HARNESS_LOG_TAG, logMessage)
+            else -> Log.i(WEB_HARNESS_LOG_TAG, logMessage)
+        }
+    }
+
+    private fun recordWebInspectionEvent(
+        traceLogger: HarnessTraceLogger,
+        runId: String,
+        iteration: Int,
+        event: WebInspectionEvent
+    ) {
+        when (event) {
+            is WebInspectionEvent.StageStarted -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW",
+                operation = "stage_started",
+                status = HarnessTraceStatus.STARTED,
+                message = "WebView 检查阶段开始",
+                iteration = iteration,
+                details = buildMap {
+                    put("stage", event.stage.name)
+                    event.timeoutMillis?.let { put("timeout_ms", it.toString()) }
+                    event.settleMillis?.let { put("settle_ms", it.toString()) }
+                }
+            )
+
+            is WebInspectionEvent.StageCancelled -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW",
+                operation = "stage_cancelled",
+                status = HarnessTraceStatus.CANCELLED,
+                message = "WebView 检查阶段已取消",
+                iteration = iteration,
+                durationMs = event.durationMillis,
+                details = mapOf(
+                    "stage" to event.stage.name,
+                    "diagnostic_code" to event.diagnosticCode
+                )
+            )
+
+            is WebInspectionEvent.PageLoading -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW",
+                operation = "page_started",
+                status = HarnessTraceStatus.PROGRESS,
+                message = "WebView 页面开始加载",
+                iteration = iteration,
+                details = mapOf(
+                    "stage" to event.stage.name,
+                    "url_chars" to event.urlCharacterCount.toString(),
+                    "url_sha256" to event.urlSha256.orEmpty()
+                )
+            )
+
+            is WebInspectionEvent.PageFinished -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW_PAGE",
+                operation = "finished",
+                status = event.status.toHarnessTraceStatus(),
+                message = "WebView 页面加载回调完成",
+                iteration = iteration,
+                details = buildMap {
+                    put("stage", event.stage.name)
+                    put("status", event.status.name)
+                    put("url_chars", event.urlCharacterCount.toString())
+                    put("url_sha256", event.urlSha256.orEmpty())
+                    event.diagnosticCode?.let { put("diagnostic_code", it) }
+                }
+            )
+
+            is WebInspectionEvent.ProbeStarted -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW_PROBE",
+                operation = event.probe.name,
+                status = HarnessTraceStatus.STARTED,
+                message = "WebView 探针开始执行",
+                iteration = iteration,
+                details = mapOf(
+                    "stage" to event.stage.name,
+                    "input_chars" to event.inputCharacterCount.toString(),
+                    "input_sha256" to event.inputSha256
+                )
+            )
+
+            is WebInspectionEvent.ProbeResult -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW_PROBE",
+                operation = event.probe.name,
+                status = event.status.toHarnessTraceStatus(),
+                message = "WebView 探针执行结果",
+                iteration = iteration,
+                details = mapOf(
+                    "stage" to event.stage.name,
+                    "status" to event.status.name,
+                    "result_chars" to event.resultCharacterCount.toString(),
+                    "result_sha256" to event.resultSha256.orEmpty(),
+                    "decoded_chars" to event.decodedCharacterCount.toString(),
+                    "decoded_sha256" to event.decodedSha256.orEmpty(),
+                    "decode_status" to event.decodeStatus.name,
+                    "parse_status" to event.parseStatus.name,
+                    "diagnostic_codes" to event.diagnosticCodes.joinToString(",")
+                )
+            )
+
+            is WebInspectionEvent.SelfTestRoot -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW_TEST",
+                operation = "root_result",
+                status = event.status.toHarnessTraceStatus(),
+                message = "WebView 自测根结果",
+                iteration = iteration,
+                details = buildMap {
+                    put("stage", event.stage.name)
+                    put("status", event.status.name)
+                    put("case_count", event.caseCount.toString())
+                    event.diagnosticCode?.let { put("diagnostic_code", it) }
+                }
+            )
+
+            is WebInspectionEvent.SelfTestCaseResult -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW_TEST",
+                operation = "case_result",
+                status = event.status.toHarnessTraceStatus(),
+                message = "WebView 自测用例结果",
+                iteration = iteration,
+                details = buildMap {
+                    put("stage", event.stage.name)
+                    put("index", event.index.toString())
+                    put("status", event.status.name)
+                    put("name_chars", event.nameCharacterCount.toString())
+                    put("name_sha256", event.nameSha256)
+                    event.diagnosticCode?.let { put("diagnostic_code", it) }
+                }
+            )
+
+            is WebInspectionEvent.InterceptorResult -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW_INTERCEPTOR",
+                operation = "request",
+                status = event.status.toHarnessTraceStatus(),
+                message = "WebView 请求拦截结果",
+                iteration = iteration,
+                details = mapOf(
+                    "stage" to event.stage.name,
+                    "status" to event.status.name,
+                    "url_chars" to event.urlCharacterCount.toString(),
+                    "url_sha256" to event.urlSha256.orEmpty(),
+                    "response_status" to event.responseStatusCode.toString()
+                )
+            )
+
+            is WebInspectionEvent.InterceptorFailure -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW_INTERCEPTOR",
+                operation = "request",
+                status = HarnessTraceStatus.FAILED,
+                message = "WebView 请求拦截执行失败",
+                iteration = iteration,
+                details = mapOf(
+                    "stage" to event.stage.name,
+                    "status" to event.status.name,
+                    "url_chars" to event.urlCharacterCount.toString(),
+                    "url_sha256" to event.urlSha256.orEmpty(),
+                    "diagnostic_code" to event.diagnosticCode
+                )
+            )
+
+            is WebInspectionEvent.Decision -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW_DECISION",
+                operation = event.stage.name,
+                status = event.status.toHarnessTraceStatus(),
+                message = "WebView 最终判定完成",
+                iteration = iteration,
+                durationMs = event.durationMillis,
+                details = mapOf(
+                    "timed_out" to event.timedOut.toString(),
+                    "timeout_ok" to (!event.timedOut).toString(),
+                    "has_error_diagnostics" to event.hasErrorDiagnostics.toString(),
+                    "error_free" to (!event.hasErrorDiagnostics).toString(),
+                    "all_self_tests_passed" to event.allSelfTestsPassed.toString(),
+                    "diagnostic_count" to event.diagnosticCount.toString(),
+                    "error_count" to event.errorDiagnosticCount.toString(),
+                    "case_count" to event.selfTestCount.toString(),
+                    "case_failed" to event.failedSelfTestCount.toString(),
+                    "final_passed" to (event.status == WebInspectionEvent.Status.SUCCEEDED).toString(),
+                    "diagnostic_codes" to event.diagnosticCodes.joinToString(",")
+                )
+            )
+
+            is WebInspectionEvent.DiagnosticCaptured -> traceLogger.record(
+                runId = runId,
+                component = "WEBVIEW_DIAGNOSTIC",
+                operation = "captured",
+                status = if (
+                    event.diagnostic.severity ==
+                    com.hfad.mantou.utils.harness.WebDiagnosticSeverity.ERROR
+                ) {
+                    HarnessTraceStatus.FAILED
+                } else {
+                    HarnessTraceStatus.PROGRESS
+                },
+                message = "WebView 诊断已捕获",
+                iteration = iteration,
+                details = buildMap {
+                    put("stage", event.stage.name)
+                    put("severity", event.diagnostic.severity.name)
+                    put("category", event.diagnostic.category.name)
+                    put("code", event.diagnostic.code)
+                    event.diagnostic.location?.source?.let { source ->
+                        put("source_chars", source.length.toString())
+                        put("source_sha256", traceSha256(source))
+                    }
+                    event.diagnostic.location?.line?.let { put("line", it.toString()) }
+                    event.diagnostic.location?.column?.let { put("column", it.toString()) }
+                }
+            )
+
+            is WebInspectionEvent.StageFinished -> {
+                val errorCount = event.report.diagnostics.count {
+                    it.severity == com.hfad.mantou.utils.harness.WebDiagnosticSeverity.ERROR
+                }
+                val failedCases = event.report.selfTests.count { !it.passed }
+                traceLogger.record(
+                    runId = runId,
+                    component = "WEBVIEW",
+                    operation = "stage_finished",
+                    status = if (event.report.passed) {
+                        HarnessTraceStatus.SUCCEEDED
+                    } else {
+                        HarnessTraceStatus.FAILED
+                    },
+                    message = "WebView 检查阶段完成",
+                    iteration = iteration,
+                    durationMs = event.report.durationMillis,
+                    details = mapOf(
+                        "stage" to event.stage.name,
+                        "timed_out" to event.report.timedOut.toString(),
+                        "error_count" to errorCount.toString(),
+                        "diagnostic_count" to event.report.diagnostics.size.toString(),
+                        "case_count" to event.report.selfTests.size.toString(),
+                        "case_failed" to failedCases.toString(),
+                        "final_passed" to event.report.passed.toString()
+                    )
+                )
+            }
+        }
+    }
+
+    private fun WebInspectionEvent.Status.toHarnessTraceStatus(): HarnessTraceStatus {
+        return when (this) {
+            WebInspectionEvent.Status.SUCCEEDED,
+            WebInspectionEvent.Status.INTERCEPTED -> HarnessTraceStatus.SUCCEEDED
+
+            WebInspectionEvent.Status.FAILED -> HarnessTraceStatus.FAILED
+            WebInspectionEvent.Status.IGNORED,
+            WebInspectionEvent.Status.PASSTHROUGH,
+            WebInspectionEvent.Status.NOT_REQUIRED,
+            WebInspectionEvent.Status.NOT_ATTEMPTED -> HarnessTraceStatus.PROGRESS
+        }
+    }
+
+    private fun currentHarnessIteration(state: StreamingSessionState): Int {
+        return _generateTaskStates.value.orEmpty()[state.sessionId]?.harnessIteration ?: 0
+    }
+
+    private fun sanitizeHarnessLogValue(value: String): String {
+        return ApiLogRedactor.redactBody(value)
+            .replace(Regex("[\\r\\n\\t]+"), " ")
+            .take(HARNESS_TRACE_VALUE_CHARS)
+    }
+
+    private fun traceSha256(content: String): String {
+        return MessageDigest.getInstance("SHA-256")
+            .digest(content.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 
     private fun buildDiffLogPreview(response: String): String {
@@ -2930,6 +3913,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val fingerprint = buildString {
             append(taskState.phase.name).append('|')
             append(latestEvent?.stage?.name).append('|')
+            append(latestEvent?.operation).append('|')
             append(latestEvent?.outcome?.name).append('|')
             append(latestEvent?.timestamp)
         }
@@ -2955,6 +3939,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             else -> reporter.report(
                 message = taskState.status,
                 stage = latestEvent?.stage?.name ?: taskState.phase.name,
+                operation = latestEvent?.operation,
                 iteration = maxOf(taskState.harnessIteration, latestEvent?.iteration ?: 0),
                 progress = harnessProgressPercent(taskState, latestEvent),
                 diagnostics = taskState.diagnostics
@@ -3337,7 +4322,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             addStreamingPlaceholder(state, "出错了，馒头正在拼命分析…", useLoadingLayout = false)
         }
 
-        val analyzed = config?.let { ErrorAnalyzer.analyze(it, rawError, scene) }
+        val analyzed = config?.let {
+            ErrorAnalyzer.analyze(
+                config = it,
+                rawError = rawError,
+                scene = scene,
+                tokenUsageListener = { usage -> recordSessionTokenUsage(state.sessionId, usage) },
+                diagnosticContext = ApiDiagnosticContext(
+                    runId = state.serviceRunId ?: "session-${state.sessionId}",
+                    operation = "error.analyze"
+                )
+            )
+        }
 
         removeStreamingPlaceholder(state)
 
@@ -3480,6 +4476,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val sessionId = repository.createSession(content.ifEmpty { "[图片]" })
             _currentSessionId.value = sessionId
             _messages.value = emptyList()
+            currentTokenUsageSessionId = sessionId
+            _currentSessionTokenUsage.value = SessionTokenUsage()
             loadMessages(sessionId)
             delay(100)
             sendMessage(content, imagePath, imageUris)
@@ -3552,6 +4550,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (_currentSessionId.value == sessionId) {
                 _currentSessionId.value = null
                 _messages.value = emptyList()
+                currentTokenUsageSessionId = null
+                _currentSessionTokenUsage.value = SessionTokenUsage()
             }
         }
     }
@@ -3630,6 +4630,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             repository.deleteAllSessions()
             _currentSessionId.value = null
             _messages.value = emptyList()
+            currentTokenUsageSessionId = null
+            _currentSessionTokenUsage.value = SessionTokenUsage()
             _generateTaskStates.value = emptyMap()
         }
     }
@@ -3638,6 +4640,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _currentSessionId.value?.let { cancelStreaming(it, persistFallback = true) }
         _currentSessionId.value = null
         _messages.value = emptyList()
+        currentTokenUsageSessionId = null
+        _currentSessionTokenUsage.value = SessionTokenUsage()
         updateSessionLoadingIndicators()
     }
 
@@ -3661,7 +4665,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 }
 
 private const val WEB_APP_DIFF_LOG_TAG = "WebAppDiff"
+private const val WEB_HARNESS_LOG_TAG = "ManTouHarness"
 private const val APP_DIFF_LOG_PREVIEW_CHARS = 3_000
+private const val HARNESS_TRACE_VALUE_CHARS = 1_000
+private const val HARNESS_TRACE_DETAILS_CHARS = 8_000
 private const val GENERATED_APP_HARNESS_MAX_ITERATIONS = 8
 private const val GENERATED_APP_REPAIR_PATCH_ATTEMPTS = 2
 private const val HARNESS_NOTIFICATION_UPDATE_INTERVAL_MS = 750L
@@ -3670,8 +4677,6 @@ private const val DEFAULT_PROJECT_STYLE_PATH = "styles/app.css"
 private const val DEFAULT_PROJECT_SCRIPT_PATH = "scripts/app.js"
 private const val WEB_PROJECT_PLAN_MAX_TOKENS = 8_000
 private const val WEB_PROJECT_MAX_PLANNED_FILES = 24
-private const val WEB_PROJECT_MAX_MODEL_TURNS = 40
-private const val WEB_PROJECT_MAX_TOOL_CALLS = 64
 private const val WEB_PROJECT_DIRECTORY_NAME_MAX_CHARS = 64
 private const val WEB_PROJECT_DIRECTORY_ID_CHARS = 8
 private val WEB_PROJECT_PLAN_GSON = GsonBuilder()

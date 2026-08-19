@@ -12,7 +12,12 @@ object ContextTokenCounter {
 
     fun estimateText(text: String?): Int {
         if (text.isNullOrEmpty()) return 0
-        return (text.length / CHARS_PER_TOKEN).roundToInt().coerceAtLeast(1)
+        return estimateTextLength(text.length)
+    }
+
+    fun estimateTextLength(characterCount: Int): Int {
+        if (characterCount <= 0) return 0
+        return (characterCount / CHARS_PER_TOKEN).roundToInt().coerceAtLeast(1)
     }
 
     fun estimateChatMessages(

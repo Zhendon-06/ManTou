@@ -145,7 +145,17 @@ class GeneratedAppWebViewInspector(
         initialDiagnostics: List<WebInspectionDiagnostic> = emptyList()
     ): WebInspectionReport = withContext(Dispatchers.Main.immediate) {
         require(timeoutMillis > 0) { "timeoutMillis must be greater than zero" }
-        emit(WebInspectionEvent.StageStarted(stage))
+        emit(
+            WebInspectionEvent.StageStarted(
+                stage = stage,
+                timeoutMillis = timeoutMillis,
+                settleMillis = when (mode) {
+                    is InspectionMode.Build -> null
+                    is InspectionMode.Runtime -> mode.settleMillis
+                    is InspectionMode.Tests -> mode.settleMillis
+                }
+            )
+        )
         initialDiagnostics.forEach { diagnostic ->
             emit(WebInspectionEvent.DiagnosticCaptured(stage, diagnostic))
         }
@@ -157,6 +167,7 @@ class GeneratedAppWebViewInspector(
                 initialDiagnostics = initialDiagnostics,
                 onComplete = { report ->
                     activeSession = null
+                    emitDecision(report)
                     emit(WebInspectionEvent.StageFinished(stage, report))
                     if (continuation.isActive) continuation.resume(report)
                 }
@@ -166,6 +177,7 @@ class GeneratedAppWebViewInspector(
             continuation.invokeOnCancellation {
                 webView.post {
                     if (activeSession === session) {
+                        session.emitCancelled()
                         session.dispose(stopLoading = true)
                         activeSession = null
                     }
@@ -177,6 +189,32 @@ class GeneratedAppWebViewInspector(
 
     private fun emit(event: WebInspectionEvent) {
         runCatching { onEvent(event) }
+    }
+
+    private fun emitDecision(report: WebInspectionReport) {
+        val errorDiagnosticCount = report.diagnostics.count {
+            it.severity == WebDiagnosticSeverity.ERROR
+        }
+        val failedSelfTestCount = report.selfTests.count { !it.passed }
+        emit(
+            WebInspectionEvent.Decision(
+                stage = report.stage,
+                status = if (report.passed) {
+                    WebInspectionEvent.Status.SUCCEEDED
+                } else {
+                    WebInspectionEvent.Status.FAILED
+                },
+                timedOut = report.timedOut,
+                hasErrorDiagnostics = errorDiagnosticCount > 0,
+                allSelfTestsPassed = failedSelfTestCount == 0,
+                diagnosticCount = report.diagnostics.size,
+                errorDiagnosticCount = errorDiagnosticCount,
+                selfTestCount = report.selfTests.size,
+                failedSelfTestCount = failedSelfTestCount,
+                durationMillis = report.durationMillis,
+                diagnosticCodes = report.diagnostics.map { it.code }
+            )
+        )
     }
 
     private inner class InspectionSession(
@@ -196,6 +234,7 @@ class GeneratedAppWebViewInspector(
         private var pageStarted = false
         private var pageHandled = false
         private var finished = false
+        private var cancellationEventEmitted = false
         var cancelContinuation: ((CancellationException) -> Unit)? = null
         private val timeoutRunnable = Runnable {
             addDiagnostic(
@@ -236,17 +275,48 @@ class GeneratedAppWebViewInspector(
                     is InspectionMode.Tests -> currentMode.requestInterceptor
                 } ?: return super.shouldInterceptRequest(view, request)
                 return runCatching { interceptor.intercept(request) }
+                    .onSuccess { response ->
+                        emitInterceptorResult(request, response)
+                    }
+                    .onFailure {
+                        emitInterceptorFailure(request)
+                    }
                     .getOrElse(::interceptorFailureResponse)
             }
 
             override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                 pageStarted = true
-                emit(WebInspectionEvent.PageLoading(stage, url))
+                val urlSummary = summarizeWebInspectionUrl(url)
+                emit(
+                    WebInspectionEvent.PageLoading(
+                        stage = stage,
+                        url = urlSummary.value,
+                        urlCharacterCount = urlSummary.characterCount,
+                        urlSha256 = urlSummary.sha256
+                    )
+                )
             }
 
             override fun onPageFinished(view: WebView, url: String?) {
-                if (finished || pageHandled || !pageStarted) return
+                val ignoredDiagnosticCode = when {
+                    finished -> "PAGE_FINISH_IGNORED_SESSION_FINISHED"
+                    pageHandled -> "PAGE_FINISH_IGNORED_ALREADY_HANDLED"
+                    !pageStarted -> "PAGE_FINISH_IGNORED_NOT_STARTED"
+                    else -> null
+                }
+                if (ignoredDiagnosticCode != null) {
+                    emitPageFinished(
+                        url = url,
+                        status = WebInspectionEvent.Status.IGNORED,
+                        diagnosticCode = ignoredDiagnosticCode
+                    )
+                    return
+                }
                 pageHandled = true
+                emitPageFinished(
+                    url = url,
+                    status = WebInspectionEvent.Status.SUCCEEDED
+                )
                 when (val currentMode = mode) {
                     is InspectionMode.Build -> inspectInlineScripts(currentMode.html)
                     is InspectionMode.Runtime -> ensureRuntimeHarness {
@@ -356,9 +426,21 @@ class GeneratedAppWebViewInspector(
 
         fun cancel(reason: CancellationException) {
             if (finished) return
+            emitCancelled()
             dispose(stopLoading = true)
             activeSession = null
             cancelContinuation?.invoke(reason)
+        }
+
+        fun emitCancelled() {
+            if (cancellationEventEmitted) return
+            cancellationEventEmitted = true
+            emit(
+                WebInspectionEvent.StageCancelled(
+                    stage = stage,
+                    durationMillis = SystemClock.elapsedRealtime() - startedAt
+                )
+            )
         }
 
         fun dispose(stopLoading: Boolean) {
@@ -382,6 +464,102 @@ class GeneratedAppWebViewInspector(
             }
         }
 
+        private fun emitPageFinished(
+            url: String?,
+            status: WebInspectionEvent.Status,
+            diagnosticCode: String? = null
+        ) {
+            val urlSummary = summarizeWebInspectionUrl(url)
+            emit(
+                WebInspectionEvent.PageFinished(
+                    stage = stage,
+                    url = urlSummary.value,
+                    urlCharacterCount = urlSummary.characterCount,
+                    urlSha256 = urlSummary.sha256,
+                    status = status,
+                    diagnosticCode = diagnosticCode
+                )
+            )
+        }
+
+        private fun emitInterceptorResult(
+            request: WebResourceRequest,
+            response: WebResourceResponse?
+        ) {
+            val urlSummary = summarizeWebInspectionUrl(request.url?.toString())
+            val responseStatusCode = response?.let {
+                runCatching { it.statusCode }.getOrNull()
+            }
+            emit(
+                WebInspectionEvent.InterceptorResult(
+                    stage = stage,
+                    url = urlSummary.value,
+                    urlCharacterCount = urlSummary.characterCount,
+                    urlSha256 = urlSummary.sha256,
+                    status = if (response == null) {
+                        WebInspectionEvent.Status.PASSTHROUGH
+                    } else {
+                        WebInspectionEvent.Status.INTERCEPTED
+                    },
+                    responseStatusCode = responseStatusCode
+                )
+            )
+        }
+
+        private fun emitInterceptorFailure(request: WebResourceRequest) {
+            val urlSummary = summarizeWebInspectionUrl(request.url?.toString())
+            emit(
+                WebInspectionEvent.InterceptorFailure(
+                    stage = stage,
+                    url = urlSummary.value,
+                    urlCharacterCount = urlSummary.characterCount,
+                    urlSha256 = urlSummary.sha256
+                )
+            )
+        }
+
+        private fun emitProbeStarted(
+            probe: WebInspectionEvent.Probe,
+            input: String
+        ) {
+            val inputSummary = summarizeWebInspectionText(input)
+            emit(
+                WebInspectionEvent.ProbeStarted(
+                    stage = stage,
+                    probe = probe,
+                    inputCharacterCount = inputSummary.characterCount,
+                    inputSha256 = inputSummary.sha256
+                )
+            )
+        }
+
+        private fun emitProbeResult(
+            probe: WebInspectionEvent.Probe,
+            status: WebInspectionEvent.Status,
+            result: String?,
+            decoded: String?,
+            decodeStatus: WebInspectionEvent.Status,
+            parseStatus: WebInspectionEvent.Status,
+            diagnosticCodes: List<String> = emptyList()
+        ) {
+            val resultSummary = result?.let(::summarizeWebInspectionText)
+            val decodedSummary = decoded?.let(::summarizeWebInspectionText)
+            emit(
+                WebInspectionEvent.ProbeResult(
+                    stage = stage,
+                    probe = probe,
+                    status = status,
+                    resultCharacterCount = resultSummary?.characterCount,
+                    resultSha256 = resultSummary?.sha256,
+                    decodedCharacterCount = decodedSummary?.characterCount,
+                    decodedSha256 = decodedSummary?.sha256,
+                    decodeStatus = decodeStatus,
+                    parseStatus = parseStatus,
+                    diagnosticCodes = diagnosticCodes
+                )
+            )
+        }
+
         private fun interceptorFailureResponse(error: Throwable): WebResourceResponse {
             val message = (error.message ?: error::class.java.simpleName)
                 .take(1_000)
@@ -397,7 +575,9 @@ class GeneratedAppWebViewInspector(
         }
 
         private fun inspectInlineScripts(html: String) {
-            webView.evaluateJavascript(buildProbeScript(html)) { value ->
+            val probeScript = buildProbeScript(html)
+            emitProbeStarted(WebInspectionEvent.Probe.BUILD_INLINE_SCRIPTS, probeScript)
+            webView.evaluateJavascript(probeScript) { value ->
                 if (finished) return@evaluateJavascript
                 val payload = WebInspectionParsers.decodeJavascriptString(value)
                 val parsed = payload?.let {
@@ -407,6 +587,28 @@ class GeneratedAppWebViewInspector(
                         defaultCategory = WebDiagnosticCategory.JAVASCRIPT
                     )
                 }
+                emitProbeResult(
+                    probe = WebInspectionEvent.Probe.BUILD_INLINE_SCRIPTS,
+                    status = if (parsed == null) {
+                        WebInspectionEvent.Status.FAILED
+                    } else {
+                        WebInspectionEvent.Status.SUCCEEDED
+                    },
+                    result = value,
+                    decoded = payload,
+                    decodeStatus = if (payload == null) {
+                        WebInspectionEvent.Status.FAILED
+                    } else {
+                        WebInspectionEvent.Status.SUCCEEDED
+                    },
+                    parseStatus = when {
+                        payload == null -> WebInspectionEvent.Status.NOT_ATTEMPTED
+                        parsed == null -> WebInspectionEvent.Status.FAILED
+                        else -> WebInspectionEvent.Status.SUCCEEDED
+                    },
+                    diagnosticCodes = parsed?.map { it.code }
+                        ?: listOf("BUILD_PROBE_INVALID_RESULT")
+                )
                 if (parsed == null) {
                     addDiagnostic(
                         severity = WebDiagnosticSeverity.ERROR,
@@ -423,13 +625,24 @@ class GeneratedAppWebViewInspector(
 
         private fun ensureRuntimeHarness(block: () -> Unit) {
             if (finished) return
-            webView.evaluateJavascript(RUNTIME_HARNESS_SCRIPT) {
-                if (!finished) block()
+            emitProbeStarted(WebInspectionEvent.Probe.RUNTIME_HARNESS, RUNTIME_HARNESS_SCRIPT)
+            webView.evaluateJavascript(RUNTIME_HARNESS_SCRIPT) { value ->
+                if (finished) return@evaluateJavascript
+                emitProbeResult(
+                    probe = WebInspectionEvent.Probe.RUNTIME_HARNESS,
+                    status = WebInspectionEvent.Status.SUCCEEDED,
+                    result = value,
+                    decoded = null,
+                    decodeStatus = WebInspectionEvent.Status.NOT_REQUIRED,
+                    parseStatus = WebInspectionEvent.Status.NOT_REQUIRED
+                )
+                block()
             }
         }
 
         private fun collectRuntimeErrors() {
             if (finished) return
+            emitProbeStarted(WebInspectionEvent.Probe.RUNTIME_DIAGNOSTICS, RUNTIME_COLLECT_SCRIPT)
             webView.evaluateJavascript(RUNTIME_COLLECT_SCRIPT) { value ->
                 if (finished) return@evaluateJavascript
                 val payload = WebInspectionParsers.decodeJavascriptString(value)
@@ -440,6 +653,28 @@ class GeneratedAppWebViewInspector(
                         defaultCategory = WebDiagnosticCategory.JAVASCRIPT
                     )
                 }
+                emitProbeResult(
+                    probe = WebInspectionEvent.Probe.RUNTIME_DIAGNOSTICS,
+                    status = if (parsed == null) {
+                        WebInspectionEvent.Status.FAILED
+                    } else {
+                        WebInspectionEvent.Status.SUCCEEDED
+                    },
+                    result = value,
+                    decoded = payload,
+                    decodeStatus = if (payload == null) {
+                        WebInspectionEvent.Status.FAILED
+                    } else {
+                        WebInspectionEvent.Status.SUCCEEDED
+                    },
+                    parseStatus = when {
+                        payload == null -> WebInspectionEvent.Status.NOT_ATTEMPTED
+                        parsed == null -> WebInspectionEvent.Status.FAILED
+                        else -> WebInspectionEvent.Status.SUCCEEDED
+                    },
+                    diagnosticCodes = parsed?.map { it.code }
+                        ?: listOf("RUNTIME_PROBE_INVALID_RESULT")
+                )
                 if (parsed == null) {
                     addDiagnostic(
                         severity = WebDiagnosticSeverity.ERROR,
@@ -456,11 +691,21 @@ class GeneratedAppWebViewInspector(
 
         private fun executeSelfTests(testScript: String) {
             if (finished) return
+            emitProbeStarted(WebInspectionEvent.Probe.SELF_TEST, testScript)
             if (testScript.isBlank()) {
-                    addDiagnostic(
-                        severity = WebDiagnosticSeverity.ERROR,
-                        category = testCategory(),
-                        code = "SELF_TEST_EMPTY",
+                emitProbeResult(
+                    probe = WebInspectionEvent.Probe.SELF_TEST,
+                    status = WebInspectionEvent.Status.FAILED,
+                    result = null,
+                    decoded = null,
+                    decodeStatus = WebInspectionEvent.Status.NOT_ATTEMPTED,
+                    parseStatus = WebInspectionEvent.Status.NOT_ATTEMPTED,
+                    diagnosticCodes = listOf("SELF_TEST_EMPTY")
+                )
+                addDiagnostic(
+                    severity = WebDiagnosticSeverity.ERROR,
+                    category = testCategory(),
+                    code = "SELF_TEST_EMPTY",
                     message = "自测脚本为空"
                 )
                 finish()
@@ -473,6 +718,23 @@ class GeneratedAppWebViewInspector(
             if (finished) return
             val result = WebInspectionParsers.parseSelfTestResult(payload)
             if (result == null) {
+                emitProbeResult(
+                    probe = WebInspectionEvent.Probe.SELF_TEST,
+                    status = WebInspectionEvent.Status.FAILED,
+                    result = payload,
+                    decoded = null,
+                    decodeStatus = WebInspectionEvent.Status.NOT_REQUIRED,
+                    parseStatus = WebInspectionEvent.Status.FAILED,
+                    diagnosticCodes = listOf("SELF_TEST_INVALID_RESULT")
+                )
+                emit(
+                    WebInspectionEvent.SelfTestRoot(
+                        stage = stage,
+                        status = WebInspectionEvent.Status.FAILED,
+                        caseCount = 0,
+                        diagnosticCode = "SELF_TEST_INVALID_RESULT"
+                    )
+                )
                 addDiagnostic(
                     severity = WebDiagnosticSeverity.ERROR,
                     category = testCategory(),
@@ -480,8 +742,50 @@ class GeneratedAppWebViewInspector(
                     message = "自测脚本返回了无效结果"
                 )
             } else {
+                val failedCases = result.cases.filterNot { it.passed }
+                val resultDiagnosticCodes = buildList {
+                    if (!result.passed) add("SELF_TEST_FAILED")
+                }
+                emitProbeResult(
+                    probe = WebInspectionEvent.Probe.SELF_TEST,
+                    status = WebInspectionEvent.Status.SUCCEEDED,
+                    result = payload,
+                    decoded = null,
+                    decodeStatus = WebInspectionEvent.Status.NOT_REQUIRED,
+                    parseStatus = WebInspectionEvent.Status.SUCCEEDED,
+                    diagnosticCodes = resultDiagnosticCodes
+                )
+                emit(
+                    WebInspectionEvent.SelfTestRoot(
+                        stage = stage,
+                        status = if (result.passed) {
+                            WebInspectionEvent.Status.SUCCEEDED
+                        } else {
+                            WebInspectionEvent.Status.FAILED
+                        },
+                        caseCount = result.cases.size,
+                        diagnosticCode = "SELF_TEST_FAILED".takeUnless { result.passed }
+                    )
+                )
+                result.cases.forEachIndexed { index, testCase ->
+                    val nameSummary = summarizeWebInspectionText(testCase.name)
+                    emit(
+                        WebInspectionEvent.SelfTestCaseResult(
+                            stage = stage,
+                            index = index,
+                            status = if (testCase.passed) {
+                                WebInspectionEvent.Status.SUCCEEDED
+                            } else {
+                                WebInspectionEvent.Status.FAILED
+                            },
+                            nameCharacterCount = nameSummary.characterCount,
+                            nameSha256 = nameSummary.sha256,
+                            diagnosticCode = "SELF_TEST_FAILED".takeUnless { testCase.passed }
+                        )
+                    )
+                }
                 selfTests = result.cases
-                result.cases.filterNot { it.passed }.forEach { testCase ->
+                failedCases.forEach { testCase ->
                     addDiagnostic(
                         severity = WebDiagnosticSeverity.ERROR,
                         category = testCategory(),

@@ -57,7 +57,7 @@
                 android:ellipsize="end"
                 android:maxLines="2"
                 android:textColor="@color/mt_text_secondary"
-                android:textSize="15sp"
+                android:textSize="13sp"
                 tools:text="正在通过 WebView 检查器读取运行错误" />
 
             <TextView
@@ -66,7 +66,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="1dp"
                 android:textColor="@color/mt_text_muted"
-                android:textSize="11sp"
+                android:textSize="10sp"
                 tools:text="WebView 检查 · 第 1 轮" />
 
         </LinearLayout>
