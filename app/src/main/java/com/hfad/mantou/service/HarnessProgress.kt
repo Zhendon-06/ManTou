@@ -27,6 +27,7 @@ data class HarnessProgress(
     val title: String = "ManTou Harness",
     val message: String = "正在运行 Harness",
     val stage: String? = null,
+    val operation: String? = null,
     val iteration: Int = 0,
     val progress: Int? = null,
     val status: HarnessProgressStatus = HarnessProgressStatus.RUNNING,
@@ -66,6 +67,7 @@ data class HarnessProgress(
                 title = title,
                 message = event.message,
                 stage = event.stage.name,
+                operation = event.operation,
                 iteration = event.iteration,
                 status = when {
                     event.stage == GenerateTaskState.Stage.DELIVER &&
@@ -94,6 +96,7 @@ class HarnessProgressReporter internal constructor(
     fun report(
         message: String,
         stage: String? = null,
+        operation: String? = null,
         iteration: Int = 0,
         progress: Int? = null,
         diagnostics: List<String> = emptyList()
@@ -105,6 +108,7 @@ class HarnessProgressReporter internal constructor(
                 title = title,
                 message = message,
                 stage = stage,
+                operation = operation,
                 iteration = iteration,
                 progress = progress,
                 diagnostics = diagnostics

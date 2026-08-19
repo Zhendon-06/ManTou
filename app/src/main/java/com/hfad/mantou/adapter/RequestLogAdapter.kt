@@ -54,18 +54,28 @@ class RequestLogAdapter : ListAdapter<ApiLogEntry, RequestLogAdapter.VH>(DIFF) {
             tvTime.text = timeFormatter.format(Date(entry.timestampMs))
 
             val statusText = when {
+                entry.canceled -> "已取消"
+                entry.inProgress -> "进行中"
                 entry.errorMessage != null && entry.httpStatus == null -> "异常"
                 entry.httpStatus != null -> "HTTP ${entry.httpStatus}"
                 else -> "未知"
             }
             val streamLabel = if (entry.isStream) "流式" else "非流式"
-            tvTags.text = "${entry.provider} · $streamLabel · $statusText"
-            tvTags.setTextColor(
-                if (entry.success) 0xFF27AE60.toInt() else 0xFFE65353.toInt()
-            )
+            val retryLabel = if (entry.retryable == true) " · 可重试" else ""
+            tvTags.text = "${entry.provider} · $streamLabel · $statusText · ${entry.durationMs}ms$retryLabel"
+            val statusColor = when {
+                entry.success -> 0xFF27AE60.toInt()
+                entry.inProgress || entry.canceled -> 0xFF7A7F87.toInt()
+                else -> 0xFFE65353.toInt()
+            }
+            tvTags.setTextColor(statusColor)
 
             dot.setBackgroundResource(
-                if (entry.success) R.drawable.bg_dot_success else R.drawable.bg_dot_error
+                when {
+                    entry.success -> R.drawable.bg_dot_success
+                    entry.inProgress || entry.canceled -> R.drawable.loading_dot
+                    else -> R.drawable.bg_dot_error
+                }
             )
 
             ivExpand.setImageResource(
@@ -75,6 +85,12 @@ class RequestLogAdapter : ListAdapter<ApiLogEntry, RequestLogAdapter.VH>(DIFF) {
             if (isExpanded) {
                 tvRequestBody.text = entry.requestBody.ifBlank { "(无请求体)" }
                 val responseText = buildString {
+                    entry.traceId?.let { append("诊断 ID: $it\n") }
+                    entry.upstreamRequestId?.let { append("上游请求 ID: $it\n") }
+                    entry.runId?.let { append("Harness runId: $it\n") }
+                    entry.operation?.let { append("操作: $it\n") }
+                    entry.iteration?.let { append("代码轮次: $it\n") }
+                    if (isNotEmpty()) append('\n')
                     if (entry.errorMessage != null) {
                         append("错误: ${entry.errorMessage}\n\n")
                     }

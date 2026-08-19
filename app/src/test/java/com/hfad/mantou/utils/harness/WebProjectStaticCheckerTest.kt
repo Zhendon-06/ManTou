@@ -70,6 +70,102 @@ class WebProjectStaticCheckerTest {
         assertTrue(result.diagnostics.any { it.startsWith("JSON_INVALID") })
     }
 
+    @Test
+    fun reportsWhenEntryClassesDoNotMatchLoadedStylesheetSelectors() = runBlocking {
+        val root = temporaryFolder.newFolder("class-mismatch-project")
+        val entry = write(
+            root,
+            "index.html",
+            """
+                <!doctype html>
+                <html><head><link rel="stylesheet" href="styles/app.css"></head>
+                <body>
+                  <main class="game-shell hud status-card quest-card touch-controls hotbar overlay panel brand hunger meter meter-track meter-fill health quest-icon coordinates">
+                    <button class="control-button direction jump action-pad primary-button">开始</button>
+                  </main>
+                </body></html>
+            """.trimIndent()
+        )
+        write(
+            root,
+            "styles/app.css",
+            """
+                .app-shell .topbar .game-layout .game-card .canvas-wrap .canvas-hud .stat-chip
+                { display: block; }
+                .inventory .slot .slot-name .slot-count .action-list .action-row { color: #111; }
+                .panel, .brand, .hunger, .primary-button { color: #222; }
+            """.trimIndent()
+        )
+        val project = WebProjectContentServer.create(root, entry)
+
+        val result = DefaultWebProjectStaticChecker.check(project)
+
+        assertFalse(result.passed)
+        assertTrue(
+            result.diagnostics.joinToString("\n"),
+            result.diagnostics.any { it.startsWith("HTML_CSS_CLASS_MISMATCH") }
+        )
+    }
+
+    @Test
+    fun classAlignmentCheckAllowsTagAndIdDrivenStyles() = runBlocking {
+        val root = temporaryFolder.newFolder("class-aligned-project")
+        val entry = write(
+            root,
+            "index.html",
+            """
+                <!doctype html>
+                <html><head><link rel="stylesheet" href="styles/app.css"></head>
+                <body id="app" class="js-ready js-mobile js-loaded js-theme js-touch js-online js-compact js-visible">
+                  <main><button>开始</button></main>
+                </body></html>
+            """.trimIndent()
+        )
+        write(
+            root,
+            "styles/app.css",
+            """
+                #app { min-height: 100vh; }
+                body { margin: 0; }
+                main { display: grid; }
+                button { min-height: 44px; }
+            """.trimIndent()
+        )
+        val project = WebProjectContentServer.create(root, entry)
+
+        val result = DefaultWebProjectStaticChecker.check(project)
+
+        assertTrue(result.diagnostics.joinToString("\n"), result.passed)
+        assertFalse(result.diagnostics.any { it.startsWith("HTML_CSS_CLASS_MISMATCH") })
+    }
+
+    @Test
+    fun classAlignmentCheckAllowsMatchingClassContracts() = runBlocking {
+        val root = temporaryFolder.newFolder("matching-class-project")
+        val entry = write(
+            root,
+            "index.html",
+            """
+                <!doctype html>
+                <html><head><link rel="stylesheet" href="styles/app.css"></head>
+                <body class="shell header content footer controls panel card toolbar">
+                  <main class="shell header content footer controls panel card toolbar">开始</main>
+                </body></html>
+            """.trimIndent()
+        )
+        write(
+            root,
+            "styles/app.css",
+            ".shell, .header, .content, .footer, .controls, .panel, .card, .toolbar { display: block; }"
+        )
+        val project = WebProjectContentServer.create(root, entry)
+
+        val result = DefaultWebProjectStaticChecker.check(project)
+
+        assertTrue(result.diagnostics.joinToString("\n"), result.passed)
+        assertFalse(result.diagnostics.any { it.startsWith("HTML_CSS_CLASS_MISMATCH") })
+    }
+
     private fun write(root: File, path: String, content: String): File {
         return File(root, path).apply {
             parentFile?.mkdirs()

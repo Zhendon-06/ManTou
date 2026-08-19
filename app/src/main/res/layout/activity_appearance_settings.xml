@@ -254,7 +254,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="仅调整用户消息、AI 回复与思考区字号"
+                android:text="调整用户消息、AI 回复、生成流程与思考区字号"
                 android:textColor="@color/mt_text_secondary"
                 android:textSize="12sp" />
 

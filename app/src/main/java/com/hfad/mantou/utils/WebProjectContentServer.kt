@@ -2,6 +2,10 @@ package com.hfad.mantou.utils
 
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import com.hfad.mantou.data.logging.HarnessTraceLogger
+import com.hfad.mantou.data.logging.HarnessTraceStatus
+import com.hfad.mantou.data.logging.elapsedMillisSince
+import com.hfad.mantou.data.logging.record
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
@@ -17,7 +21,10 @@ class WebProjectContentServer private constructor(
     val revision: String,
     val originHost: String,
     val files: List<ProjectFile>,
-    private val htmlTransformer: ((String) -> String)?
+    private val htmlTransformer: ((String) -> String)?,
+    private val traceRunId: String,
+    private val traceIteration: Int?,
+    private val traceLogger: HarnessTraceLogger
 ) {
 
     data class Limits(
@@ -69,14 +76,74 @@ class WebProjectContentServer private constructor(
     private val filesByRelativePath = files.associateBy(ProjectFile::relativePath)
 
     fun intercept(request: WebResourceRequest): WebResourceResponse? {
-        return when (val resolution = resolve(request.url.toString(), request.method.orEmpty())) {
-            Resolution.Passthrough -> null
-            is Resolution.Error -> errorResponse(resolution)
-            is Resolution.Resource -> resourceResponse(resolution)
+        val startedAt = System.nanoTime()
+        var requestUrl = ""
+        var normalizedMethod = "GET"
+        var resolution: Resolution? = null
+        return try {
+            requestUrl = request.url.toString()
+            normalizedMethod = normalizeMethod(request.method.orEmpty())
+            val resolved = resolveInternal(requestUrl, normalizedMethod)
+            resolution = resolved
+            val response = when (resolved) {
+                Resolution.Passthrough -> ServedResponse(response = null, bytes = 0L)
+                is Resolution.Error -> ServedResponse(
+                    response = errorResponse(resolved),
+                    bytes = errorBodyBytes(resolved)
+                )
+                is Resolution.Resource -> resourceResponse(resolved)
+            }
+            traceResolution(
+                operation = "intercept",
+                url = requestUrl,
+                method = normalizedMethod,
+                resolution = resolved,
+                durationMs = elapsedMillisSince(startedAt),
+                responseBytes = response.bytes
+            )
+            response.response
+        } catch (error: Exception) {
+            traceResolutionException(
+                operation = "intercept",
+                url = requestUrl,
+                method = normalizedMethod,
+                resolution = resolution,
+                durationMs = elapsedMillisSince(startedAt),
+                error = error
+            )
+            throw error
         }
     }
 
     internal fun resolve(url: String, method: String = "GET"): Resolution {
+        val startedAt = System.nanoTime()
+        val normalizedMethod = normalizeMethod(method)
+        var resolution: Resolution? = null
+        return try {
+            val resolved = resolveInternal(url, normalizedMethod)
+            resolution = resolved
+            traceResolution(
+                operation = "resolve",
+                url = url,
+                method = normalizedMethod,
+                resolution = resolved,
+                durationMs = elapsedMillisSince(startedAt)
+            )
+            resolved
+        } catch (error: Exception) {
+            traceResolutionException(
+                operation = "resolve",
+                url = url,
+                method = normalizedMethod,
+                resolution = resolution,
+                durationMs = elapsedMillisSince(startedAt),
+                error = error
+            )
+            throw error
+        }
+    }
+
+    private fun resolveInternal(url: String, normalizedMethod: String): Resolution {
         val uri = runCatching { URI(url) }.getOrElse {
             return Resolution.Error(400, "Bad Request", "Invalid project resource URL")
         }
@@ -89,7 +156,6 @@ class WebProjectContentServer private constructor(
             return Resolution.Error(403, "Forbidden", "External network requests are blocked")
         }
 
-        val normalizedMethod = method.ifBlank { "GET" }.uppercase(Locale.US)
         if (normalizedMethod != "GET" && normalizedMethod != "HEAD") {
             return Resolution.Error(405, "Method Not Allowed", "Only GET and HEAD are supported")
         }
@@ -148,23 +214,36 @@ class WebProjectContentServer private constructor(
         return filesByRelativePath[normalized.joinToString("/")]
     }
 
-    private fun resourceResponse(resource: Resolution.Resource): WebResourceResponse {
-        val input = when {
-            resource.headOnly -> ByteArrayInputStream(ByteArray(0))
+    private fun resourceResponse(resource: Resolution.Resource): ServedResponse {
+        val body = when {
+            resource.headOnly -> ResourceBody(
+                input = ByteArrayInputStream(ByteArray(0)),
+                bytes = 0L
+            )
             resource.transformHtml -> {
                 val source = resource.projectFile.file.readText(Charsets.UTF_8)
                 val transformed = requireNotNull(htmlTransformer).invoke(source)
-                ByteArrayInputStream(transformed.toByteArray(Charsets.UTF_8))
+                val bytes = transformed.toByteArray(Charsets.UTF_8)
+                ResourceBody(
+                    input = ByteArrayInputStream(bytes),
+                    bytes = bytes.size.toLong()
+                )
             }
-            else -> FileInputStream(resource.projectFile.file)
+            else -> ResourceBody(
+                input = FileInputStream(resource.projectFile.file),
+                bytes = resource.projectFile.sizeBytes
+            )
         }
-        return WebResourceResponse(
-            resource.mimeType,
-            resource.encoding,
-            200,
-            "OK",
-            resource.headers,
-            input
+        return ServedResponse(
+            response = WebResourceResponse(
+                resource.mimeType,
+                resource.encoding,
+                200,
+                "OK",
+                resource.headers,
+                body.input
+            ),
+            bytes = body.bytes
         )
     }
 
@@ -183,6 +262,138 @@ class WebProjectContentServer private constructor(
             ByteArrayInputStream(body)
         )
     }
+
+    private fun traceResolution(
+        operation: String,
+        url: String,
+        method: String,
+        resolution: Resolution,
+        durationMs: Long,
+        responseBytes: Long? = null
+    ) {
+        val details = linkedMapOf(
+            "method" to method,
+            "target" to safeRequestTarget(url)
+        )
+        val status: HarnessTraceStatus
+        val message: String
+        when (resolution) {
+            Resolution.Passthrough -> {
+                status = HarnessTraceStatus.SUCCEEDED
+                message = "资源请求交由 WebView 处理"
+                details += mapOf(
+                    "resolution" to "passthrough",
+                    "response_status" to "passthrough",
+                    "mime" to "none",
+                    "bytes" to "0",
+                    "transform_html" to "false",
+                    "head" to (method == "HEAD").toString()
+                )
+            }
+            is Resolution.Resource -> {
+                status = HarnessTraceStatus.SUCCEEDED
+                message = "项目资源请求已解析"
+                details += mapOf(
+                    "resolution" to "served",
+                    "relative_path" to resolution.projectFile.relativePath,
+                    "response_status" to "200",
+                    "mime" to resolution.mimeType,
+                    "bytes" to (responseBytes ?: resolutionBodyBytes(resolution)).toString(),
+                    "bytes_kind" to if (responseBytes != null || !resolution.transformHtml) {
+                        "response"
+                    } else {
+                        "source"
+                    },
+                    "transform_html" to resolution.transformHtml.toString(),
+                    "head" to resolution.headOnly.toString()
+                )
+            }
+            is Resolution.Error -> {
+                status = HarnessTraceStatus.FAILED
+                message = "项目资源请求解析失败"
+                details += mapOf(
+                    "resolution" to "error",
+                    "response_status" to resolution.statusCode.toString(),
+                    "reason" to resolution.reasonPhrase,
+                    "mime" to "text/plain",
+                    "bytes" to (responseBytes ?: errorBodyBytes(resolution)).toString(),
+                    "transform_html" to "false",
+                    "head" to (method == "HEAD").toString()
+                )
+            }
+        }
+        traceLogger.record(
+            runId = traceRunId,
+            component = TRACE_COMPONENT,
+            operation = operation,
+            status = status,
+            message = message,
+            iteration = traceIteration,
+            durationMs = durationMs,
+            details = details
+        )
+    }
+
+    private fun traceResolutionException(
+        operation: String,
+        url: String,
+        method: String,
+        resolution: Resolution?,
+        durationMs: Long,
+        error: Exception
+    ) {
+        traceLogger.record(
+            runId = traceRunId,
+            component = TRACE_COMPONENT,
+            operation = operation,
+            status = HarnessTraceStatus.FAILED,
+            message = "项目资源请求处理异常",
+            iteration = traceIteration,
+            durationMs = durationMs,
+            details = mapOf(
+                "method" to method,
+                "target" to safeRequestTarget(url),
+                "resolution" to "error",
+                "response_status" to "exception",
+                "mime" to when (resolution) {
+                    is Resolution.Resource -> resolution.mimeType
+                    is Resolution.Error -> "text/plain"
+                    else -> "none"
+                },
+                "bytes" to "0",
+                "transform_html" to ((resolution as? Resolution.Resource)?.transformHtml ?: false).toString(),
+                "head" to ((resolution as? Resolution.Resource)?.headOnly ?: (method == "HEAD")).toString(),
+                "error_type" to error::class.java.simpleName
+            )
+        )
+    }
+
+    private fun safeRequestTarget(url: String): String {
+        val uri = runCatching { URI(url) }.getOrNull() ?: return "invalid-url"
+        val scheme = uri.scheme?.lowercase(Locale.US) ?: return "missing-scheme"
+        if (scheme in PASSTHROUGH_SCHEMES) return "scheme:$scheme"
+        if (scheme != "https") return "scheme:$scheme"
+        if (!uri.host.equals(originHost, ignoreCase = true) || uri.port !in setOf(-1, 443)) {
+            return "external-origin"
+        }
+        val segments = decodePathSegments(uri.rawPath.orEmpty()) ?: return "same-origin:unsafe-path"
+        val relativeSegments = if (segments.firstOrNull() == MOUNT_SEGMENT && segments.size >= 2) {
+            segments.drop(2)
+        } else {
+            segments
+        }
+        return "project:/" + relativeSegments.joinToString("/")
+    }
+
+    private data class ResourceBody(
+        val input: java.io.InputStream,
+        val bytes: Long
+    )
+
+    private data class ServedResponse(
+        val response: WebResourceResponse?,
+        val bytes: Long
+    )
 
     private fun responseHeaders(
         projectFile: ProjectFile,
@@ -236,45 +447,143 @@ class WebProjectContentServer private constructor(
             projectId: String? = null,
             revision: String? = null,
             limits: Limits = Limits(),
-            htmlTransformer: ((String) -> String)? = null
+            htmlTransformer: ((String) -> String)? = null,
+            runId: String = UNTRACKED_RUN_ID,
+            iteration: Int? = null,
+            traceLogger: HarnessTraceLogger = NO_OP_TRACE_LOGGER
         ): WebProjectContentServer {
-            require(projectRoot.exists() && projectRoot.isDirectory) {
-                "Project root must be an existing directory"
-            }
-            require(!Files.isSymbolicLink(projectRoot.toPath())) {
-                "Project root must not be a symbolic link"
-            }
-            val canonicalRoot = projectRoot.canonicalFile
-            val requestedEntry = if (entryFile.isAbsolute) entryFile else File(canonicalRoot, entryFile.path)
-            val canonicalEntry = requestedEntry.canonicalFile
-            require(canonicalEntry.toPath().startsWith(canonicalRoot.toPath())) {
-                "Project entry must stay inside the project root"
-            }
-            require(canonicalEntry.isFile && !Files.isSymbolicLink(requestedEntry.toPath())) {
-                "Project entry must be an existing regular file"
-            }
-            require(canonicalEntry.extension.equals("html", ignoreCase = true) ||
-                canonicalEntry.extension.equals("htm", ignoreCase = true)) {
-                "Project entry must be an HTML file"
-            }
-
-            val files = scanProject(canonicalRoot, limits)
-            require(files.any { it.file == canonicalEntry }) {
-                "Project entry was not found in the validated project tree"
-            }
-            val resolvedRevision = revision?.trim()?.takeIf(String::isNotEmpty)?.also { value ->
-                require(REVISION_PATTERN.matches(value)) { "Project revision contains unsafe characters" }
-            } ?: computeRevision(files)
-            val identity = projectId?.trim()?.takeIf(String::isNotEmpty) ?: canonicalRoot.path
-            val hostHash = sha256(identity.toByteArray(Charsets.UTF_8)).take(24)
-            return WebProjectContentServer(
-                projectRoot = canonicalRoot,
-                entryFile = canonicalEntry,
-                revision = resolvedRevision,
-                originHost = "app-$hostHash.mantou.local",
-                files = files,
-                htmlTransformer = htmlTransformer
+            val normalizedRunId = runId.ifBlank { UNTRACKED_RUN_ID }
+            val createStartedAt = System.nanoTime()
+            traceLogger.record(
+                runId = normalizedRunId,
+                component = TRACE_COMPONENT,
+                operation = "create",
+                status = HarnessTraceStatus.STARTED,
+                message = "开始创建项目内容服务器",
+                iteration = iteration,
+                details = mapOf(
+                    "project_root" to projectRoot.path,
+                    "entry_path" to entryFile.path,
+                    "html_transformer" to (htmlTransformer != null).toString()
+                )
             )
+            return try {
+                require(projectRoot.exists() && projectRoot.isDirectory) {
+                    "Project root must be an existing directory"
+                }
+                require(!Files.isSymbolicLink(projectRoot.toPath())) {
+                    "Project root must not be a symbolic link"
+                }
+                val canonicalRoot = projectRoot.canonicalFile
+                val requestedEntry = if (entryFile.isAbsolute) entryFile else File(canonicalRoot, entryFile.path)
+                val canonicalEntry = requestedEntry.canonicalFile
+                require(canonicalEntry.toPath().startsWith(canonicalRoot.toPath())) {
+                    "Project entry must stay inside the project root"
+                }
+                require(canonicalEntry.isFile && !Files.isSymbolicLink(requestedEntry.toPath())) {
+                    "Project entry must be an existing regular file"
+                }
+                require(canonicalEntry.extension.equals("html", ignoreCase = true) ||
+                    canonicalEntry.extension.equals("htm", ignoreCase = true)) {
+                    "Project entry must be an HTML file"
+                }
+
+                val scanStartedAt = System.nanoTime()
+                traceLogger.record(
+                    runId = normalizedRunId,
+                    component = TRACE_COMPONENT,
+                    operation = "scan_project",
+                    status = HarnessTraceStatus.STARTED,
+                    message = "开始扫描项目文件",
+                    iteration = iteration,
+                    details = mapOf(
+                        "project_root" to canonicalRoot.path,
+                        "max_files" to limits.maxFiles.toString(),
+                        "max_file_bytes" to limits.maxFileBytes.toString(),
+                        "max_project_bytes" to limits.maxProjectBytes.toString(),
+                        "max_depth" to limits.maxDepth.toString(),
+                        "max_path_chars" to limits.maxRelativePathChars.toString()
+                    )
+                )
+                val files = try {
+                    scanProject(canonicalRoot, limits)
+                } catch (error: Exception) {
+                    traceLogger.record(
+                        runId = normalizedRunId,
+                        component = TRACE_COMPONENT,
+                        operation = "scan_project",
+                        status = HarnessTraceStatus.FAILED,
+                        message = "项目文件扫描失败",
+                        iteration = iteration,
+                        durationMs = elapsedMillisSince(scanStartedAt),
+                        details = mapOf("error_type" to error::class.java.simpleName)
+                    )
+                    throw error
+                }
+                val totalBytes = files.sumOf(ProjectFile::sizeBytes)
+                traceLogger.record(
+                    runId = normalizedRunId,
+                    component = TRACE_COMPONENT,
+                    operation = "scan_project",
+                    status = HarnessTraceStatus.SUCCEEDED,
+                    message = "项目文件扫描完成",
+                    iteration = iteration,
+                    durationMs = elapsedMillisSince(scanStartedAt),
+                    details = mapOf(
+                        "file_count" to files.size.toString(),
+                        "total_bytes" to totalBytes.toString()
+                    )
+                )
+                require(files.any { it.file == canonicalEntry }) {
+                    "Project entry was not found in the validated project tree"
+                }
+                val resolvedRevision = revision?.trim()?.takeIf(String::isNotEmpty)?.also { value ->
+                    require(REVISION_PATTERN.matches(value)) { "Project revision contains unsafe characters" }
+                } ?: computeRevision(files)
+                val identity = projectId?.trim()?.takeIf(String::isNotEmpty) ?: canonicalRoot.path
+                val hostHash = sha256(identity.toByteArray(Charsets.UTF_8)).take(24)
+                val server = WebProjectContentServer(
+                    projectRoot = canonicalRoot,
+                    entryFile = canonicalEntry,
+                    revision = resolvedRevision,
+                    originHost = "app-$hostHash.mantou.local",
+                    files = files,
+                    htmlTransformer = htmlTransformer,
+                    traceRunId = normalizedRunId,
+                    traceIteration = iteration,
+                    traceLogger = traceLogger
+                )
+                traceLogger.record(
+                    runId = normalizedRunId,
+                    component = TRACE_COMPONENT,
+                    operation = "create",
+                    status = HarnessTraceStatus.SUCCEEDED,
+                    message = "项目内容服务器创建完成",
+                    iteration = iteration,
+                    durationMs = elapsedMillisSince(createStartedAt),
+                    details = mapOf(
+                        "entry_relative_path" to server.entryRelativePath,
+                        "file_count" to files.size.toString(),
+                        "total_bytes" to totalBytes.toString(),
+                        "revision" to resolvedRevision,
+                        "origin_host" to server.originHost,
+                        "html_transformer" to (htmlTransformer != null).toString()
+                    )
+                )
+                server
+            } catch (error: Exception) {
+                traceLogger.record(
+                    runId = normalizedRunId,
+                    component = TRACE_COMPONENT,
+                    operation = "create",
+                    status = HarnessTraceStatus.FAILED,
+                    message = "项目内容服务器创建失败",
+                    iteration = iteration,
+                    durationMs = elapsedMillisSince(createStartedAt),
+                    details = mapOf("error_type" to error::class.java.simpleName)
+                )
+                throw error
+            }
         }
 
         internal fun mimeTypeFor(path: String): String {
@@ -466,7 +775,22 @@ class WebProjectContentServer private constructor(
             return joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
         }
 
+        private fun normalizeMethod(method: String): String {
+            return method.ifBlank { "GET" }.uppercase(Locale.US)
+        }
+
+        private fun resolutionBodyBytes(resource: Resolution.Resource): Long {
+            return if (resource.headOnly) 0L else resource.projectFile.sizeBytes
+        }
+
+        private fun errorBodyBytes(error: Resolution.Error): Long {
+            return error.message.toByteArray(Charsets.UTF_8).size.toLong()
+        }
+
         private const val HEX = "0123456789ABCDEF"
+        private const val TRACE_COMPONENT = "CONTENT_SERVER"
+        private const val UNTRACKED_RUN_ID = "untracked"
         private val REVISION_PATTERN = Regex("[A-Za-z0-9_-]{1,64}")
+        private val NO_OP_TRACE_LOGGER = HarnessTraceLogger {}
     }
 }

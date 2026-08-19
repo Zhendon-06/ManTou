@@ -17,7 +17,7 @@
         android:lineSpacingExtra="4dp"
         android:textColor="@color/mt_text_primary"
         android:textIsSelectable="true"
-        android:textSize="16sp"
+        android:textSize="14sp"
         tools:text="我会先整理输入与系统指令，再让模型调用本地工具修改代码；随后持续构建、检查和测试，直到可以交付。" />
 
     <LinearLayout
@@ -36,7 +36,7 @@
         android:lineSpacingExtra="4dp"
         android:textColor="@color/mt_text_primary"
         android:textIsSelectable="true"
-        android:textSize="16sp"
+        android:textSize="14sp"
         android:visibility="gone"
         tools:text="代码已经通过构建、WebView 检查、自测和测试集，可以交付。"
         tools:visibility="visible" />

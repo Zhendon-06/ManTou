@@ -6,6 +6,10 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.hfad.mantou.data.api.ApiEndpointResolver
 import com.hfad.mantou.data.api.ChatCallConfig
+import com.hfad.mantou.data.api.ModelTokenUsage
+import com.hfad.mantou.data.api.ModelTokenUsageResolver
+import com.hfad.mantou.data.logging.ApiDiagnosticContext
+import com.hfad.mantou.data.logging.ApiRequestTrace
 import com.hfad.mantou.data.logging.ApiLoggingInterceptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -108,6 +112,8 @@ object AppIntentDetector {
         config: ChatCallConfig,
         userMessage: String,
         hasGeneratedAppInSession: Boolean = false,
+        tokenUsageListener: ((ModelTokenUsage) -> Unit)? = null,
+        diagnosticContext: ApiDiagnosticContext? = null,
     ): Boolean = withContext(Dispatchers.IO) {
         val totalStartMs = System.currentTimeMillis()
         Log.d(TAG, "start at=${formatTimestamp(totalStartMs)} message=${preview(userMessage)}")
@@ -166,6 +172,7 @@ object AppIntentDetector {
                 config = config,
                 userMessage = userMessage,
                 hasGeneratedAppInSession = hasGeneratedAppInSession,
+                diagnosticContext = diagnosticContext,
             )
             client.newCall(builder.build()).execute().use { response ->
                 val responseBody = response.body?.string()
@@ -187,6 +194,17 @@ object AppIntentDetector {
                 }
 
                 val content = parseIntentContent(responseBody, config.isAnthropic)
+                tokenUsageListener?.let { listener ->
+                    val usage = ModelTokenUsageResolver.resolve(
+                        responseBody = responseBody,
+                        requestTexts = listOf(
+                            INTENT_SYSTEM_PROMPT,
+                            routingMessage(userMessage, hasGeneratedAppInSession)
+                        ),
+                        responseText = content.orEmpty()
+                    )
+                    runCatching { listener(usage) }
+                }
                 if (content == null) {
                     Log.d(
                         TAG,
@@ -409,12 +427,9 @@ object AppIntentDetector {
         config: ChatCallConfig,
         userMessage: String,
         hasGeneratedAppInSession: Boolean,
+        diagnosticContext: ApiDiagnosticContext? = null,
     ): Request.Builder {
-        val routingMessage = if (hasGeneratedAppInSession) {
-            "[会话状态：已经生成过网页应用，修改或继续完善类请求应判为 generate_app]\n$userMessage"
-        } else {
-            userMessage
-        }
+        val routingMessage = routingMessage(userMessage, hasGeneratedAppInSession)
         val requestJson = if (config.isAnthropic) {
             gson.toJson(mapOf(
                 "model" to config.model,
@@ -439,6 +454,7 @@ object AppIntentDetector {
 
         val requestBody = requestJson.toRequestBody("application/json; charset=utf-8".toMediaType())
         val builder = Request.Builder()
+            .tag(ApiRequestTrace::class.java, ApiRequestTrace.create(diagnosticContext))
             .url(
                 if (config.isAnthropic) {
                     ApiEndpointResolver.anthropicMessagesUrl(config.baseUrl)
@@ -458,6 +474,17 @@ object AppIntentDetector {
             builder.addHeader("Authorization", "Bearer ${config.apiKey}")
         }
         return builder
+    }
+
+    private fun routingMessage(
+        userMessage: String,
+        hasGeneratedAppInSession: Boolean
+    ): String {
+        return if (hasGeneratedAppInSession) {
+            "[会话状态：已经生成过网页应用，修改或继续完善类请求应判为 generate_app]\n$userMessage"
+        } else {
+            userMessage
+        }
     }
 
     private fun parseIntentResult(content: String): Boolean? {

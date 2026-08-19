@@ -4,7 +4,11 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import com.hfad.mantou.data.api.ApiEndpointResolver
 import com.hfad.mantou.data.api.ChatCallConfig
+import com.hfad.mantou.data.api.ModelTokenUsage
+import com.hfad.mantou.data.api.ModelTokenUsageResolver
+import com.hfad.mantou.data.logging.ApiDiagnosticContext
 import com.hfad.mantou.data.logging.ApiLoggingInterceptor
+import com.hfad.mantou.data.logging.ApiRequestTrace
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -33,22 +37,39 @@ object ErrorAnalyzer {
     suspend fun analyze(
         config: ChatCallConfig,
         rawError: String,
-        scene: String
+        scene: String,
+        tokenUsageListener: ((ModelTokenUsage) -> Unit)? = null,
+        diagnosticContext: ApiDiagnosticContext? = null
     ): String? = withContext(Dispatchers.IO) {
         try {
             val userMessage = "场景：$scene\n原始报错：\n$rawError"
-            val request = buildRequest(config, userMessage).build()
+            val request = buildRequest(config, userMessage, diagnosticContext).build()
             client.newCall(request).execute().use { response ->
                 val body = response.body?.string() ?: return@withContext null
                 if (!response.isSuccessful) return@withContext null
-                parseContent(body, config.isAnthropic)?.takeIf { it.isNotBlank() }?.trim()
+                val content = parseContent(body, config.isAnthropic)
+                    ?.takeIf { it.isNotBlank() }
+                    ?.trim()
+                tokenUsageListener?.let { listener ->
+                    val usage = ModelTokenUsageResolver.resolve(
+                        responseBody = body,
+                        requestTexts = listOf(SYSTEM_PROMPT, userMessage),
+                        responseText = content.orEmpty()
+                    )
+                    runCatching { listener(usage) }
+                }
+                content
             }
         } catch (e: Exception) {
             null
         }
     }
 
-    private fun buildRequest(config: ChatCallConfig, userMessage: String): Request.Builder {
+    private fun buildRequest(
+        config: ChatCallConfig,
+        userMessage: String,
+        diagnosticContext: ApiDiagnosticContext?
+    ): Request.Builder {
         val requestJson = if (config.isAnthropic) {
             gson.toJson(mapOf(
                 "model" to config.model,
@@ -73,6 +94,7 @@ object ErrorAnalyzer {
 
         val requestBody = requestJson.toRequestBody("application/json; charset=utf-8".toMediaType())
         val builder = Request.Builder()
+            .tag(ApiRequestTrace::class.java, ApiRequestTrace.create(diagnosticContext))
             .url(
                 if (config.isAnthropic) {
                     ApiEndpointResolver.anthropicMessagesUrl(config.baseUrl)

@@ -56,6 +56,24 @@ data class GenerateTaskState(
         )
     }
 
+    fun visibleHarnessEvents(): List<HarnessEvent> {
+        return harnessEvents.filterIndexed { index, event ->
+            event.outcome != Outcome.RUNNING || harnessEvents
+                .asSequence()
+                .drop(index + 1)
+                .none { later ->
+                    later.stage == event.stage &&
+                        later.iteration == event.iteration &&
+                        later.outcome != Outcome.RUNNING
+                }
+        }
+    }
+
+    fun activeHarnessEvent(): HarnessEvent? {
+        if (!isRunning) return null
+        return visibleHarnessEvents().lastOrNull()?.takeIf { it.outcome == Outcome.RUNNING }
+    }
+
     enum class Phase {
         SANITIZING,
         PROMPTING,
@@ -79,6 +97,7 @@ data class GenerateTaskState(
         val outcome: Outcome,
         val message: String,
         val iteration: Int = 0,
+        val operation: String? = null,
         val diagnostics: List<String> = emptyList(),
         val timestamp: Long = System.currentTimeMillis()
     )

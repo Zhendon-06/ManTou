@@ -15,8 +15,27 @@ data class ApiLogEntry(
     val httpStatus: Int?,          // null = 网络异常,没有 status
     val durationMs: Long,
     val requestBody: String,
-    val responseBody: String,      // 流式响应统一记 "(流式响应,正文未保留)"
-    val errorMessage: String?      // 网络异常或非 2xx 时的简短说明
+    val responseBody: String,      // 成功流式响应不留正文；非 2xx 保留有限错误预览
+    val errorMessage: String?,     // 网络异常或非 2xx 时的简短说明
+    val traceId: String? = null,
+    val upstreamRequestId: String? = null,
+    val retryable: Boolean? = null,
+    val streamCompleted: Boolean? = null,
+    val runId: String? = null,
+    val operation: String? = null,
+    val iteration: Int? = null,
+    val canceled: Boolean = false
 ) {
-    val success: Boolean get() = errorMessage == null && (httpStatus == null || httpStatus in 200..299)
+    val inProgress: Boolean
+        get() = isStream &&
+            httpStatus in 200..299 &&
+            streamCompleted == false &&
+            errorMessage == null &&
+            !canceled
+
+    val success: Boolean
+        get() = !inProgress &&
+            !canceled &&
+            errorMessage == null &&
+            (httpStatus == null || httpStatus in 200..299)
 }

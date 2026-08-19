@@ -11,6 +11,25 @@ import com.hfad.mantou.data.GenerateTaskState
 import com.hfad.mantou.databinding.ItemChatHarnessActivityBinding
 import com.hfad.mantou.databinding.ItemChatHarnessEventBinding
 
+internal data class HarnessTextSizes(
+    val bodySp: Float,
+    val eventSp: Float,
+    val metadataSp: Float,
+    val diagnosticsSp: Float
+)
+
+internal object HarnessTextSizePolicy {
+    fun resolve(configuredSp: Float): HarnessTextSizes {
+        val bodySp = configuredSp.coerceIn(12f, 22f)
+        return HarnessTextSizes(
+            bodySp = bodySp,
+            eventSp = (bodySp - 1f).coerceAtLeast(12f),
+            metadataSp = (bodySp - 4f).coerceAtLeast(10f),
+            diagnosticsSp = (bodySp - 2f).coerceAtLeast(10f)
+        )
+    }
+}
+
 internal class HarnessActivityRenderer(
     private val onEventExpandedChanged: ((GenerateTaskState.HarnessEvent, Boolean) -> Unit)? = null
 ) {
@@ -39,8 +58,12 @@ internal class HarnessActivityRenderer(
             state: GenerateTaskState,
             primaryColor: Int,
             secondaryColor: Int,
-            mutedColor: Int
+            mutedColor: Int,
+            textSizeSp: Float
         ) {
+            val textSizes = HarnessTextSizePolicy.resolve(textSizeSp)
+            binding.tvHarnessLead.textSize = textSizes.bodySp
+            binding.tvHarnessResult.textSize = textSizes.bodySp
             binding.tvHarnessLead.setTextColor(primaryColor)
             binding.tvHarnessResult.setTextColor(primaryColor)
             if (expansionSessionId != state.sessionId) {
@@ -48,7 +71,8 @@ internal class HarnessActivityRenderer(
                 expandedEventKeys.clear()
                 collapsedEventKeys.clear()
             }
-            val events = state.harnessEvents
+            val events = state.visibleHarnessEvents()
+            val activeEvent = state.activeHarnessEvent()
             if (renderedSessionId == state.sessionId && events.size < renderedEventCount) {
                 expandedEventKeys.clear()
                 collapsedEventKeys.clear()
@@ -83,7 +107,14 @@ internal class HarnessActivityRenderer(
                     binding.harnessEventContainer,
                     false
                 )
-                bindEvent(eventBinding, event, secondaryColor, mutedColor)
+                bindEvent(
+                    eventBinding,
+                    event,
+                    secondaryColor,
+                    mutedColor,
+                    textSizes,
+                    isActive = event === activeEvent
+                )
                 binding.harnessEventContainer.addView(eventBinding.root)
                 if (isNewEvent && index == events.lastIndex) {
                     eventBinding.root.alpha = 0f
@@ -108,7 +139,9 @@ internal class HarnessActivityRenderer(
             eventBinding: ItemChatHarnessEventBinding,
             event: GenerateTaskState.HarnessEvent,
             secondaryColor: Int,
-            mutedColor: Int
+            mutedColor: Int,
+            textSizes: HarnessTextSizes,
+            isActive: Boolean
         ) {
             val context = eventBinding.root.context
             val key = eventKey(event)
@@ -132,16 +165,19 @@ internal class HarnessActivityRenderer(
             }
 
             eventBinding.tvHarnessEventText.text = event.message
+            eventBinding.tvHarnessEventText.textSize = textSizes.eventSp
             eventBinding.tvHarnessEventMeta.text = buildString {
                 append(stageLabel(event.stage))
+                operationLabel(event.operation)?.let { append(" · ").append(it) }
                 if (event.iteration > 0) append(" · 第 ${event.iteration} 轮")
             }
+            eventBinding.tvHarnessEventMeta.textSize = textSizes.metadataSp
             eventBinding.tvHarnessEventText.setTextColor(stateColor)
             eventBinding.tvHarnessEventMeta.setTextColor(mutedColor)
             eventBinding.progressHarnessEvent.visibility =
-                if (event.outcome == GenerateTaskState.Outcome.RUNNING) View.VISIBLE else View.GONE
+                if (isActive) View.VISIBLE else View.GONE
             eventBinding.ivHarnessEventState.visibility =
-                if (event.outcome == GenerateTaskState.Outcome.RUNNING) View.GONE else View.VISIBLE
+                if (isActive) View.GONE else View.VISIBLE
             eventBinding.ivHarnessEventState.setImageResource(
                 when (event.outcome) {
                     GenerateTaskState.Outcome.PASSED -> R.drawable.ic_harness_check
@@ -160,6 +196,7 @@ internal class HarnessActivityRenderer(
             )
             eventBinding.ivHarnessEventExpand.imageTintList = ColorStateList.valueOf(mutedColor)
             eventBinding.tvHarnessEventDiagnostics.text = diagnostics
+            eventBinding.tvHarnessEventDiagnostics.textSize = textSizes.diagnosticsSp
             eventBinding.tvHarnessEventDiagnostics.visibility =
                 if (hasDiagnostics && diagnosticsExpanded) View.VISIBLE else View.GONE
             eventBinding.harnessEventHeader.isClickable = hasDiagnostics
@@ -198,7 +235,8 @@ internal class HarnessActivityRenderer(
     }
 
     private fun eventKey(event: GenerateTaskState.HarnessEvent): String {
-        return "${event.timestamp}:${event.iteration}:${event.stage}:${event.outcome}:${event.message}"
+        return "${event.timestamp}:${event.iteration}:${event.stage}:${event.operation}:" +
+            "${event.outcome}:${event.message}"
     }
 
     private fun eventContentDescription(
@@ -208,6 +246,7 @@ internal class HarnessActivityRenderer(
     ): String {
         return buildString {
             append(stageLabel(event.stage))
+            operationLabel(event.operation)?.let { append("，").append(it) }
             append("，")
             append(event.message)
             if (hasDiagnostics) {
@@ -226,11 +265,18 @@ internal class HarnessActivityRenderer(
 
     private fun resultText(state: GenerateTaskState): String {
         val latest = state.harnessEvents.lastOrNull() ?: return ""
+        val selfTestBypassed = state.harnessEvents.any {
+            it.operation == "SELF_TEST_BYPASS"
+        }
         return when {
             state.phase == GenerateTaskState.Phase.COMPLETED ||
                 (latest.stage == GenerateTaskState.Stage.DELIVER &&
                     latest.outcome == GenerateTaskState.Outcome.PASSED) -> {
-                "代码已经通过构建、WebView 检查、自测和测试集，可以交付。"
+                if (selfTestBypassed) {
+                    "代码已经通过构建、WebView 运行检查和测试集；自测未通过但已按非阻塞策略放行。"
+                } else {
+                    "代码已经通过构建、WebView 检查、自测和测试集，可以交付。"
+                }
             }
             state.phase == GenerateTaskState.Phase.ERROR -> {
                 "流程已停止：${state.status}"
@@ -256,6 +302,25 @@ internal class HarnessActivityRenderer(
             GenerateTaskState.Stage.SELF_TEST -> "自测"
             GenerateTaskState.Stage.TEST -> "测试集"
             GenerateTaskState.Stage.DELIVER -> "交付"
+        }
+    }
+
+    private fun operationLabel(operation: String?): String? {
+        return when (operation) {
+            "DEVELOPMENT_BUILD" -> "开发构建"
+            "FINAL_BUILD" -> "交付前构建"
+            "RUNTIME" -> "运行检查"
+            "SELF_TEST" -> "应用自测"
+            "TEST_SUITE" -> "完整测试集"
+            "SELF_TEST_BYPASS" -> "自测放行"
+            "INITIAL" -> "首次生成"
+            "TOOL_FOLLOW_UP" -> "工具结果回传"
+            "REPAIR" -> "诊断修复"
+            "read_file" -> "读取文件"
+            "write_file" -> "写入文件"
+            "list_files" -> "列出文件"
+            "delete_file" -> "删除文件"
+            else -> null
         }
     }
 

@@ -23,7 +23,13 @@ data class ChatSessionEntity(
     val taskType: String = TASK_TYPE_CHAT,
 
     @ColumnInfo(defaultValue = "NULL")
-    val appHtmlPath: String? = null
+    val appHtmlPath: String? = null,
+
+    @ColumnInfo(defaultValue = "0")
+    val consumedTokens: Long = 0,
+
+    @ColumnInfo(defaultValue = "0")
+    val tokenUsageIncludesEstimate: Boolean = false
 ) {
     @get:Ignore
     val isGenerateTask: Boolean
@@ -34,7 +40,6 @@ data class ChatSessionEntity(
         const val TASK_TYPE_GENERATE = "generate"
     }
 }
-
 
 
 

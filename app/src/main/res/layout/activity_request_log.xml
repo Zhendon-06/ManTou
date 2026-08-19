@@ -11,8 +11,7 @@
         android:id="@+id/toolbar"
         android:layout_width="match_parent"
         android:layout_height="48dp"
-        android:background="@android:color/transparent"
-        android:tag="glass:toolbar"
+        android:background="@color/mt_background"
         app:navigationIcon="@drawable/ic_arrow_back"
         app:navigationIconTint="@color/mt_text_primary"
         app:menu="@menu/menu_request_log"
@@ -63,7 +62,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
-                android:text="最近 10 条 AI 请求，按时间倒序展示。"
+                android:text="本次运行最近 30 条 AI 请求，按时间倒序展示；失败请求保留脱敏后的有限正文和请求 ID。"
                 android:textColor="@color/mt_text_secondary"
                 android:textSize="13sp" />
 
@@ -72,9 +71,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="14dp"
                 android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:padding="12dp"
-                android:tag="glass:card">
+                android:orientation="horizontal">
 
                 <LinearLayout
                     android:layout_width="0dp"

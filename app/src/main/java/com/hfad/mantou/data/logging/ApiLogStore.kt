@@ -11,7 +11,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 object ApiLogStore {
 
-    const val CAPACITY = 10
+    const val CAPACITY = 30
 
     private val idSeq = AtomicLong(0)
     private val buffer = ArrayDeque<ApiLogEntry>(CAPACITY)
@@ -29,6 +29,19 @@ object ApiLogStore {
             }
             buffer.offerLast(entry)
             _entries.value = buffer.toList().asReversed()
+        }
+    }
+
+    fun update(traceId: String, transform: (ApiLogEntry) -> ApiLogEntry): Boolean {
+        synchronized(lock) {
+            val entries = buffer.toMutableList()
+            val index = entries.indexOfLast { it.traceId == traceId }
+            if (index < 0) return false
+            entries[index] = transform(entries[index])
+            buffer.clear()
+            entries.forEach(buffer::offerLast)
+            _entries.value = buffer.toList().asReversed()
+            return true
         }
     }
 

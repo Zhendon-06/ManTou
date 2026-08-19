@@ -1,6 +1,7 @@
 package com.hfad.mantou.data.api
 
 import com.google.gson.annotations.SerializedName
+import com.hfad.mantou.data.logging.ApiDiagnosticContext
 
 /**
  * Chat API 请求
@@ -25,6 +26,19 @@ data class ChatRequest(
     val temperature: Double = ApiConfig.TEMPERATURE,
     
     @SerializedName("top_p")
-    val topP: Double = ApiConfig.TOP_P
+    val topP: Double = ApiConfig.TOP_P,
+
+    @SerializedName("stream_options")
+    val streamOptions: StreamOptions? = if (stream) StreamOptions() else null,
+
+    @Transient
+    val diagnosticContext: ApiDiagnosticContext? = null,
+
+    @Transient
+    val tokenUsageListener: ((ModelTokenUsage) -> Unit)? = null
 )
 
+data class StreamOptions(
+    @SerializedName("include_usage")
+    val includeUsage: Boolean = true
+)

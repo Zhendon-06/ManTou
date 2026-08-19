@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ProviderEntity::class,
         ProviderModelEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -40,7 +40,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "mantou_database"
                 )
-                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .fallbackToDestructiveMigration()  // 版本升级时销毁重建（生产环境应使用 Migration）
                     .build()
                 INSTANCE = instance
@@ -64,9 +64,20 @@ abstract class AppDatabase : RoomDatabase() {
                 )
             }
         }
+
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE chat_sessions ADD COLUMN consumedTokens INTEGER NOT NULL DEFAULT 0"
+                )
+                db.execSQL(
+                    "ALTER TABLE chat_sessions ADD COLUMN tokenUsageIncludesEstimate " +
+                        "INTEGER NOT NULL DEFAULT 0"
+                )
+            }
+        }
     }
 }
-
 
 
 

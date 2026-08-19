@@ -78,6 +78,11 @@ class ChatRepository(private val chatDao: ChatDao) {
         return chatDao.getSessionById(sessionId)
     }
 
+    suspend fun addSessionTokenUsage(sessionId: Long, tokens: Long, estimated: Boolean) {
+        if (tokens <= 0L) return
+        chatDao.addSessionTokenUsage(sessionId, tokens, estimated)
+    }
+
     suspend fun markSessionAsGenerate(sessionId: Long, appHtmlPath: String? = null) {
         chatDao.updateSessionTask(
             sessionId = sessionId,

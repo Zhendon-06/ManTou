@@ -63,6 +63,9 @@ class WebProjectFileToolTest {
         )
         assertTrue(write.success)
         assertEquals(listOf("styles/app.css"), write.changedFiles)
+        assertEquals("styles/app.css", write.metadata["path"])
+        assertEquals("body {}".toByteArray().size.toString(), write.metadata["bytes"])
+        assertTrue(write.metadata["after_sha256"].orEmpty().isNotBlank())
 
         val read = tool.execute(
             WebProjectFileTool.TOOL_READ_FILE,
@@ -70,6 +73,8 @@ class WebProjectFileToolTest {
         )
         assertTrue(read.success)
         assertTrue(read.output.contains("body {}"))
+        assertEquals("styles/app.css", read.metadata["path"])
+        assertEquals(write.metadata["after_sha256"], read.metadata["sha256"])
 
         val listed = tool.execute(
             WebProjectFileTool.TOOL_LIST_FILES,
@@ -81,6 +86,51 @@ class WebProjectFileToolTest {
         val unsupported = tool.execute("shell", emptyMap())
         assertFalse(unsupported.success)
         assertTrue(unsupported.diagnostics.single().contains("Unsupported project tool"))
+        assertEquals("io", unsupported.metadata["failure_stage"])
+        assertEquals("WebAppProjectException", unsupported.metadata["error_type"])
+    }
+
+    @Test
+    fun reportsReadFailureStageWithoutReturningFileContent() {
+        val tool = WebProjectFileTool(
+            workspaceRoot,
+            WebProjectFileToolPolicy(maxFileBytes = 4)
+        )
+
+        val missingArgument = tool.execute(WebProjectFileTool.TOOL_READ_FILE, emptyMap())
+        assertFalse(missingArgument.success)
+        assertEquals("arguments", missingArgument.metadata["failure_stage"])
+
+        val unsafePath = tool.execute(
+            WebProjectFileTool.TOOL_READ_FILE,
+            mapOf("path" to "../secret.js")
+        )
+        assertFalse(unsafePath.success)
+        assertEquals("normalize_path", unsafePath.metadata["failure_stage"])
+
+        val missingFile = tool.execute(
+            WebProjectFileTool.TOOL_READ_FILE,
+            mapOf("path" to "missing.js")
+        )
+        assertFalse(missingFile.success)
+        assertEquals("not_found", missingFile.metadata["failure_stage"])
+
+        File(workspaceRoot, "large.js").writeText("12345")
+        val tooLarge = tool.execute(
+            WebProjectFileTool.TOOL_READ_FILE,
+            mapOf("path" to "large.js")
+        )
+        assertFalse(tooLarge.success)
+        assertEquals("too_large", tooLarge.metadata["failure_stage"])
+
+        File(workspaceRoot, "invalid.js").writeBytes(byteArrayOf(0xC3.toByte(), 0x28))
+        val invalidUtf8 = tool.execute(
+            WebProjectFileTool.TOOL_READ_FILE,
+            mapOf("path" to "invalid.js")
+        )
+        assertFalse(invalidUtf8.success)
+        assertEquals("decode_utf8", invalidUtf8.metadata["failure_stage"])
+        assertFalse(invalidUtf8.metadata.values.any { "12345" in it })
     }
 
     @Test

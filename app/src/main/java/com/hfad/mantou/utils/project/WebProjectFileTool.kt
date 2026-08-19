@@ -68,7 +68,8 @@ data class WebProjectToolExecutionResult(
     val success: Boolean,
     val output: String,
     val diagnostics: List<String> = emptyList(),
-    val changedFiles: List<String> = emptyList()
+    val changedFiles: List<String> = emptyList(),
+    val metadata: Map<String, String> = emptyMap()
 )
 
 class WebProjectFileTool(
@@ -225,17 +226,31 @@ class WebProjectFileTool(
                 TOOL_LIST_FILES -> {
                     val path = arguments[ARG_PATH].orEmpty().ifBlank { "." }
                     val recursive = arguments[ARG_RECURSIVE]?.toBooleanStrictOrNull() ?: true
+                    val entries = list(path, recursive)
                     WebProjectToolExecutionResult(
                         success = true,
-                        output = TOOL_GSON.toJson(list(path, recursive))
+                        output = TOOL_GSON.toJson(entries),
+                        metadata = mapOf(
+                            "path" to path,
+                            "recursive" to recursive.toString(),
+                            "entry_count" to entries.size.toString(),
+                            "file_count" to entries.count { !it.directory }.toString(),
+                            "directory_count" to entries.count(WebProjectFileInfo::directory).toString()
+                        )
                     )
                 }
 
                 TOOL_READ_FILE -> {
                     val path = arguments.requireArgument(ARG_PATH, toolName)
+                    val result = read(path)
                     WebProjectToolExecutionResult(
                         success = true,
-                        output = TOOL_GSON.toJson(read(path))
+                        output = TOOL_GSON.toJson(result),
+                        metadata = mapOf(
+                            "path" to result.path,
+                            "bytes" to result.sizeBytes.toString(),
+                            "sha256" to result.sha256
+                        )
                     )
                 }
 
@@ -252,7 +267,14 @@ class WebProjectFileTool(
                     WebProjectToolExecutionResult(
                         success = true,
                         output = TOOL_GSON.toJson(result),
-                        changedFiles = listOf(result.path)
+                        changedFiles = listOf(result.path),
+                        metadata = buildMap {
+                            put("path", result.path)
+                            put("bytes", result.sizeBytes.toString())
+                            put("created", result.created.toString())
+                            result.beforeSha256?.let { put("before_sha256", it) }
+                            put("after_sha256", result.afterSha256)
+                        }
                     )
                 }
 
@@ -262,7 +284,12 @@ class WebProjectFileTool(
                     WebProjectToolExecutionResult(
                         success = true,
                         output = TOOL_GSON.toJson(result),
-                        changedFiles = listOf(result.path)
+                        changedFiles = listOf(result.path),
+                        metadata = mapOf(
+                            "path" to result.path,
+                            "bytes" to result.deletedBytes.toString(),
+                            "deleted_sha256" to result.deletedSha256
+                        )
                     )
                 }
 
@@ -272,8 +299,35 @@ class WebProjectFileTool(
             WebProjectToolExecutionResult(
                 success = false,
                 output = error.message ?: "Project file tool failed",
-                diagnostics = listOf(error.message ?: error::class.java.simpleName)
+                diagnostics = listOf(error.message ?: error::class.java.simpleName),
+                metadata = buildMap {
+                    put("tool", toolName)
+                    arguments[ARG_PATH]?.let { put("path", it) }
+                    put("error_type", error::class.java.simpleName)
+                    put("failure_stage", failureStage(error))
+                }
             )
+        }
+    }
+
+    private fun failureStage(error: Throwable): String {
+        val message = error.message.orEmpty().lowercase(Locale.US)
+        return when {
+            "requires argument" in message -> "arguments"
+            "unsafe" in message ||
+                "path must" in message ||
+                "path contains" in message ||
+                "path targets" in message ||
+                "path escapes" in message ||
+                "relative path" in message ||
+                "path segment" in message -> {
+                "normalize_path"
+            }
+            "does not exist" in message || "not found" in message -> "not_found"
+            "exceeds" in message || "too large" in message -> "too_large"
+            "utf-8" in message || "utf8" in message -> "decode_utf8"
+            "extension" in message || "immutable" in message || "not allowed" in message -> "policy"
+            else -> "io"
         }
     }
 

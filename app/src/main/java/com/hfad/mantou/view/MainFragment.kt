@@ -46,6 +46,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import androidx.core.widget.TextViewCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
@@ -124,6 +125,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var lastSystemBarBottomInset = 0
     private var lastAppliedBottomInset = Int.MIN_VALUE
     private var currentContextTokens = 0
+    private var currentConsumedTokens = 0L
+    private var currentTokenUsageIncludesEstimate = false
     private var cachedChatSystemPrompt: String? = null
     private var forceScrollToLatestMessage = false
     private var isChatScrollActive = false
@@ -1777,6 +1780,12 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             renderChatMessages(messages)
         }
 
+        viewModel.currentSessionTokenUsage.observe(viewLifecycleOwner) { usage ->
+            currentConsumedTokens = usage.totalTokens
+            currentTokenUsageIncludesEstimate = usage.includesEstimate
+            updateContextProgressIndicator()
+        }
+
         // 观察所有会话列表
         lifecycleScope.launch {
             viewModel.allSessions.collect { sessions ->
@@ -2847,7 +2856,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         container.addView(
             TextView(requireContext()).apply {
-                text = "修改后自动保存，新的阈值会立刻应用"
+                text = "当前上下文是下一次请求的预计占用；累计消耗会叠加本会话的每次模型请求。"
                 textSize = 15f
                 setTextColor(Color.rgb(111, 119, 137))
                 setLineSpacing(dp(3).toFloat(), 1f)
@@ -2875,9 +2884,12 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             setPadding(dp(12), dp(14), dp(12), dp(14))
         }
         val currentValue = createStatValue(formatNumber(currentContextTokens), Color.rgb(45, 52, 68))
+        val consumedValue = createStatValue(formatConsumedTokens(), Color.rgb(190, 112, 46))
         val targetValue = createStatValue(formatNumber(currentLimit), Color.rgb(58, 132, 226))
         val percentValue = createStatValue(formatPercent(currentContextTokens, currentLimit), Color.rgb(65, 145, 126))
         statsRow.addView(createStatColumn("当前上下文", currentValue), statColumnParams())
+        statsRow.addView(verticalDivider())
+        statsRow.addView(createStatColumn("累计消耗", consumedValue), statColumnParams())
         statsRow.addView(verticalDivider())
         statsRow.addView(createStatColumn("目标阈值", targetValue), statColumnParams())
         statsRow.addView(verticalDivider())
@@ -2977,7 +2989,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         container.addView(
             TextView(requireContext()).apply {
-                text = "默认 ${formatNumber(ContextLimitStore.DEFAULT_TOKEN_LIMIT)}，范围 ${formatNumber(ContextLimitStore.MIN_TOKEN_LIMIT)} - ${formatNumber(ContextLimitStore.MAX_TOKEN_LIMIT)}"
+                text = "默认 ${formatNumber(ContextLimitStore.DEFAULT_TOKEN_LIMIT)}，" +
+                    "范围 ${formatNumber(ContextLimitStore.MIN_TOKEN_LIMIT)} - " +
+                    "${formatNumber(ContextLimitStore.MAX_TOKEN_LIMIT)}；≈ 表示供应商未返回 usage 时的估算值"
                 textSize = 14f
                 setTextColor(Color.rgb(150, 158, 176))
             },
@@ -3040,6 +3054,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             )
             currentLimit = clamped
             currentValue.text = formatNumber(currentContextTokens)
+            consumedValue.text = formatConsumedTokens()
             targetValue.text = formatNumber(clamped)
             percentValue.text = formatPercent(currentContextTokens, clamped)
             optionButtons.forEach { (option, button) ->
@@ -3111,20 +3126,23 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val fraction = if (limit <= 0) 0f else currentContextTokens.toFloat() / limit.toFloat()
         chatBinding.ivContextLimit.setProgressFraction(fraction)
         chatBinding.ivContextLimit.contentDescription =
-            "上下文限制，已使用 ${formatNumber(currentContextTokens)} / ${formatNumber(limit)}"
+            "上下文限制，预计占用 ${formatNumber(currentContextTokens)} / ${formatNumber(limit)}，" +
+                "本会话累计消耗 ${formatConsumedTokens()} token"
     }
 
     private fun createStatColumn(label: String, valueView: TextView): LinearLayout {
         return LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
             addView(TextView(requireContext()).apply {
                 text = label
-                textSize = 14f
+                textSize = 12f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(Color.rgb(122, 133, 153))
+                setSingleLine(true)
             })
             addView(valueView, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
                 topMargin = dp(8)
@@ -3139,6 +3157,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(color)
             includeFontPadding = false
+            setSingleLine(true)
+            gravity = Gravity.CENTER
+            TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
+                this,
+                12,
+                22,
+                1,
+                TypedValue.COMPLEX_UNIT_SP
+            )
         }
     }
 
@@ -3156,8 +3183,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         return View(requireContext()).apply {
             background = ColorDrawable(Color.rgb(232, 236, 244))
             layoutParams = LinearLayout.LayoutParams(dp(1), dp(58)).apply {
-                leftMargin = dp(12)
-                rightMargin = dp(20)
+                leftMargin = dp(4)
+                rightMargin = dp(4)
             }
         }
     }
@@ -3184,6 +3211,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun formatNumber(value: Int): String {
         return String.format(Locale.US, "%,d", value)
+    }
+
+    private fun formatNumber(value: Long): String {
+        return String.format(Locale.US, "%,d", value)
+    }
+
+    private fun formatConsumedTokens(): String {
+        val prefix = if (currentTokenUsageIncludesEstimate) "≈" else ""
+        return prefix + formatNumber(currentConsumedTokens)
     }
 
     private fun formatPercent(current: Int, limit: Int): String {

@@ -203,11 +203,55 @@ class StreamingHarnessModelRepairTest {
             }
         )
 
-        assertThrows(HarnessModelTransportException::class.java) {
+        val error = assertThrows(HarnessModelTransportException::class.java) {
             runBlocking { repair.requestTurn(modelRequest()) }
         }
+        assertFalse(error.isNetworkFailure)
         assertEquals(HarnessModelStreamPhase.FAILED, progress.last().phase)
         assertEquals("unauthorized", progress.last().error)
+    }
+
+    @Test
+    fun retryableHttpErrorsPreserveRequestDiagnostics() = runBlocking {
+        val repair = StreamingHarnessModelRepair(
+            config = testConfig(),
+            streamChatCompletion = { _, _ ->
+                events(
+                    StreamingApiService.StreamEvent.Error(
+                        message = "请求失败 (502) upstream_error",
+                        httpStatus = 502,
+                        retryable = true,
+                        diagnosticId = "mt-trace-1",
+                        upstreamRequestId = "provider-request-1"
+                    )
+                )
+            }
+        )
+
+        val error = assertThrows(HarnessModelTransportException::class.java) {
+            runBlocking { repair.requestTurn(modelRequest()) }
+        }
+
+        assertTrue(error.isNetworkFailure)
+        assertEquals(502, error.httpStatus)
+        assertEquals("mt-trace-1", error.diagnosticId)
+        assertEquals("provider-request-1", error.upstreamRequestId)
+    }
+
+    @Test
+    fun structuredHttpStatusControlsDefaultRetryClassification() {
+        assertTrue(
+            HarnessModelTransportException(
+                message = "gateway unavailable",
+                httpStatus = 502
+            ).isNetworkFailure
+        )
+        assertFalse(
+            HarnessModelTransportException(
+                message = "unauthorized",
+                httpStatus = 401
+            ).isNetworkFailure
+        )
     }
 
     private fun modelRequest(): HarnessModelRequest {

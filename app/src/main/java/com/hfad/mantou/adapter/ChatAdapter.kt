@@ -120,7 +120,13 @@ class ChatAdapter(
             is LoadingViewHolder -> holder.bind(message)
             is HarnessActivityRenderer.HarnessActivityViewHolder -> {
                 message.generateTaskState?.let { state ->
-                    holder.bind(state, effectiveTextColor, effectiveSecondaryColor, effectiveMutedColor)
+                    holder.bind(
+                        state,
+                        effectiveTextColor,
+                        effectiveSecondaryColor,
+                        effectiveMutedColor,
+                        appearanceSettings.chatTextSizeSp
+                    )
                 }
             }
         }
@@ -152,7 +158,8 @@ class ChatAdapter(
                             state,
                             effectiveTextColor,
                             effectiveSecondaryColor,
-                            effectiveMutedColor
+                            effectiveMutedColor,
+                            appearanceSettings.chatTextSizeSp
                         )
                     }
                 }

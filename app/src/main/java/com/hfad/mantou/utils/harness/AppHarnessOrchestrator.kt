@@ -1,9 +1,15 @@
 package com.hfad.mantou.utils.harness
 
 import com.hfad.mantou.data.GenerateTaskState
+import com.hfad.mantou.data.logging.HarnessTraceLogger
+import com.hfad.mantou.data.logging.HarnessTraceStatus
+import com.hfad.mantou.data.logging.elapsedMillisSince
+import com.hfad.mantou.data.logging.record
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import java.security.MessageDigest
 
 class AppHarnessOrchestrator(
     private val modelRepair: HarnessModelRepair,
@@ -13,33 +19,63 @@ class AppHarnessOrchestrator(
     private val testRunner: HarnessTestRunner,
     private val promptFilter: HarnessPromptFilter = DefaultHarnessPromptFilter,
     private val limits: HarnessLimits = HarnessLimits(),
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val eventLogger: (String, GenerateTaskState.HarnessEvent) -> Unit = { _, _ -> },
+    private val traceLogger: HarnessTraceLogger = HarnessTraceLogger {}
 ) {
 
     suspend fun run(
         request: HarnessRunRequest,
         onEvent: suspend (GenerateTaskState.HarnessEvent) -> Unit = {}
     ): HarnessRunResult {
+        val runStartedAt = System.nanoTime()
         var artifactPath = request.artifactPath
         var iteration = 0
+        var selfTestFailureCount = 0
+        var selfTestBypassed = false
+        var totalModelTurns = 0
+        var totalToolCalls = 0
+        var previousToolFingerprint: String? = null
+        var repeatedToolCount = 0
         val messages = mutableListOf<HarnessMessage>()
+
+        traceLogger.record(
+            runId = request.runId,
+            component = "ORCHESTRATOR",
+            operation = "run",
+            status = HarnessTraceStatus.STARTED,
+            message = "Harness 编排开始",
+            iteration = 0,
+            details = buildMap {
+                put("workspace", pathLabel(request.workspacePath))
+                request.artifactPath?.let { put("artifact", pathLabel(it)) }
+                request.metadata["projectId"]?.let { put("project_id", it) }
+                put("system_prompt_chars", request.systemPrompt.length.toString())
+                put("user_input_chars", request.userInput.length.toString())
+                put("self_test_script_chars", request.selfTestScript.orEmpty().length.toString())
+                put("test_suite_script_chars", request.testSuiteScript.orEmpty().length.toString())
+                put("max_iterations", limits.maxCodeIterations.toString())
+            }
+        )
 
         suspend fun emit(
             stage: GenerateTaskState.Stage,
             outcome: GenerateTaskState.Outcome,
             message: String,
-            diagnostics: List<String> = emptyList()
+            diagnostics: List<String> = emptyList(),
+            operation: String? = null
         ) {
-            onEvent(
-                GenerateTaskState.HarnessEvent(
-                    stage = stage,
-                    outcome = outcome,
-                    message = message,
-                    iteration = iteration,
-                    diagnostics = diagnostics,
-                    timestamp = clock()
-                )
+            val event = GenerateTaskState.HarnessEvent(
+                stage = stage,
+                outcome = outcome,
+                message = message,
+                iteration = iteration,
+                operation = operation,
+                diagnostics = diagnostics,
+                timestamp = clock()
             )
+            runCatching { eventLogger(request.runId, event) }
+            onEvent(event)
         }
 
         val preparedPrompt = try {
@@ -50,13 +86,52 @@ class AppHarnessOrchestrator(
             )
             promptFilter.prepare(request.systemPrompt, request.userInput)
         } catch (error: Exception) {
-            if (error is CancellationException) throw error
+            if (error is CancellationException) {
+                traceLogger.record(
+                    runId = request.runId,
+                    component = "ORCHESTRATOR",
+                    operation = "input_filter",
+                    status = HarnessTraceStatus.CANCELLED,
+                    message = "输入过滤已取消",
+                    durationMs = elapsedMillisSince(runStartedAt)
+                )
+                traceLogger.record(
+                    runId = request.runId,
+                    component = "ORCHESTRATOR",
+                    operation = "run",
+                    status = HarnessTraceStatus.CANCELLED,
+                    message = "Harness 编排在输入过滤阶段取消",
+                    iteration = iteration,
+                    durationMs = elapsedMillisSince(runStartedAt)
+                )
+                throw error
+            }
             val reason = error.message ?: "输入过滤失败"
             emit(
                 stage = GenerateTaskState.Stage.INPUT,
                 outcome = GenerateTaskState.Outcome.FAILED,
                 message = reason,
                 diagnostics = listOf(reason)
+            )
+            traceLogger.record(
+                runId = request.runId,
+                component = "ORCHESTRATOR",
+                operation = "input_filter",
+                status = HarnessTraceStatus.FAILED,
+                message = "输入过滤失败",
+                iteration = iteration,
+                durationMs = elapsedMillisSince(runStartedAt),
+                details = mapOf("error_type" to error::class.java.simpleName)
+            )
+            traceLogger.record(
+                runId = request.runId,
+                component = "ORCHESTRATOR",
+                operation = "run",
+                status = HarnessTraceStatus.FAILED,
+                message = "Harness 编排在输入过滤阶段失败",
+                iteration = iteration,
+                durationMs = elapsedMillisSince(runStartedAt),
+                details = mapOf("error_type" to error::class.java.simpleName)
             )
             return HarnessRunResult.Failed(
                 runId = request.runId,
@@ -73,6 +148,20 @@ class AppHarnessOrchestrator(
             message = "输入过滤完成",
             diagnostics = preparedPrompt.notices
         )
+        traceLogger.record(
+            runId = request.runId,
+            component = "ORCHESTRATOR",
+            operation = "input_filter",
+            status = HarnessTraceStatus.SUCCEEDED,
+            message = "输入过滤完成",
+            iteration = iteration,
+            details = mapOf(
+                "filtered_user_chars" to preparedPrompt.filteredUserInput.length.toString(),
+                "system_prompt_chars" to preparedPrompt.systemPrompt.length.toString(),
+                "user_prompt_chars" to preparedPrompt.userPrompt.length.toString(),
+                "notice_count" to preparedPrompt.notices.size.toString()
+            )
+        )
         emit(
             stage = GenerateTaskState.Stage.PROMPT,
             outcome = GenerateTaskState.Outcome.RUNNING,
@@ -85,6 +174,18 @@ class AppHarnessOrchestrator(
             outcome = GenerateTaskState.Outcome.PASSED,
             message = "Harness 提示词已就绪"
         )
+        traceLogger.record(
+            runId = request.runId,
+            component = "ORCHESTRATOR",
+            operation = "prompt_assembly",
+            status = HarnessTraceStatus.SUCCEEDED,
+            message = "Harness 提示词已组装",
+            iteration = iteration,
+            details = mapOf(
+                "message_count" to messages.size.toString(),
+                "message_chars" to messages.sumOf { it.content.length }.toString()
+            )
+        )
 
         suspend fun runCodingIteration(
             purpose: HarnessModelPurpose,
@@ -95,30 +196,46 @@ class AppHarnessOrchestrator(
                 throw HarnessLimitException("自动修复已达到 ${limits.maxCodeIterations} 轮上限")
             }
             iteration++
-            if (feedback != null) {
-                val diagnostics = compactDiagnostics(feedback.diagnostics)
-                messages += HarnessMessage(
-                    role = HarnessMessageRole.USER,
-                    content = buildRepairPrompt(feedback.stage, feedback.summary, diagnostics)
-                )
-                emit(
-                    stage = feedback.stage,
-                    outcome = GenerateTaskState.Outcome.RETRYING,
-                    message = "检查未通过，返回模型继续修改",
-                    diagnostics = diagnostics
-                )
-            }
-
-            var activePurpose = purpose
-            var modelTurns = 0
-            var toolCalls = 0
-            while (true) {
-                currentCoroutineContext().ensureActive()
-                if (modelTurns >= limits.maxModelTurnsPerIteration) {
-                    throw HarnessLimitException("单轮模型与工具交互超过 ${limits.maxModelTurnsPerIteration} 次")
+            val iterationStartedAt = System.nanoTime()
+            var iterationTurn = 0
+            traceLogger.record(
+                runId = request.runId,
+                component = "ORCHESTRATOR",
+                operation = "coding_iteration",
+                status = HarnessTraceStatus.STARTED,
+                message = "代码编排轮次开始",
+                iteration = iteration,
+                details = buildMap {
+                    put("purpose", purpose.name)
+                    feedback?.let {
+                        put("feedback_stage", it.stage.name)
+                        put("feedback_operation", it.operation)
+                        put("feedback_diagnostic_count", it.diagnostics.size.toString())
+                    }
                 }
-                modelTurns++
-                emit(
+            )
+            try {
+                if (feedback != null) {
+                    val diagnostics = compactDiagnostics(feedback.diagnostics)
+                    messages += HarnessMessage(
+                        role = HarnessMessageRole.USER,
+                        content = buildRepairPrompt(feedback.stage, feedback.summary, diagnostics)
+                    )
+                    emit(
+                        stage = feedback.stage,
+                        outcome = GenerateTaskState.Outcome.RETRYING,
+                        message = "检查未通过，返回模型继续修改",
+                        diagnostics = diagnostics,
+                        operation = feedback.operation
+                    )
+                }
+
+                var activePurpose = purpose
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    iterationTurn++
+                    totalModelTurns++
+                    emit(
                     stage = GenerateTaskState.Stage.MODEL,
                     outcome = GenerateTaskState.Outcome.RUNNING,
                     message = when (activePurpose) {
@@ -126,7 +243,8 @@ class AppHarnessOrchestrator(
                         HarnessModelPurpose.TOOL_FOLLOW_UP -> "正在把工具结果回传模型"
                         HarnessModelPurpose.REPAIR -> "正在请求模型规划下一项诊断修复"
                     },
-                    diagnostics = feedback?.diagnostics.orEmpty().let(::compactDiagnostics)
+                    diagnostics = feedback?.diagnostics.orEmpty().let(::compactDiagnostics),
+                    operation = activePurpose.name
                 )
 
                 val turn = requestModelTurn(
@@ -138,7 +256,15 @@ class AppHarnessOrchestrator(
                         diagnostics = feedback?.diagnostics.orEmpty().let(::compactDiagnostics),
                         metadata = request.metadata
                     ),
-                    emit = ::emit
+                    emit = { stage, outcome, message, diagnostics ->
+                        emit(
+                            stage = stage,
+                            outcome = outcome,
+                            message = message,
+                            diagnostics = diagnostics,
+                            operation = activePurpose.name
+                        )
+                    }
                 )
                 if (turn.content.isNotBlank() || turn.toolCalls.isNotEmpty()) {
                     messages += HarnessMessage(
@@ -154,16 +280,60 @@ class AppHarnessOrchestrator(
                         "模型已完成本轮代码编排"
                     } else {
                         "模型请求调用 ${turn.toolCalls.size} 个本地代码工具"
-                    }
+                    },
+                    operation = activePurpose.name
                 )
-                if (turn.toolCalls.isEmpty()) return
+                traceLogger.record(
+                    runId = request.runId,
+                    component = "ORCHESTRATOR",
+                    operation = "turn_decision",
+                    status = HarnessTraceStatus.SUCCEEDED,
+                    message = if (turn.toolCalls.isEmpty()) {
+                        "模型结束当前代码编排轮次"
+                    } else {
+                        "模型返回本地工具动作"
+                    },
+                    iteration = iteration,
+                    details = mapOf(
+                        "purpose" to activePurpose.name,
+                        "iteration_turn" to iterationTurn.toString(),
+                        "total_model_turns" to totalModelTurns.toString(),
+                        "content_chars" to turn.content.length.toString(),
+                        "tool_call_count" to turn.toolCalls.size.toString(),
+                        "tool_names" to turn.toolCalls.joinToString(",") { it.name },
+                        "history_message_count" to messages.size.toString(),
+                        "history_chars" to messages.sumOf { it.content.length }.toString()
+                    )
+                )
+                if (turn.toolCalls.isEmpty()) {
+                    traceLogger.record(
+                        runId = request.runId,
+                        component = "ORCHESTRATOR",
+                        operation = "coding_iteration",
+                        status = HarnessTraceStatus.SUCCEEDED,
+                        message = "代码编排轮次完成",
+                        iteration = iteration,
+                        durationMs = elapsedMillisSince(iterationStartedAt),
+                        details = mapOf(
+                            "iteration_turns" to iterationTurn.toString(),
+                            "total_model_turns" to totalModelTurns.toString(),
+                            "total_tool_calls" to totalToolCalls.toString()
+                        )
+                    )
+                    return
+                }
 
                 for (call in turn.toolCalls) {
                     currentCoroutineContext().ensureActive()
-                    toolCalls++
-                    if (toolCalls > limits.maxToolCallsPerIteration) {
-                        throw HarnessLimitException("单轮工具调用超过 ${limits.maxToolCallsPerIteration} 次")
+                    totalToolCalls++
+                    val toolFingerprint = toolFingerprint(call)
+                    repeatedToolCount = if (toolFingerprint == previousToolFingerprint) {
+                        repeatedToolCount + 1
+                    } else {
+                        1
                     }
+                    previousToolFingerprint = toolFingerprint
+                    val toolStartedAt = System.nanoTime()
                     emit(
                         stage = GenerateTaskState.Stage.TOOL,
                         outcome = GenerateTaskState.Outcome.RUNNING,
@@ -172,7 +342,22 @@ class AppHarnessOrchestrator(
                             call.arguments["path"]?.takeIf(String::isNotBlank)?.let { path ->
                                 append(" · ").append(path)
                             }
-                        }
+                        },
+                        operation = call.name
+                    )
+                    traceLogger.record(
+                        runId = request.runId,
+                        component = "TOOL",
+                        operation = call.name,
+                        status = HarnessTraceStatus.STARTED,
+                        message = "本地代码工具开始执行",
+                        iteration = iteration,
+                        details = toolCallDetails(
+                            call = call,
+                            iterationTurn = iterationTurn,
+                            totalToolCalls = totalToolCalls,
+                            repeatedToolCount = repeatedToolCount
+                        )
                     )
                     val result = executeTool(request, call, iteration)
                     artifactPath = result.artifactPath ?: artifactPath
@@ -197,10 +382,77 @@ class AppHarnessOrchestrator(
                         } else {
                             "代码工具 ${call.name} 执行失败，结果将回传模型"
                         },
-                        diagnostics = compactDiagnostics(result.diagnostics)
+                        diagnostics = compactDiagnostics(result.diagnostics),
+                        operation = call.name
+                    )
+                    traceLogger.record(
+                        runId = request.runId,
+                        component = "TOOL",
+                        operation = call.name,
+                        status = if (result.success) {
+                            HarnessTraceStatus.SUCCEEDED
+                        } else {
+                            HarnessTraceStatus.FAILED
+                        },
+                        message = if (result.success) {
+                            "本地代码工具执行完成"
+                        } else {
+                            "本地代码工具执行失败"
+                        },
+                        iteration = iteration,
+                        durationMs = elapsedMillisSince(toolStartedAt),
+                        details = toolCallDetails(
+                            call = call,
+                            iterationTurn = iterationTurn,
+                            totalToolCalls = totalToolCalls,
+                            repeatedToolCount = repeatedToolCount
+                        ) + result.metadata + mapOf(
+                            "success" to result.success.toString(),
+                            "output_chars" to result.output.length.toString(),
+                            "output_sha256" to sha256(result.output),
+                            "diagnostic_count" to result.diagnostics.size.toString(),
+                            "changed_files" to result.changedFiles.joinToString(","),
+                            "artifact" to result.artifactPath?.let(::pathLabel).orEmpty()
+                        )
                     )
                 }
-                activePurpose = HarnessModelPurpose.TOOL_FOLLOW_UP
+                    activePurpose = HarnessModelPurpose.TOOL_FOLLOW_UP
+                }
+            } catch (error: CancellationException) {
+                traceLogger.record(
+                    runId = request.runId,
+                    component = "ORCHESTRATOR",
+                    operation = "coding_iteration",
+                    status = HarnessTraceStatus.CANCELLED,
+                    message = "代码编排轮次已取消",
+                    iteration = iteration,
+                    durationMs = elapsedMillisSince(iterationStartedAt),
+                    details = mapOf(
+                        "purpose" to purpose.name,
+                        "iteration_turns" to iterationTurn.toString(),
+                        "total_model_turns" to totalModelTurns.toString(),
+                        "total_tool_calls" to totalToolCalls.toString()
+                    )
+                )
+                throw error
+            } catch (error: Exception) {
+                traceLogger.record(
+                    runId = request.runId,
+                    component = "ORCHESTRATOR",
+                    operation = "coding_iteration",
+                    status = HarnessTraceStatus.FAILED,
+                    message = "代码编排轮次失败",
+                    iteration = iteration,
+                    durationMs = elapsedMillisSince(iterationStartedAt),
+                    details = mapOf(
+                        "purpose" to purpose.name,
+                        "iteration_turns" to iterationTurn.toString(),
+                        "total_model_turns" to totalModelTurns.toString(),
+                        "total_tool_calls" to totalToolCalls.toString(),
+                        "error_type" to error::class.java.simpleName
+                    )
+                )
+                throw error
             }
         }
 
@@ -210,10 +462,31 @@ class AppHarnessOrchestrator(
         ): HarnessCheckResult {
             currentCoroutineContext().ensureActive()
             val stage = kind.eventStage()
+            val checkStartedAt = System.nanoTime()
+            val testScript = when (kind) {
+                HarnessCheckKind.SELF_TEST -> request.selfTestScript
+                HarnessCheckKind.TEST_SUITE -> request.testSuiteScript
+                else -> null
+            }
             emit(
                 stage = stage,
                 outcome = GenerateTaskState.Outcome.RUNNING,
-                message = kind.runningMessage()
+                message = kind.runningMessage(),
+                operation = kind.name
+            )
+            traceLogger.record(
+                runId = request.runId,
+                component = "CHECK",
+                operation = kind.name,
+                status = HarnessTraceStatus.STARTED,
+                message = kind.runningMessage(),
+                iteration = iteration,
+                details = buildMap {
+                    artifactPath?.let { put("artifact", pathLabel(it)) }
+                    put("workspace", pathLabel(request.workspacePath))
+                    put("script_chars", testScript.orEmpty().length.toString())
+                    testScript?.let { put("script_sha256", sha256(it)) }
+                }
             )
             val checkRequest = HarnessCheckRequest(
                 runId = request.runId,
@@ -221,17 +494,24 @@ class AppHarnessOrchestrator(
                 artifactPath = artifactPath,
                 kind = kind,
                 iteration = iteration,
-                testScript = when (kind) {
-                    HarnessCheckKind.SELF_TEST -> request.selfTestScript
-                    HarnessCheckKind.TEST_SUITE -> request.testSuiteScript
-                    else -> null
-                },
+                testScript = testScript,
                 metadata = request.metadata
             )
             val result = try {
                 runner(checkRequest)
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
+                if (error is CancellationException) {
+                    traceLogger.record(
+                        runId = request.runId,
+                        component = "CHECK",
+                        operation = kind.name,
+                        status = HarnessTraceStatus.CANCELLED,
+                        message = "Harness 检查已取消",
+                        iteration = iteration,
+                        durationMs = elapsedMillisSince(checkStartedAt)
+                    )
+                    throw error
+                }
                 HarnessCheckResult(
                     passed = false,
                     summary = error.message ?: "${kind.displayName()}执行失败",
@@ -249,26 +529,70 @@ class AppHarnessOrchestrator(
                 message = result.summary.ifBlank {
                     if (result.passed) "${kind.displayName()}通过" else "${kind.displayName()}未通过"
                 },
-                diagnostics = compactDiagnostics(result.diagnostics)
+                diagnostics = compactDiagnostics(result.diagnostics),
+                operation = kind.name
             )
-            return result.copy(diagnostics = compactDiagnostics(result.diagnostics))
+            val compactedResult = result.copy(diagnostics = compactDiagnostics(result.diagnostics))
+            traceLogger.record(
+                runId = request.runId,
+                component = "CHECK",
+                operation = kind.name,
+                status = if (compactedResult.passed) {
+                    HarnessTraceStatus.SUCCEEDED
+                } else {
+                    HarnessTraceStatus.FAILED
+                },
+                message = compactedResult.summary,
+                iteration = iteration,
+                durationMs = elapsedMillisSince(checkStartedAt),
+                details = mapOf(
+                    "passed" to compactedResult.passed.toString(),
+                    "reported_duration_ms" to compactedResult.durationMs.toString(),
+                    "diagnostic_count" to compactedResult.diagnostics.size.toString(),
+                    "diagnostic_codes" to diagnosticCodes(compactedResult.diagnostics),
+                    "artifact" to compactedResult.artifactPath?.let(::pathLabel).orEmpty()
+                )
+            )
+            return compactedResult
         }
 
         return try {
             runCodingIteration(HarnessModelPurpose.INITIAL)
             var gate = HarnessGate.DEVELOPMENT_BUILD
+            var previousGate: HarnessGate? = null
+            var transitionReason = "initial_generation_completed"
             while (true) {
                 currentCoroutineContext().ensureActive()
-                when (gate) {
+                val currentGate = gate
+                traceLogger.record(
+                    runId = request.runId,
+                    component = "ORCHESTRATOR",
+                    operation = "gate_transition",
+                    status = HarnessTraceStatus.PROGRESS,
+                    message = "进入 Harness 门禁",
+                    iteration = iteration,
+                    details = mapOf(
+                        "from_gate" to (previousGate?.name ?: "CODING"),
+                        "to_gate" to currentGate.name,
+                        "reason" to transitionReason,
+                        "self_test_failures" to selfTestFailureCount.toString(),
+                        "self_test_bypassed" to selfTestBypassed.toString()
+                    )
+                )
+                when (currentGate) {
                     HarnessGate.DEVELOPMENT_BUILD -> {
                         val result = runCheck(HarnessCheckKind.DEVELOPMENT_BUILD, builder::build)
                         if (result.passed) {
                             gate = HarnessGate.RUNTIME_INSPECTION
+                            transitionReason = "development_build_passed"
                         } else {
                             runCodingIteration(
                                 purpose = HarnessModelPurpose.REPAIR,
-                                feedback = result.toRepairFeedback(GenerateTaskState.Stage.BUILD)
+                                feedback = result.toRepairFeedback(
+                                    HarnessCheckKind.DEVELOPMENT_BUILD
+                                )
                             )
+                            transitionReason = "development_build_failed_repaired"
                         }
                     }
 
@@ -276,25 +600,54 @@ class AppHarnessOrchestrator(
                         val result = runCheck(HarnessCheckKind.RUNTIME, inspector::inspect)
                         if (result.passed) {
                             gate = HarnessGate.SELF_TEST
+                            transitionReason = "runtime_inspection_passed"
                         } else {
                             runCodingIteration(
                                 purpose = HarnessModelPurpose.REPAIR,
-                                feedback = result.toRepairFeedback(GenerateTaskState.Stage.INSPECT)
+                                feedback = result.toRepairFeedback(HarnessCheckKind.RUNTIME)
                             )
                             gate = HarnessGate.DEVELOPMENT_BUILD
+                            transitionReason = "runtime_inspection_failed_repaired"
                         }
                     }
 
                     HarnessGate.SELF_TEST -> {
                         val result = runCheck(HarnessCheckKind.SELF_TEST, testRunner::runTests)
                         if (result.passed) {
+                            selfTestFailureCount = 0
+                            selfTestBypassed = false
                             gate = HarnessGate.FINAL_BUILD
+                            transitionReason = "self_test_passed"
                         } else {
-                            runCodingIteration(
-                                purpose = HarnessModelPurpose.REPAIR,
-                                feedback = result.toRepairFeedback(GenerateTaskState.Stage.SELF_TEST)
-                            )
-                            gate = HarnessGate.DEVELOPMENT_BUILD
+                            selfTestFailureCount++
+                            val canRequestSelfTestRepair =
+                                selfTestFailureCount < limits.maxSelfTestFailuresBeforeBypass &&
+                                    iteration < limits.maxCodeIterations
+                            if (canRequestSelfTestRepair) {
+                                runCodingIteration(
+                                    purpose = HarnessModelPurpose.REPAIR,
+                                    feedback = result.toRepairFeedback(HarnessCheckKind.SELF_TEST)
+                                )
+                                gate = HarnessGate.DEVELOPMENT_BUILD
+                                transitionReason = "self_test_failed_repaired"
+                            } else {
+                                selfTestBypassed = true
+                                emit(
+                                    stage = GenerateTaskState.Stage.SELF_TEST,
+                                    outcome = GenerateTaskState.Outcome.PASSED,
+                                    message = "页面自测第 ${selfTestFailureCount} 次未通过，已按非阻塞策略放行",
+                                    diagnostics = (
+                                        listOf(
+                                            "self_test_policy=advisory",
+                                            "self_test_failures=$selfTestFailureCount",
+                                            "self_test_bypass_after=${limits.maxSelfTestFailuresBeforeBypass}"
+                                        ) + result.diagnostics
+                                    ).distinct(),
+                                    operation = SELF_TEST_BYPASS_OPERATION
+                                )
+                                gate = HarnessGate.FINAL_BUILD
+                                transitionReason = "self_test_bypassed"
+                            }
                         }
                     }
 
@@ -302,12 +655,14 @@ class AppHarnessOrchestrator(
                         val result = runCheck(HarnessCheckKind.FINAL_BUILD, builder::build)
                         if (result.passed) {
                             gate = HarnessGate.TEST_SUITE
+                            transitionReason = "final_build_passed"
                         } else {
                             runCodingIteration(
                                 purpose = HarnessModelPurpose.REPAIR,
-                                feedback = result.toRepairFeedback(GenerateTaskState.Stage.BUILD)
+                                feedback = result.toRepairFeedback(HarnessCheckKind.FINAL_BUILD)
                             )
                             gate = HarnessGate.DEVELOPMENT_BUILD
+                            transitionReason = "final_build_failed_repaired"
                         }
                     }
 
@@ -317,34 +672,91 @@ class AppHarnessOrchestrator(
                             emit(
                                 stage = GenerateTaskState.Stage.DELIVER,
                                 outcome = GenerateTaskState.Outcome.PASSED,
-                                message = "构建、运行检查和测试均已通过，可以交付"
+                                message = if (selfTestBypassed) {
+                                    "构建、运行检查和测试均已通过；自测未通过但已按非阻塞策略放行，可以交付"
+                                } else {
+                                    "构建、运行检查和测试均已通过，可以交付"
+                                }
+                            )
+                            traceLogger.record(
+                                runId = request.runId,
+                                component = "ORCHESTRATOR",
+                                operation = "run",
+                                status = HarnessTraceStatus.SUCCEEDED,
+                                message = "Harness 编排完成",
+                                iteration = iteration,
+                                durationMs = elapsedMillisSince(runStartedAt),
+                                details = mapOf(
+                                    "artifact" to artifactPath?.let(::pathLabel).orEmpty(),
+                                    "total_model_turns" to totalModelTurns.toString(),
+                                    "total_tool_calls" to totalToolCalls.toString(),
+                                    "self_test_failures" to selfTestFailureCount.toString(),
+                                    "self_test_bypassed" to selfTestBypassed.toString()
+                                )
                             )
                             return HarnessRunResult.Delivered(
                                 runId = request.runId,
                                 iterations = iteration,
                                 artifactPath = artifactPath,
-                                filteredUserInput = preparedPrompt.filteredUserInput
+                                filteredUserInput = preparedPrompt.filteredUserInput,
+                                selfTestBypassed = selfTestBypassed
                             )
                         }
                         runCodingIteration(
                             purpose = HarnessModelPurpose.REPAIR,
-                            feedback = result.toRepairFeedback(GenerateTaskState.Stage.TEST)
+                            feedback = result.toRepairFeedback(HarnessCheckKind.TEST_SUITE)
                         )
                         gate = HarnessGate.DEVELOPMENT_BUILD
+                        transitionReason = "test_suite_failed_repaired"
                     }
                 }
+                previousGate = currentGate
             }
             @Suppress("UNREACHABLE_CODE")
             error("Harness state machine exited unexpectedly")
         } catch (error: Exception) {
-            if (error is CancellationException) throw error
+            if (error is CancellationException) {
+                traceLogger.record(
+                    runId = request.runId,
+                    component = "ORCHESTRATOR",
+                    operation = "run",
+                    status = HarnessTraceStatus.CANCELLED,
+                    message = "Harness 编排已取消",
+                    iteration = iteration,
+                    durationMs = elapsedMillisSince(runStartedAt),
+                    details = mapOf(
+                        "total_model_turns" to totalModelTurns.toString(),
+                        "total_tool_calls" to totalToolCalls.toString()
+                    )
+                )
+                throw error
+            }
             val reason = error.message ?: "Harness 编排失败"
-            val diagnostics = listOf(reason)
+            val diagnostics = when (error) {
+                is HarnessModelTransportException -> buildTransportDiagnostics(error) + reason
+                else -> listOf(reason)
+            }.distinct()
             emit(
                 stage = GenerateTaskState.Stage.DELIVER,
                 outcome = GenerateTaskState.Outcome.FAILED,
                 message = reason,
                 diagnostics = diagnostics
+            )
+            traceLogger.record(
+                runId = request.runId,
+                component = "ORCHESTRATOR",
+                operation = "run",
+                status = HarnessTraceStatus.FAILED,
+                message = "Harness 编排失败",
+                iteration = iteration,
+                durationMs = elapsedMillisSince(runStartedAt),
+                details = mapOf(
+                    "error_type" to error::class.java.simpleName,
+                    "artifact" to artifactPath?.let(::pathLabel).orEmpty(),
+                    "total_model_turns" to totalModelTurns.toString(),
+                    "total_tool_calls" to totalToolCalls.toString(),
+                    "diagnostic_codes" to diagnosticCodes(diagnostics)
+                )
             )
             HarnessRunResult.Failed(
                 runId = request.runId,
@@ -366,25 +778,202 @@ class AppHarnessOrchestrator(
         ) -> Unit
     ): HarnessModelTurn {
         var lastError: Exception? = null
+        var attemptRequest = request
+        val totalAttempts = limits.maxModelRequestRetries + 1
         repeat(limits.maxModelRequestRetries + 1) { retryIndex ->
             currentCoroutineContext().ensureActive()
+            val attemptStartedAt = System.nanoTime()
+            traceLogger.record(
+                runId = attemptRequest.runId,
+                component = "MODEL",
+                operation = attemptRequest.purpose.name,
+                status = HarnessTraceStatus.STARTED,
+                message = "模型请求开始",
+                iteration = attemptRequest.iteration,
+                details = mapOf(
+                    "attempt" to (retryIndex + 1).toString(),
+                    "total_attempts" to totalAttempts.toString(),
+                    "message_count" to attemptRequest.messages.size.toString(),
+                    "message_chars" to attemptRequest.messages.sumOf { it.content.length }.toString(),
+                    "diagnostic_count" to attemptRequest.diagnostics.size.toString()
+                )
+            )
             try {
-                return modelRepair.requestTurn(request)
+                val turn = modelRepair.requestTurn(attemptRequest)
+                traceLogger.record(
+                    runId = attemptRequest.runId,
+                    component = "MODEL",
+                    operation = attemptRequest.purpose.name,
+                    status = HarnessTraceStatus.SUCCEEDED,
+                    message = "模型请求完成",
+                    iteration = attemptRequest.iteration,
+                    durationMs = elapsedMillisSince(attemptStartedAt),
+                    details = mapOf(
+                        "attempt" to (retryIndex + 1).toString(),
+                        "content_chars" to turn.content.length.toString(),
+                        "tool_call_count" to turn.toolCalls.size.toString(),
+                        "tool_names" to turn.toolCalls.joinToString(",") { it.name },
+                        "call_ids" to turn.toolCalls.joinToString(",") { it.id }
+                    )
+                )
+                return turn
             } catch (error: Exception) {
-                if (error is CancellationException) throw error
+                if (error is CancellationException) {
+                    traceLogger.record(
+                        runId = attemptRequest.runId,
+                        component = "MODEL",
+                        operation = attemptRequest.purpose.name,
+                        status = HarnessTraceStatus.CANCELLED,
+                        message = "模型请求已取消",
+                        iteration = attemptRequest.iteration,
+                        durationMs = elapsedMillisSince(attemptStartedAt),
+                        details = mapOf("attempt" to (retryIndex + 1).toString())
+                    )
+                    throw error
+                }
                 lastError = error
+                val retryKind = when (error) {
+                    is HarnessModelProtocolException -> ModelRetryKind.PROTOCOL
+                    is HarnessModelTransportException -> {
+                        if (error.isNetworkFailure) ModelRetryKind.NETWORK else null
+                    }
+
+                    else -> null
+                }
+                traceLogger.record(
+                    runId = attemptRequest.runId,
+                    component = "MODEL",
+                    operation = attemptRequest.purpose.name,
+                    status = HarnessTraceStatus.FAILED,
+                    message = when (error) {
+                        is HarnessModelProtocolException -> "模型单动作协议请求失败"
+                        is HarnessModelTransportException -> "模型传输请求失败"
+                        else -> "模型请求失败"
+                    },
+                    iteration = attemptRequest.iteration,
+                    durationMs = elapsedMillisSince(attemptStartedAt),
+                    details = buildMap {
+                        put("attempt", (retryIndex + 1).toString())
+                        put("total_attempts", totalAttempts.toString())
+                        put("error_type", error::class.java.simpleName)
+                        put("retry_kind", retryKind?.name ?: "NONE")
+                        if (error is HarnessModelTransportException) {
+                            error.httpStatus?.let { put("http_status", it.toString()) }
+                            error.diagnosticId?.let { put("diagnostic_id", it) }
+                            error.upstreamRequestId?.let { put("upstream_request_id", it) }
+                        }
+                    }
+                )
+                if (retryKind == null) {
+                    emit(
+                        GenerateTaskState.Stage.MODEL,
+                        GenerateTaskState.Outcome.FAILED,
+                        "模型请求失败，当前错误不可自动重试",
+                        buildModelFailureDiagnostics(
+                            error = error,
+                            attempt = retryIndex + 1,
+                            totalAttempts = totalAttempts,
+                            retryable = false
+                        )
+                    )
+                    throw error
+                }
                 if (retryIndex < limits.maxModelRequestRetries) {
                     val message = error.message ?: "模型请求失败"
+                    if (retryKind == ModelRetryKind.PROTOCOL) {
+                        attemptRequest = attemptRequest.copy(
+                            messages = attemptRequest.messages + HarnessMessage(
+                                role = HarnessMessageRole.USER,
+                                content = buildProtocolRetryPrompt(message)
+                            )
+                        )
+                    }
+                    val backoffMs = if (retryKind == ModelRetryKind.NETWORK) {
+                        modelRetryDelayMs(retryIndex)
+                    } else {
+                        0L
+                    }
                     emit(
                         GenerateTaskState.Stage.MODEL,
                         GenerateTaskState.Outcome.RETRYING,
-                        "模型请求失败，正在重试 ${retryIndex + 1}/${limits.maxModelRequestRetries}",
-                        listOf(message)
+                        when (retryKind) {
+                            ModelRetryKind.PROTOCOL -> {
+                                "模型响应违反单动作协议，已反馈错误，正在重试 " +
+                                    "${retryIndex + 1}/${limits.maxModelRequestRetries}"
+                            }
+
+                            ModelRetryKind.NETWORK -> {
+                                buildString {
+                                    append("模型上游请求失败，正在原样重试 ")
+                                    append(retryIndex + 1)
+                                    append('/').append(limits.maxModelRequestRetries)
+                                    if (backoffMs > 0) append(" · 等待 ${backoffMs}ms")
+                                }
+                            }
+                        },
+                        buildModelFailureDiagnostics(
+                            error = error,
+                            attempt = retryIndex + 1,
+                            totalAttempts = totalAttempts,
+                            retryable = true,
+                            backoffMs = backoffMs
+                        )
+                    )
+                    if (backoffMs > 0) delay(backoffMs)
+                } else {
+                    emit(
+                        GenerateTaskState.Stage.MODEL,
+                        GenerateTaskState.Outcome.FAILED,
+                        "模型请求在 $totalAttempts 次尝试后仍失败",
+                        buildModelFailureDiagnostics(
+                            error = error,
+                            attempt = totalAttempts,
+                            totalAttempts = totalAttempts,
+                            retryable = true
+                        )
                     )
                 }
             }
         }
         throw lastError ?: IllegalStateException("模型请求失败")
+    }
+
+    private fun modelRetryDelayMs(retryIndex: Int): Long {
+        if (limits.modelRetryBaseDelayMs == 0L) return 0L
+        val multiplier = 1L shl retryIndex.coerceAtMost(MAX_RETRY_SHIFT)
+        val maxMultiplier = limits.modelRetryMaxDelayMs / limits.modelRetryBaseDelayMs
+        return if (multiplier >= maxMultiplier) {
+            limits.modelRetryMaxDelayMs
+        } else {
+            limits.modelRetryBaseDelayMs * multiplier
+        }
+    }
+
+    private fun buildModelFailureDiagnostics(
+        error: Exception,
+        attempt: Int,
+        totalAttempts: Int,
+        retryable: Boolean,
+        backoffMs: Long = 0L
+    ): List<String> {
+        val diagnostics = mutableListOf(
+            "attempt=$attempt/$totalAttempts",
+            "retryable=$retryable"
+        )
+        if (backoffMs > 0) diagnostics += "backoff_ms=$backoffMs"
+        if (error is HarnessModelTransportException) {
+            diagnostics += buildTransportDiagnostics(error)
+        }
+        diagnostics += error.message.orEmpty().ifBlank { error.javaClass.simpleName }
+        return diagnostics.distinct()
+    }
+
+    private fun buildTransportDiagnostics(error: HarnessModelTransportException): List<String> {
+        return buildList {
+            error.httpStatus?.let { add("http_status=$it") }
+            error.diagnosticId?.let { add("diagnostic_id=$it") }
+            error.upstreamRequestId?.let { add("upstream_request_id=$it") }
+        }
     }
 
     private suspend fun executeTool(
@@ -408,9 +997,60 @@ class AppHarnessOrchestrator(
                 callId = call.id,
                 success = false,
                 output = error.message ?: "工具执行失败",
-                diagnostics = listOf(error.stackTraceToString().take(MAX_STACK_TRACE_CHARS))
+                diagnostics = listOf(error.stackTraceToString().take(MAX_STACK_TRACE_CHARS)),
+                metadata = mapOf(
+                    "error_type" to error::class.java.simpleName,
+                    "path" to call.arguments["path"].orEmpty()
+                )
             )
         }
+    }
+
+    private fun toolCallDetails(
+        call: HarnessToolCall,
+        iterationTurn: Int,
+        totalToolCalls: Int,
+        repeatedToolCount: Int
+    ): Map<String, String> {
+        return buildMap {
+            put("call_id", call.id)
+            put("iteration_turn", iterationTurn.toString())
+            put("total_tool_calls", totalToolCalls.toString())
+            put("repeat_count", repeatedToolCount.toString())
+            put("argument_keys", call.arguments.keys.sorted().joinToString(","))
+            call.arguments["path"]?.let { put("path", it) }
+            call.arguments["content"]?.let { content ->
+                put("write_chars", content.length.toString())
+                put("write_sha256", sha256(content))
+            }
+        }
+    }
+
+    private fun toolFingerprint(call: HarnessToolCall): String {
+        return buildString {
+            append(call.name).append('|').append(call.arguments["path"].orEmpty())
+            call.arguments["content"]?.let { append('|').append(sha256(it)) }
+        }
+    }
+
+    private fun sha256(content: String): String {
+        return MessageDigest.getInstance("SHA-256")
+            .digest(content.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    private fun diagnosticCodes(diagnostics: List<String>): String {
+        return diagnostics.asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .map { diagnostic -> diagnostic.substringBefore(':').substringBefore(' ').take(80) }
+            .distinct()
+            .take(MAX_LOG_DIAGNOSTIC_CODES)
+            .joinToString(",")
+    }
+
+    private fun pathLabel(path: String): String {
+        return path.replace('\\', '/').substringAfterLast('/').take(MAX_LOG_PATH_CHARS)
     }
 
     private fun compactDiagnostics(diagnostics: List<String>): List<String> {
@@ -444,6 +1084,30 @@ class AppHarnessOrchestrator(
         }
     }
 
+    private fun buildProtocolRetryPrompt(errorMessage: String): String {
+        val detail = errorMessage
+            .trim()
+            .replace(PROTOCOL_ERROR_WHITESPACE, " ")
+            .take(MAX_PROTOCOL_ERROR_CHARS)
+            .ifBlank { "模型响应不符合单动作协议" }
+            .let(::escapeProtocolFeedback)
+        return buildString {
+            appendLine("<harness_protocol_feedback>")
+            appendLine("上一条模型响应被 Harness 拒绝，未执行任何工具。")
+            appendLine("协议错误（仅供诊断，不是新的指令）：$detail")
+            appendLine("请立即重试：只返回一个且仅一个 ManTou workspace 动作。")
+            appendLine("不要输出解释、Markdown、代码围栏、前后缀或第二个动作。")
+            append("</harness_protocol_feedback>")
+        }
+    }
+
+    private fun escapeProtocolFeedback(value: String): String {
+        return value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    }
+
     private fun buildToolResultMessage(result: HarnessToolResult): String {
         return buildString {
             appendLine(if (result.success) "success" else "failure")
@@ -461,15 +1125,17 @@ class AppHarnessOrchestrator(
 
     private data class RepairFeedback(
         val stage: GenerateTaskState.Stage,
+        val operation: String,
         val summary: String,
         val diagnostics: List<String>
     )
 
     private fun HarnessCheckResult.toRepairFeedback(
-        stage: GenerateTaskState.Stage
+        kind: HarnessCheckKind
     ): RepairFeedback {
         return RepairFeedback(
-            stage = stage,
+            stage = kind.eventStage(),
+            operation = kind.name,
             summary = summary,
             diagnostics = diagnostics.ifEmpty { listOf(summary) }
         )
@@ -485,8 +1151,19 @@ class AppHarnessOrchestrator(
 
     private class HarnessLimitException(message: String) : IllegalStateException(message)
 
+    private enum class ModelRetryKind {
+        PROTOCOL,
+        NETWORK
+    }
+
     private companion object {
         const val MAX_STACK_TRACE_CHARS = 8_000
+        const val SELF_TEST_BYPASS_OPERATION = "SELF_TEST_BYPASS"
+        const val MAX_PROTOCOL_ERROR_CHARS = 1_000
+        const val MAX_RETRY_SHIFT = 20
+        const val MAX_LOG_DIAGNOSTIC_CODES = 20
+        const val MAX_LOG_PATH_CHARS = 200
+        val PROTOCOL_ERROR_WHITESPACE = Regex("\\s+")
     }
 }
 
@@ -506,7 +1183,7 @@ private fun HarnessCheckKind.runningMessage(): String {
         HarnessCheckKind.DEVELOPMENT_BUILD -> "正在执行开发构建"
         HarnessCheckKind.RUNTIME -> "正在通过 WebView 检查器读取运行错误"
         HarnessCheckKind.SELF_TEST -> "正在运行应用自测"
-        HarnessCheckKind.FINAL_BUILD -> "自测通过，正在执行交付前构建"
+        HarnessCheckKind.FINAL_BUILD -> "正在执行交付前构建"
         HarnessCheckKind.TEST_SUITE -> "交付前构建通过，正在运行完整测试集"
     }
 }
