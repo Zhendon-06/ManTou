@@ -233,6 +233,11 @@ class AppHarnessOrchestrator(
                 var activePurpose = purpose
                 while (true) {
                     currentCoroutineContext().ensureActive()
+                    if (iterationTurn >= limits.maxTaskTurns) {
+                        throw HarnessLimitException(
+                            "代码编排轮次在 ${limits.maxTaskTurns} 次模型请求后仍未完成"
+                        )
+                    }
                     iterationTurn++
                     totalModelTurns++
                     emit(
@@ -456,6 +461,219 @@ class AppHarnessOrchestrator(
             }
         }
 
+        suspend fun runScheduledInitialGeneration() {
+            currentCoroutineContext().ensureActive()
+            if (iteration >= limits.maxCodeIterations) {
+                throw HarnessLimitException("自动修复已达到 ${limits.maxCodeIterations} 轮上限")
+            }
+            val scheduledTasks = HarnessFileTaskScheduler.schedule(request.fileTasks)
+            iteration++
+            val generationStartedAt = System.nanoTime()
+            traceLogger.record(
+                runId = request.runId,
+                component = "ORCHESTRATOR",
+                operation = "scheduled_initial_generation",
+                status = HarnessTraceStatus.STARTED,
+                message = "确定性文件生成开始",
+                iteration = iteration,
+                details = mapOf(
+                    "task_count" to scheduledTasks.size.toString(),
+                    "plan_path" to request.planPath.orEmpty(),
+                    "max_task_turns" to limits.maxTaskTurns.toString()
+                )
+            )
+
+            scheduledTasks.forEachIndexed { taskIndex, task ->
+                currentCoroutineContext().ensureActive()
+                val taskStartedAt = System.nanoTime()
+                val taskNumber = taskIndex + 1
+                val taskMetadata = request.metadata + mapOf(
+                    "task_path" to task.path,
+                    "task_index" to taskNumber.toString(),
+                    "task_count" to scheduledTasks.size.toString(),
+                    "dependency_count" to task.dependsOn.size.toString()
+                )
+                val taskMessages = mutableListOf(
+                    HarnessMessage(HarnessMessageRole.SYSTEM, preparedPrompt.systemPrompt),
+                    HarnessMessage(HarnessMessageRole.USER, preparedPrompt.userPrompt),
+                    HarnessMessage(
+                        HarnessMessageRole.USER,
+                        buildFileTaskPrompt(task, taskNumber, scheduledTasks.size)
+                    )
+                )
+                traceLogger.record(
+                    runId = request.runId,
+                    component = "ORCHESTRATOR",
+                    operation = "file_task",
+                    status = HarnessTraceStatus.STARTED,
+                    message = "文件任务开始",
+                    iteration = iteration,
+                    details = taskMetadata
+                )
+
+                val contextPaths = buildList {
+                    request.planPath?.takeIf(String::isNotBlank)?.let(::add)
+                    addAll(task.dependsOn)
+                }.distinct()
+                contextPaths.forEachIndexed { contextIndex, path ->
+                    val call = HarnessToolCall(
+                        id = "host-read-$taskNumber-${contextIndex + 1}",
+                        name = TOOL_READ_FILE,
+                        arguments = mapOf("path" to path)
+                    )
+                    totalToolCalls++
+                    val result = executeTool(request, call, iteration)
+                    artifactPath = result.artifactPath ?: artifactPath
+                    if (!result.success) {
+                        throw IllegalStateException(
+                            "文件任务 ${task.path} 的宿主上下文读取失败：$path"
+                        )
+                    }
+                    taskMessages += HarnessMessage(
+                        role = HarnessMessageRole.ASSISTANT,
+                        content = "",
+                        toolCalls = listOf(call)
+                    )
+                    taskMessages += HarnessMessage(
+                        role = HarnessMessageRole.TOOL,
+                        content = buildToolResultMessage(result),
+                        toolCallId = call.id,
+                        toolName = call.name
+                    )
+                }
+
+                var activePurpose = HarnessModelPurpose.INITIAL
+                var completed = false
+                repeat(limits.maxTaskTurns) {
+                    if (completed) return@repeat
+                    currentCoroutineContext().ensureActive()
+                    totalModelTurns++
+                    emit(
+                        stage = GenerateTaskState.Stage.MODEL,
+                        outcome = GenerateTaskState.Outcome.RUNNING,
+                        message = "正在生成文件 $taskNumber/${scheduledTasks.size} · ${task.path}",
+                        operation = activePurpose.name
+                    )
+                    val turn = requestModelTurn(
+                        request = HarnessModelRequest(
+                            runId = request.runId,
+                            purpose = activePurpose,
+                            iteration = iteration,
+                            messages = taskMessages.toList(),
+                            metadata = taskMetadata
+                        ),
+                        emit = { stage, outcome, message, diagnostics ->
+                            emit(
+                                stage = stage,
+                                outcome = outcome,
+                                message = message,
+                                diagnostics = diagnostics,
+                                operation = activePurpose.name
+                            )
+                        }
+                    )
+                    if (turn.toolCalls.size != 1) {
+                        if (turn.content.isNotBlank()) {
+                            taskMessages += HarnessMessage(
+                                role = HarnessMessageRole.ASSISTANT,
+                                content = turn.content
+                            )
+                        }
+                        taskMessages += HarnessMessage(
+                            role = HarnessMessageRole.USER,
+                            content = buildIncompleteTaskPrompt(
+                                task = task,
+                                reason = if (turn.toolCalls.isEmpty()) {
+                                    "TASK_INCOMPLETE_TARGET_NOT_WRITTEN"
+                                } else {
+                                    "TASK_SINGLE_ACTION_REQUIRED"
+                                }
+                            )
+                        )
+                        activePurpose = HarnessModelPurpose.TOOL_FOLLOW_UP
+                        return@repeat
+                    }
+
+                    val call = turn.toolCalls.single()
+                    taskMessages += HarnessMessage(
+                        role = HarnessMessageRole.ASSISTANT,
+                        content = turn.content,
+                        toolCalls = listOf(call)
+                    )
+                    totalToolCalls++
+                    val result = taskPolicyFailure(call, task, request.planPath)
+                        ?: executeTool(request, call, iteration)
+                    artifactPath = result.artifactPath ?: artifactPath
+                    taskMessages += HarnessMessage(
+                        role = HarnessMessageRole.TOOL,
+                        content = buildToolResultMessage(result),
+                        toolCallId = call.id,
+                        toolName = call.name
+                    )
+                    emit(
+                        stage = GenerateTaskState.Stage.TOOL,
+                        outcome = if (result.success) {
+                            GenerateTaskState.Outcome.PASSED
+                        } else {
+                            GenerateTaskState.Outcome.FAILED
+                        },
+                        message = if (result.success) {
+                            "文件任务工具执行完成 · ${call.name}"
+                        } else {
+                            "文件任务工具执行失败 · ${call.name}"
+                        },
+                        diagnostics = compactDiagnostics(result.diagnostics),
+                        operation = call.name
+                    )
+                    completed = call.name == TOOL_WRITE_FILE &&
+                        call.arguments["path"] == task.path &&
+                        result.success &&
+                        task.path in result.changedFiles
+                    if (!completed && call.name == TOOL_WRITE_FILE && result.success) {
+                        taskMessages += HarnessMessage(
+                            role = HarnessMessageRole.USER,
+                            content = buildIncompleteTaskPrompt(
+                                task = task,
+                                reason = "TASK_TARGET_NOT_REPORTED_CHANGED"
+                            )
+                        )
+                    }
+                    activePurpose = HarnessModelPurpose.TOOL_FOLLOW_UP
+                }
+                if (!completed) {
+                    throw HarnessLimitException(
+                        "文件任务 ${task.path} 在 ${limits.maxTaskTurns} 次模型请求后仍未完成"
+                    )
+                }
+                traceLogger.record(
+                    runId = request.runId,
+                    component = "ORCHESTRATOR",
+                    operation = "file_task",
+                    status = HarnessTraceStatus.SUCCEEDED,
+                    message = "文件任务完成",
+                    iteration = iteration,
+                    durationMs = elapsedMillisSince(taskStartedAt),
+                    details = taskMetadata + mapOf("turns" to taskMessages.count {
+                        it.role == HarnessMessageRole.ASSISTANT && it.toolCalls.isNotEmpty()
+                    }.toString())
+                )
+            }
+            traceLogger.record(
+                runId = request.runId,
+                component = "ORCHESTRATOR",
+                operation = "scheduled_initial_generation",
+                status = HarnessTraceStatus.SUCCEEDED,
+                message = "确定性文件生成完成",
+                iteration = iteration,
+                durationMs = elapsedMillisSince(generationStartedAt),
+                details = mapOf(
+                    "task_count" to scheduledTasks.size.toString(),
+                    "total_model_turns" to totalModelTurns.toString(),
+                    "total_tool_calls" to totalToolCalls.toString()
+                )
+            )
+        }
+
         suspend fun runCheck(
             kind: HarnessCheckKind,
             runner: suspend (HarnessCheckRequest) -> HarnessCheckResult
@@ -495,6 +713,12 @@ class AppHarnessOrchestrator(
                 kind = kind,
                 iteration = iteration,
                 testScript = testScript,
+                acceptanceContract = request.acceptanceContract.takeIf {
+                    kind == HarnessCheckKind.TEST_SUITE
+                },
+                acceptanceRequired = kind == HarnessCheckKind.TEST_SUITE &&
+                    request.acceptanceRequired,
+                qualityGateContract = request.qualityGateContract,
                 metadata = request.metadata
             )
             val result = try {
@@ -557,7 +781,11 @@ class AppHarnessOrchestrator(
         }
 
         return try {
-            runCodingIteration(HarnessModelPurpose.INITIAL)
+            if (request.fileTasks.isEmpty()) {
+                runCodingIteration(HarnessModelPurpose.INITIAL)
+            } else {
+                runScheduledInitialGeneration()
+            }
             var gate = HarnessGate.DEVELOPMENT_BUILD
             var previousGate: HarnessGate? = null
             var transitionReason = "initial_generation_completed"
@@ -1123,6 +1351,82 @@ class AppHarnessOrchestrator(
         }.trimEnd()
     }
 
+    private fun buildFileTaskPrompt(
+        task: HarnessFileTask,
+        taskNumber: Int,
+        taskCount: Int
+    ): String {
+        return buildString {
+            appendLine("<harness_file_task>")
+            appendLine("任务：$taskNumber/$taskCount")
+            appendLine("唯一目标文件：${escapeTaskText(task.path)}")
+            if (task.description.isNotBlank()) {
+                appendLine("职责：${escapeTaskText(task.description)}")
+            }
+            if (task.dependsOn.isNotEmpty()) {
+                appendLine("直接依赖：${task.dependsOn.joinToString(", ") { escapeTaskText(it) }}")
+            }
+            if (task.criterionIds.isNotEmpty()) {
+                appendLine("负责验收项：${task.criterionIds.joinToString(", ") { escapeTaskText(it) }}")
+            }
+            appendLine("宿主已经确定顺序并注入 project.json 与直接依赖内容。")
+            appendLine("只允许读取 project.json、直接依赖或当前目标；只允许写入当前目标文件。")
+            appendLine("不要列目录、删除文件、修改 project.json 或写入其他路径。")
+            appendLine("现在返回写入当前目标文件的唯一动作；写入成功后宿主会自动结束本任务。")
+            append("</harness_file_task>")
+        }
+    }
+
+    private fun buildIncompleteTaskPrompt(task: HarnessFileTask, reason: String): String {
+        return buildString {
+            appendLine("<harness_file_task_feedback>")
+            appendLine("$reason: 目标文件 ${escapeTaskText(task.path)} 尚未成功写入。")
+            appendLine("本任务不能提前结束，也不能返回多个动作。")
+            appendLine("请只返回写入 ${escapeTaskText(task.path)} 的单个 mantou-write 动作。")
+            append("</harness_file_task_feedback>")
+        }
+    }
+
+    private fun taskPolicyFailure(
+        call: HarnessToolCall,
+        task: HarnessFileTask,
+        planPath: String?
+    ): HarnessToolResult? {
+        val requestedPath = call.arguments["path"]
+        val allowedReadPaths = buildSet {
+            planPath?.takeIf(String::isNotBlank)?.let(::add)
+            addAll(task.dependsOn)
+            add(task.path)
+        }
+        val allowed = when (call.name) {
+            TOOL_READ_FILE -> requestedPath in allowedReadPaths
+            TOOL_WRITE_FILE -> requestedPath == task.path
+            else -> false
+        }
+        if (allowed) return null
+        val diagnostic = "TASK_ACTION_FORBIDDEN: target=${task.path} " +
+            "requested=${call.name}:${requestedPath.orEmpty()}"
+        return HarnessToolResult(
+            callId = call.id,
+            success = false,
+            output = diagnostic,
+            diagnostics = listOf(diagnostic),
+            metadata = mapOf(
+                "policy_code" to "TASK_ACTION_FORBIDDEN",
+                "task_path" to task.path,
+                "requested_tool" to call.name,
+                "requested_path" to requestedPath.orEmpty()
+            )
+        )
+    }
+
+    private fun escapeTaskText(value: String): String {
+        return value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    }
+
     private data class RepairFeedback(
         val stage: GenerateTaskState.Stage,
         val operation: String,
@@ -1157,6 +1461,8 @@ class AppHarnessOrchestrator(
     }
 
     private companion object {
+        const val TOOL_READ_FILE = "read_file"
+        const val TOOL_WRITE_FILE = "write_file"
         const val MAX_STACK_TRACE_CHARS = 8_000
         const val SELF_TEST_BYPASS_OPERATION = "SELF_TEST_BYPASS"
         const val MAX_PROTOCOL_ERROR_CHARS = 1_000

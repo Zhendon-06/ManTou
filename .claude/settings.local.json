@@ -9,7 +9,8 @@
       "Bash(grep *)",
       "WebSearch",
       "Bash(dir D:\\\\AndroidProject\\\\ManTou\\\\app\\\\src\\\\main\\\\res\\\\drawable)",
-      "Bash(findstr /i \"webappicon ic_topic ic_menu\")"
+      "Bash(findstr /i \"webappicon ic_topic ic_menu\")",
+      "Bash(adb devices *)"
     ]
   }
 }

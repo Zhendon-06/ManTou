@@ -44,6 +44,40 @@ class WorkspaceFileOpenPolicyTest {
     }
 
     @Test
+    fun opensHtmlJsonAndGeneratedAppSourceInCodeViewer() {
+        listOf("index.html", "project.json", "styles/app.css", "scripts/app.js").forEach { fileName ->
+            assertEquals(
+                fileName,
+                WorkspaceFileOpenMode.CODE_VIEWER,
+                WorkspaceFileOpenPolicy.modeForWorkspacePath(
+                    "/workspace/generated_apps/demo/$fileName",
+                    fileName
+                )
+            )
+        }
+
+        assertEquals(
+            WorkspaceFileOpenMode.CODE_VIEWER,
+            WorkspaceFileOpenPolicy.modeForWorkspacePath("/workspace/other/index.html", "index.html")
+        )
+        assertEquals(
+            WorkspaceFileOpenMode.CODE_VIEWER,
+            WorkspaceFileOpenPolicy.modeForWorkspacePath("/workspace/memory/data.json", "data.json")
+        )
+        assertEquals(
+            WorkspaceFileOpenMode.TEXT,
+            WorkspaceFileOpenPolicy.modeForWorkspacePath("/workspace/other/styles.css", "styles.css")
+        )
+        assertEquals(
+            WorkspaceFileOpenMode.UNSUPPORTED,
+            WorkspaceFileOpenPolicy.modeForWorkspacePath(
+                "/workspace/generated_apps/demo/image.png",
+                "image.png"
+            )
+        )
+    }
+
+    @Test
     fun leavesBinaryFilesUnsupportedAndBuildsStableBadges() {
         listOf("photo.png", "font.woff2", "module.wasm", "archive.zip").forEach { fileName ->
             assertEquals(

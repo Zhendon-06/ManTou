@@ -28,6 +28,17 @@
 
     <style name="Theme.ManTou" parent="Base.Theme.ManTou" />
 
+    <style name="Theme.ManTou.CodeViewer" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/mt_generate_surface</item>
+        <item name="android:colorBackground">@color/mt_generate_surface</item>
+        <item name="android:statusBarColor">@color/mt_generate_surface</item>
+        <item name="android:navigationBarColor">@color/mt_generate_surface</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">false</item>
+    </style>
+
     <style name="ShapeAppearance.ManTou.Dialog" parent="">
         <item name="cornerFamily">rounded</item>
         <item name="cornerSize">24dp</item>

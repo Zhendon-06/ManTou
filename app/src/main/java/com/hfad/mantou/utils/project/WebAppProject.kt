@@ -27,7 +27,10 @@ data class WebAppProjectFile(
     val path: String,
     val role: WebAppProjectFileRole = WebAppProjectFileRole.OTHER,
     val required: Boolean = true,
-    val sha256: String? = null
+    val sha256: String? = null,
+    val description: String = "",
+    val dependsOn: List<String> = emptyList(),
+    val ownsCriteria: List<String> = emptyList()
 )
 
 data class WebAppProjectManifest(
@@ -36,7 +39,8 @@ data class WebAppProjectManifest(
     val displayName: String,
     val entryPoint: String = DEFAULT_ENTRY_POINT,
     val stateFile: String? = null,
-    val files: List<WebAppProjectFile> = emptyList()
+    val files: List<WebAppProjectFile> = emptyList(),
+    val appSpec: WebAppSpec? = null
 ) {
     companion object {
         const val CURRENT_SCHEMA_VERSION = 1
@@ -121,11 +125,24 @@ object WebAppProjectManifestCodec {
 
     fun read(file: File): WebAppProjectManifest {
         if (!file.isFile) throw WebAppProjectException("Project manifest does not exist: ${file.path}")
-        val manifest = runCatching {
+        val decoded = runCatching {
             gson.fromJson(file.readText(), WebAppProjectManifest::class.java)
         }.getOrElse { error ->
             throw WebAppProjectException("Unable to read project manifest: ${file.path}", error)
         } ?: throw WebAppProjectException("Project manifest is empty: ${file.path}")
+        val manifest = runCatching {
+            decoded.copy(
+                files = decoded.files.orEmpty().map { projectFile ->
+                    projectFile.copy(
+                        description = projectFile.description.orEmpty(),
+                        dependsOn = projectFile.dependsOn.orEmpty(),
+                        ownsCriteria = projectFile.ownsCriteria.orEmpty()
+                    )
+                }
+            )
+        }.getOrElse { error ->
+            throw WebAppProjectException("Project manifest is invalid: ${file.path}", error)
+        }
         val diagnostics = runCatching { WebAppProjectValidator.validateManifest(manifest) }
             .getOrElse { error ->
                 throw WebAppProjectException("Project manifest is invalid: ${file.path}", error)
@@ -1272,6 +1289,7 @@ class WebAppProjectValidator(
                     message = "ENTRY file role must match entryPoint exactly"
                 )
             }
+            diagnostics += WebAppSpecValidator.validate(manifest)
             return diagnostics
         }
 

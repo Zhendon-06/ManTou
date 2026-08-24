@@ -278,9 +278,12 @@ class WebViewHarnessInspectorAdapter(
                 requestInterceptor = requestInterceptor
             )
 
-            HarnessCheckKind.TEST_SUITE -> inspector.runTestSuite(
+            HarnessCheckKind.TEST_SUITE -> inspector.runQualityGateSuite(
                 target = target,
-                testScript = request.testScript.orEmpty(),
+                qualityGateContract = request.qualityGateContract,
+                acceptanceContract = request.acceptanceContract,
+                acceptanceRequired = request.acceptanceRequired,
+                evidenceRunId = "${request.runId}-iteration-${request.iteration}",
                 requestInterceptor = requestInterceptor
             )
 
@@ -350,7 +353,13 @@ class WebViewHarnessInspectorAdapter(
             WebInspectionStage.TEST_SUITE -> "WebView 测试集"
         }
         val reportSummary = if (passed) {
-            "${label}通过${selfTests.takeIf { it.isNotEmpty() }?.let { "（${it.size} 项）" }.orEmpty()}"
+            buildString {
+                append(label).append("通过")
+                selfTests.takeIf { it.isNotEmpty() }?.let { append("（${it.size} 项）") }
+                visualEvidence.takeIf { it.isNotEmpty() }?.let {
+                    append("，已采集 ${it.size} 份视觉证据")
+                }
+            }
         } else {
             buildString {
                 append(label).append("失败")
@@ -365,7 +374,11 @@ class WebViewHarnessInspectorAdapter(
         return HarnessCheckResult(
             passed = passed,
             summary = summary,
-            diagnostics = (extraDiagnostics + diagnostics.map(::formatDiagnostic)).distinct(),
+            diagnostics = (
+                extraDiagnostics +
+                    diagnostics.map(::formatDiagnostic) +
+                    visualEvidence.map(::formatVisualEvidence)
+                ).distinct(),
             artifactPath = artifactPath,
             durationMs = durationMillis
         )
@@ -385,6 +398,19 @@ class WebViewHarnessInspectorAdapter(
             diagnostic.stackTrace?.takeIf { it.isNotBlank() }?.let { stack ->
                 append('\n').append(stack)
             }
+        }
+    }
+
+    private fun formatVisualEvidence(evidence: WebVisualEvidence): String {
+        return buildString {
+            append("VISUAL_EVIDENCE ")
+            append(evidence.viewportId).append('/').append(evidence.visualStateId)
+            append(": css=").append(evidence.widthCssPixels).append('x')
+                .append(evidence.heightCssPixels)
+            append(", pixels=").append(evidence.screenshotPixelWidth ?: "missing").append('x')
+                .append(evidence.screenshotPixelHeight ?: "missing")
+            append(", sha256=").append(evidence.screenshotSha256 ?: "missing")
+            append(", path=").append(evidence.screenshotArtifactPath ?: "missing")
         }
     }
 
@@ -416,6 +442,11 @@ class WebViewHarnessInspectorAdapter(
                 "case_count" to report.selfTests.size.toString(),
                 "case_passed" to (report.selfTests.size - failedCases).toString(),
                 "case_failed" to failedCases.toString(),
+                "visual_evidence_count" to report.visualEvidence.size.toString(),
+                "visual_evidence_viewports" to report.visualEvidence
+                    .map(WebVisualEvidence::viewportId)
+                    .distinct()
+                    .joinToString(","),
                 "report_passed" to report.passed.toString(),
                 "final_passed" to result.passed.toString(),
                 "diagnostic_codes" to report.diagnostics
