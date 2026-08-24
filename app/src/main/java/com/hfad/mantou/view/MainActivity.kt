@@ -1,6 +1,7 @@
 package com.hfad.mantou.view
 
 import android.content.Intent
+import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -13,12 +14,14 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.drawerlayout.widget.DrawerLayout
 import com.hfad.mantou.R
 import com.hfad.mantou.service.HarnessForegroundService
+import com.hfad.mantou.view.glass.GlassHandle
 import com.hfad.mantou.view.glass.LiquidGlass
 
 class MainActivity : AppCompatActivity() {
 
     lateinit var drawerLayout: DrawerLayout
         private set
+    private var glassHandle: GlassHandle? = null
     private var useDarkStatusBarIcons = true
     private var useDarkNavigationBarIcons = true
 
@@ -59,20 +62,33 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        val glassHandle = LiquidGlass.install(this, drawerLayout)
-        drawerLayout.addDrawerListener(object : DrawerLayout.SimpleDrawerListener() {
-            override fun onDrawerSlide(drawerView: android.view.View, slideOffset: Float) {
-                glassHandle.refresh()
-            }
+        drawerLayout.post {
+            if (isFinishing || isDestroyed) return@post
+            glassHandle = LiquidGlass.install(this, drawerLayout)
+            drawerLayout.addDrawerListener(object : DrawerLayout.SimpleDrawerListener() {
+                override fun onDrawerSlide(drawerView: android.view.View, slideOffset: Float) {
+                    glassHandle?.refresh()
+                }
 
-            override fun onDrawerOpened(drawerView: android.view.View) {
-                glassHandle.refresh()
-            }
+                override fun onDrawerOpened(drawerView: android.view.View) {
+                    glassHandle?.refresh()
+                }
 
-            override fun onDrawerClosed(drawerView: android.view.View) {
-                glassHandle.refresh()
-            }
-        })
+                override fun onDrawerClosed(drawerView: android.view.View) {
+                    glassHandle?.refresh()
+                }
+            })
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        ViewCompat.requestApplyInsets(findViewById(R.id.main))
+        ViewCompat.requestApplyInsets(findViewById(R.id.drawerMenu))
+        drawerLayout.post {
+            applySystemBarIconAppearance()
+            glassHandle?.refresh()
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

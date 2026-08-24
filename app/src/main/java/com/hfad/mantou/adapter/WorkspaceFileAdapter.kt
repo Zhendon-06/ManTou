@@ -9,6 +9,7 @@ import androidx.core.graphics.ColorUtils
 import androidx.recyclerview.widget.RecyclerView
 import com.hfad.mantou.R
 import com.hfad.mantou.databinding.ItemWorkspaceNodeBinding
+import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.WorkspaceNode
 import java.util.Locale
 
@@ -150,6 +151,7 @@ class WorkspaceFileAdapter(
 }
 
 internal enum class WorkspaceFileOpenMode {
+    CODE_VIEWER,
     WEB_APP,
     JSON,
     TEXT,
@@ -174,6 +176,18 @@ internal object WorkspaceFileOpenPolicy {
             "json" -> WorkspaceFileOpenMode.JSON
             in textExtensions -> WorkspaceFileOpenMode.TEXT
             else -> WorkspaceFileOpenMode.UNSUPPORTED
+        }
+    }
+
+    fun modeForWorkspacePath(displayPath: String, fileName: String): WorkspaceFileOpenMode {
+        val defaultMode = modeFor(fileName)
+        val generatedAppPrefix = "/workspace/${AgentWorkspace.WEB_DIR}/"
+        return when {
+            defaultMode == WorkspaceFileOpenMode.WEB_APP -> WorkspaceFileOpenMode.CODE_VIEWER
+            defaultMode == WorkspaceFileOpenMode.JSON -> WorkspaceFileOpenMode.CODE_VIEWER
+            displayPath.startsWith(generatedAppPrefix) &&
+                defaultMode == WorkspaceFileOpenMode.TEXT -> WorkspaceFileOpenMode.CODE_VIEWER
+            else -> defaultMode
         }
     }
 

@@ -1,6 +1,14 @@
 package com.hfad.mantou.utils.harness
 
 import com.hfad.mantou.utils.GenerationInputFilter
+import com.hfad.mantou.utils.project.WebAppAcceptanceContract
+
+data class HarnessFileTask(
+    val path: String,
+    val description: String = "",
+    val dependsOn: List<String> = emptyList(),
+    val criterionIds: List<String> = emptyList()
+)
 
 data class HarnessRunRequest(
     val runId: String,
@@ -10,6 +18,11 @@ data class HarnessRunRequest(
     val artifactPath: String? = null,
     val selfTestScript: String? = null,
     val testSuiteScript: String? = null,
+    val acceptanceContract: WebAppAcceptanceContract? = null,
+    val acceptanceRequired: Boolean = false,
+    val qualityGateContract: WebQualityGateContract = WebQualityGateContract(),
+    val planPath: String? = null,
+    val fileTasks: List<HarnessFileTask> = emptyList(),
     val metadata: Map<String, String> = emptyMap()
 )
 
@@ -122,6 +135,9 @@ data class HarnessCheckRequest(
     val kind: HarnessCheckKind,
     val iteration: Int,
     val testScript: String? = null,
+    val acceptanceContract: WebAppAcceptanceContract? = null,
+    val acceptanceRequired: Boolean = false,
+    val qualityGateContract: WebQualityGateContract = WebQualityGateContract(),
     val metadata: Map<String, String> = emptyMap()
 )
 
@@ -147,6 +163,7 @@ fun interface HarnessTestRunner {
 
 data class HarnessLimits(
     val maxCodeIterations: Int = 8,
+    val maxTaskTurns: Int = 12,
     val maxSelfTestFailuresBeforeBypass: Int = 2,
     val maxModelRequestRetries: Int = 2,
     val modelRetryBaseDelayMs: Long = 600,
@@ -156,6 +173,7 @@ data class HarnessLimits(
 ) {
     init {
         require(maxCodeIterations > 0)
+        require(maxTaskTurns > 0)
         require(maxSelfTestFailuresBeforeBypass > 0)
         require(maxModelRequestRetries in 0..MAX_MODEL_REQUEST_RETRIES)
         require(modelRetryBaseDelayMs >= 0)

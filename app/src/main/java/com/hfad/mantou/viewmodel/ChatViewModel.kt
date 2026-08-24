@@ -9,9 +9,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.viewModelScope
-import com.google.gson.GsonBuilder
-import com.google.gson.JsonArray
-import com.google.gson.JsonObject
 import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.data.GenerateTaskState
 import com.hfad.mantou.data.SessionTokenUsage
@@ -53,6 +50,7 @@ import com.hfad.mantou.utils.harness.GeneratedAppHarnessScripts
 import com.hfad.mantou.utils.harness.GeneratedAppWebViewInspector
 import com.hfad.mantou.utils.harness.HarnessBuilder
 import com.hfad.mantou.utils.harness.HarnessCheckResult
+import com.hfad.mantou.utils.harness.HarnessFileTask
 import com.hfad.mantou.utils.harness.HarnessFileTool
 import com.hfad.mantou.utils.harness.HarnessLimits
 import com.hfad.mantou.utils.harness.HarnessRunRequest
@@ -62,7 +60,9 @@ import com.hfad.mantou.utils.harness.StreamingHarnessModelRepair
 import com.hfad.mantou.utils.harness.WebInspectionReport
 import com.hfad.mantou.utils.harness.WebInspectionEvent
 import com.hfad.mantou.utils.harness.WebInspectionTarget
+import com.hfad.mantou.utils.harness.WebQualityGateContract
 import com.hfad.mantou.utils.harness.WebViewHarnessInspectorAdapter
+import com.hfad.mantou.utils.harness.withDesignRequirements
 import com.hfad.mantou.utils.project.StreamingWebProjectPlanner
 import com.hfad.mantou.utils.project.WebAppProjectFileRole
 import com.hfad.mantou.utils.project.WebAppProjectManifest
@@ -71,8 +71,9 @@ import com.hfad.mantou.utils.project.WebAppProjectSnapshot
 import com.hfad.mantou.utils.project.WebAppProjectSnapshotKind
 import com.hfad.mantou.utils.project.WebAppProjectWorkspace
 import com.hfad.mantou.utils.project.WebAppProjectValidator
+import com.hfad.mantou.utils.project.WebAppSpecPolicy
 import com.hfad.mantou.utils.project.WebProjectFileTool
-import com.hfad.mantou.utils.project.WebProjectPlanParser
+import com.hfad.mantou.utils.project.WebProjectPlanCodec
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1118,6 +1119,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         artifactPath = binding.entryFile.absolutePath,
                         selfTestScript = GeneratedAppHarnessScripts.selfTest,
                         testSuiteScript = GeneratedAppHarnessScripts.testSuite,
+                        acceptanceContract = binding.manifest.appSpec?.acceptanceContract,
+                        acceptanceRequired = binding.manifest.appSpec != null,
+                        qualityGateContract = binding.manifest.appSpec?.design?.let { design ->
+                            WebQualityGateContract().withDesignRequirements(
+                                viewportWidths = design.viewportWidths,
+                                minTouchTargetCssPixels = design.minTouchTargetPx
+                            )
+                        } ?: WebQualityGateContract(),
+                        planPath = PROJECT_PLAN_FILE_NAME.takeUnless { isModification },
+                        fileTasks = if (isModification) {
+                            emptyList()
+                        } else {
+                            binding.manifest.files
+                                .filterNot { it.path == PROJECT_PLAN_FILE_NAME }
+                                .map { file ->
+                                    HarnessFileTask(
+                                        path = file.path,
+                                        description = file.description,
+                                        dependsOn = file.dependsOn.filterNot {
+                                            it == PROJECT_PLAN_FILE_NAME
+                                        },
+                                        criterionIds = file.ownsCriteria
+                                    )
+                                }
+                        },
                         metadata = mapOf("projectId" to binding.manifest.projectId)
                     )
                 ) { event ->
@@ -1474,7 +1500,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             .takeIf(File::isFile)
             ?.let { planFile ->
                 runCatching {
-                    WebProjectPlanParser.parse(planFile.readText()).manifest.copy(
+                    WebProjectPlanCodec.parse(planFile.readText()).manifest.copy(
                         projectId = draft.manifest.projectId,
                         stateFile = draft.manifest.stateFile
                     )
@@ -1483,10 +1509,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ?.takeIf { manifest ->
                 manifest.entryPoint == draft.manifest.entryPoint &&
                     manifest.files.any { it.role == WebAppProjectFileRole.STYLE } &&
-                    manifest.files.any { it.role == WebAppProjectFileRole.SCRIPT }
+                    manifest.files.any { it.role == WebAppProjectFileRole.SCRIPT } &&
+                    preservesHostOwnedAppSpec(draft.manifest, manifest)
             }
 
-        val manifest = parsedManifest ?: buildMigrationManifest(draft, fileTool)
+        val manifest = parsedManifest
+            ?: draft.manifest.takeIf { it.appSpec != null }
+            ?: buildMigrationManifest(draft, fileTool)
         val planJson = renderVisibleProjectPlan(manifest)
         if (!visiblePlan.isFile || visiblePlan.readText() != planJson) {
             fileTool.write(PROJECT_PLAN_FILE_NAME, planJson)
@@ -1691,7 +1720,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
         val parsedManifest = runCatching {
-            WebProjectPlanParser.parse(content).manifest.copy(
+            WebProjectPlanCodec.parse(content).manifest.copy(
                 projectId = binding.manifest.projectId,
                 stateFile = binding.manifest.stateFile
             )
@@ -1719,6 +1748,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
         }
+        if (!preservesHostOwnedAppSpec(binding.manifest, parsedManifest)) {
+            return com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
+                success = false,
+                output = "当前任务不能删除或改写宿主已有的 AppSpec",
+                diagnostics = listOf("PROJECT_APP_SPEC_CHANGE_FORBIDDEN"),
+                metadata = toolPolicyMetadata(
+                    tool = WebProjectFileTool.TOOL_WRITE_FILE,
+                    path = PROJECT_PLAN_FILE_NAME,
+                    policyCode = "PROJECT_APP_SPEC_CHANGE_FORBIDDEN"
+                )
+            )
+        }
 
         val writeResult = projectFileTool.execute(
             WebProjectFileTool.TOOL_WRITE_FILE,
@@ -1734,14 +1775,27 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         projectFileTool: WebProjectFileTool
     ) {
         val planContent = projectFileTool.read(PROJECT_PLAN_FILE_NAME).content
-        val parsedManifest = WebProjectPlanParser.parse(planContent).manifest.copy(
+        val parsedManifest = WebProjectPlanCodec.parse(planContent).manifest.copy(
             projectId = binding.manifest.projectId,
             stateFile = binding.manifest.stateFile
         )
         require(parsedManifest.entryPoint == binding.manifest.entryPoint) {
             "项目入口在发布前发生变化"
         }
+        require(preservesHostOwnedAppSpec(binding.manifest, parsedManifest)) {
+            "宿主已有的 AppSpec 在发布前发生变化"
+        }
         binding.manifest = parsedManifest
+    }
+
+    private fun preservesHostOwnedAppSpec(
+        baseline: WebAppProjectManifest,
+        candidate: WebAppProjectManifest
+    ): Boolean {
+        return WebAppSpecPolicy.preservesBaseline(
+            baseline = baseline.appSpec,
+            candidate = candidate.appSpec
+        )
     }
 
     private fun ensureProjectEntryIdentity(
@@ -1900,24 +1954,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun renderVisibleProjectPlan(manifest: WebAppProjectManifest): String {
-        val root = JsonObject().apply {
-            addProperty("schemaVersion", manifest.schemaVersion)
-            addProperty("name", manifest.displayName)
-            addProperty("entry", manifest.entryPoint)
-            add("files", JsonArray().apply {
-                manifest.files
-                    .asSequence()
-                    .filterNot { it.path == PROJECT_PLAN_FILE_NAME }
-                    .forEach { file ->
-                        add(JsonObject().apply {
-                            addProperty("path", file.path)
-                            addProperty("role", file.role.visiblePlanRole())
-                            addProperty("description", file.role.defaultDescription())
-                        })
-                    }
-            })
-        }
-        return WEB_PROJECT_PLAN_GSON.toJson(root) + "\n"
+        return WebProjectPlanCodec.render(manifest)
     }
 
     private fun projectRoleForPath(path: String): WebAppProjectFileRole {
@@ -1930,28 +1967,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 WebAppProjectFileRole.ASSET
             }
             else -> WebAppProjectFileRole.OTHER
-        }
-    }
-
-    private fun WebAppProjectFileRole.visiblePlanRole(): String {
-        return when (this) {
-            WebAppProjectFileRole.ENTRY -> "entry"
-            WebAppProjectFileRole.STYLE -> "style"
-            WebAppProjectFileRole.SCRIPT -> "script"
-            WebAppProjectFileRole.DATA -> "data"
-            WebAppProjectFileRole.ASSET -> "asset"
-            WebAppProjectFileRole.OTHER -> "other"
-        }
-    }
-
-    private fun WebAppProjectFileRole.defaultDescription(): String {
-        return when (this) {
-            WebAppProjectFileRole.ENTRY -> "页面语义结构与本地资源入口"
-            WebAppProjectFileRole.STYLE -> "视觉系统、布局与响应式样式"
-            WebAppProjectFileRole.SCRIPT -> "应用状态、交互逻辑与自测"
-            WebAppProjectFileRole.DATA -> "只读种子数据或项目配置"
-            WebAppProjectFileRole.ASSET -> "项目本地静态资源"
-            WebAppProjectFileRole.OTHER -> "项目辅助文件"
         }
     }
 
@@ -4679,11 +4694,6 @@ private const val WEB_PROJECT_PLAN_MAX_TOKENS = 8_000
 private const val WEB_PROJECT_MAX_PLANNED_FILES = 24
 private const val WEB_PROJECT_DIRECTORY_NAME_MAX_CHARS = 64
 private const val WEB_PROJECT_DIRECTORY_ID_CHARS = 8
-private val WEB_PROJECT_PLAN_GSON = GsonBuilder()
-    .setPrettyPrinting()
-    .disableHtmlEscaping()
-    .create()
-
 private data class PreparedWebProject(
     val workspace: WebAppProjectWorkspace,
     val snapshot: WebAppProjectSnapshot

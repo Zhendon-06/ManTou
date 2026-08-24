@@ -43,8 +43,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnNextLayout
 import androidx.core.view.updatePadding
 import androidx.core.widget.TextViewCompat
 import androidx.fragment.app.Fragment
@@ -92,6 +94,7 @@ import com.hfad.mantou.utils.WorkspaceNode
 import com.hfad.mantou.view.glass.LiquidGlass
 import com.hfad.mantou.viewmodel.ChatViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -170,6 +173,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var currentGenerateTaskState: GenerateTaskState? = null
     private var codeEditorDialog: Dialog? = null
     private var codeEditorBinding: DialogGenerateCodeEditorBinding? = null
+    private var codeEditorSource: CodeEditorSource? = null
+    private var actionMenuDialog: Dialog? = null
     private var drawerSearchQuery: String = ""
     private var showArchivedSessions: Boolean = false
     private var adaptiveTextColor: Int = Color.rgb(32, 37, 53)
@@ -252,11 +257,13 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             if (hasFocus) {
                 enterInputActiveState()
             } else if (isInputActive) {
-                view.postDelayed({
-                    if (!chatBinding.etInput.hasFocus()) {
+                viewLifecycleOwner.lifecycleScope.launch {
+                    delay(100)
+                    val currentChatBinding = _chatBinding ?: return@launch
+                    if (!currentChatBinding.etInput.hasFocus()) {
                         switchToIdleState()
                     }
-                }, 100)
+                }
             }
         }
 
@@ -748,7 +755,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             return
         }
 
-        when (WorkspaceFileOpenPolicy.modeFor(file.name)) {
+        when (WorkspaceFileOpenPolicy.modeForWorkspacePath(node.displayPath, file.name)) {
+            WorkspaceFileOpenMode.CODE_VIEWER -> openWorkspaceCodeViewer(file)
             WorkspaceFileOpenMode.WEB_APP -> {
                 val intent = Intent(requireContext(), VirtualAppActivity::class.java).apply {
                     putExtra(VirtualAppActivity.EXTRA_HTML_PATH, file.absolutePath)
@@ -762,11 +770,32 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 startActivity(intent)
             }
             WorkspaceFileOpenMode.TEXT -> openTextFileEditor(file)
-            WorkspaceFileOpenMode.UNSUPPORTED -> {
-                val typeName = file.extension.ifBlank { "该" }
-                Toast.makeText(requireContext(), "暂不支持打开 $typeName 类型文件", Toast.LENGTH_SHORT).show()
-            }
+            WorkspaceFileOpenMode.UNSUPPORTED -> showUnsupportedWorkspaceFile(file)
         }
+    }
+
+    private fun openWorkspaceCodeViewer(file: File) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val contentResult = withContext(Dispatchers.IO) {
+                runCatching { file.readText() }
+            }
+            val content = contentResult.getOrElse {
+                Toast.makeText(requireContext(), "读取失败: ${it.message}", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            showCodeViewer(
+                source = CodeEditorSource.WORKSPACE_FILE,
+                title = file.name,
+                status = codePreviewMetadata(file.name, content),
+                language = codePreviewLanguage(file.name),
+                content = content
+            )
+        }
+    }
+
+    private fun showUnsupportedWorkspaceFile(file: File) {
+        val typeName = file.extension.ifBlank { "该" }
+        Toast.makeText(requireContext(), "暂不支持打开 $typeName 类型文件", Toast.LENGTH_SHORT).show()
     }
 
     private fun openTextFileEditor(file: File) {
@@ -1325,6 +1354,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         rvSessions?.apply {
             layoutManager = LinearLayoutManager(requireContext())
             adapter = sessionAdapter
+            itemAnimator = null
         }
         refreshDrawerSessionList()
     }
@@ -1371,7 +1401,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         archiveButton?.contentDescription = if (showArchivedSessions) "返回最近对话" else "查看归档"
 
         sessionAdapter.setRunningSessionIds(runningSessionIds)
-        sessionAdapter.submitList(visibleSessions)
+        val shouldRefreshGlass = sessionAdapter.currentList != visibleSessions
+        sessionAdapter.submitList(visibleSessions) {
+            if (!shouldRefreshGlass) return@submitList
+            val drawerRoot = drawerMenu ?: return@submitList
+            val sessionsView = drawerRoot.findViewById<RecyclerView>(R.id.rvSessions)
+            sessionsView.doOnNextLayout {
+                LiquidGlass.refresh(drawerRoot)
+            }
+        }
     }
 
     /**
@@ -1554,31 +1592,33 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private fun showActionMenu(items: List<ActionMenuItem>) {
         if (items.isEmpty()) return
 
-        val dialog = Dialog(requireContext()).apply {
+        val hostActivity = activity?.takeUnless { it.isFinishing || it.isDestroyed } ?: return
+        actionMenuDialog?.dismiss()
+
+        val dialog = Dialog(hostActivity).apply {
             requestWindowFeature(Window.FEATURE_NO_TITLE)
+            setCanceledOnTouchOutside(true)
         }
         val density = resources.displayMetrics.density
-        val menu = LinearLayout(requireContext()).apply {
+        val menu = LinearLayout(hostActivity).apply {
             orientation = LinearLayout.VERTICAL
-            background = ColorDrawable(Color.TRANSPARENT)
-            tag = "glass:sheet"
+            background = ContextCompat.getDrawable(hostActivity, R.drawable.bg_action_menu)
         }
 
         items.forEachIndexed { index, item ->
-            val row = LinearLayout(requireContext()).apply {
-                tag = "glass:button"
+            val row = LinearLayout(hostActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(24), 0, dp(24), 0)
                 minimumHeight = dp(72)
-                foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
+                foreground = ContextCompat.getDrawable(hostActivity, selectableItemBackgroundRes())
                 setOnClickListener {
                     dialog.dismiss()
                     item.onClick()
                 }
             }
 
-            val icon = ImageView(requireContext()).apply {
+            val icon = ImageView(hostActivity).apply {
                 setImageResource(item.iconRes)
                 colorFilter = android.graphics.PorterDuffColorFilter(
                     Color.rgb(17, 24, 39),
@@ -1590,7 +1630,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 LinearLayout.LayoutParams(dp(30), dp(30))
             )
 
-            val label = TextView(requireContext()).apply {
+            val label = TextView(hostActivity).apply {
                 text = item.label
                 textSize = 22f
                 setTextColor(Color.rgb(17, 24, 39))
@@ -1617,8 +1657,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
             if (index != items.lastIndex) {
                 menu.addView(
-                    View(requireContext()).apply {
-                        background = ContextCompat.getDrawable(requireContext(), R.drawable.bg_action_menu_divider)
+                    View(hostActivity).apply {
+                        background = ContextCompat.getDrawable(hostActivity, R.drawable.bg_action_menu_divider)
                     },
                     LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1629,23 +1669,24 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
 
         dialog.setContentView(menu)
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setWindowAnimations(R.style.MtDialogAnimation)
-            setLayout(
-                (resources.displayMetrics.widthPixels * 0.72f).toInt(),
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            )
+        dialog.setOnDismissListener {
+            if (actionMenuDialog === dialog) {
+                actionMenuDialog = null
+            }
         }
+        actionMenuDialog = dialog
         dialog.show()
-        LiquidGlass.decorate(dialog)
+        configureFloatingGlassWindow(
+            dialog = dialog,
+            width = (resources.displayMetrics.widthPixels * 0.72f).toInt(),
+            height = ViewGroup.LayoutParams.WRAP_CONTENT,
+            blurRadiusDp = 14,
+            dimAmount = 0.16f
+        )
     }
 
     private fun decorateAlertDialog(dialog: androidx.appcompat.app.AlertDialog) {
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEGATIVE)?.tag = "glass:button"
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL)?.tag = "glass:button"
-        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)?.tag = "glass:accent"
-        LiquidGlass.decorate(dialog)
+        dialog.window?.setWindowAnimations(R.style.MtDialogAnimation)
     }
 
     private fun glassDialogSurface(radiusDp: Float): GradientDrawable {
@@ -1889,7 +1930,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         currentGenerateTaskState = taskState
         if (!hasCodePreview) {
             chatBinding.generateCodeCard.visibility = View.GONE
-            codeEditorDialog?.dismiss()
+            if (codeEditorSource == CodeEditorSource.GENERATION) {
+                codeEditorDialog?.dismiss()
+            }
             if (visibilityChanged) updateChatListScrollBoundary()
             if (shouldKeepLatestMessageVisible) scrollChatToBottom()
             return
@@ -1931,14 +1974,21 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             ?: "HTML"
     }
 
+    private fun codePreviewLanguage(fileName: String): String {
+        return fileName.substringAfterLast('.', missingDelimiterValue = "")
+            .takeIf(String::isNotBlank)
+            ?.uppercase(Locale.ROOT)
+            ?: "TEXT"
+    }
+
     private fun codePreviewMetadata(taskState: GenerateTaskState): String {
-        val code = taskState.code
+        return codePreviewMetadata(taskState.activeFilePath, taskState.code)
+    }
+
+    private fun codePreviewMetadata(label: String?, code: String): String {
         val lineCount = if (code.isEmpty()) 0 else code.count { it == '\n' } + 1
         val metrics = "$lineCount 行 · ${code.length} 字符"
-        return taskState.activeFilePath
-            ?.takeIf(String::isNotBlank)
-            ?.let { "$it · $metrics" }
-            ?: metrics
+        return label?.takeIf(String::isNotBlank)?.let { "$it · $metrics" } ?: metrics
     }
 
     private fun buildGenerateCodePreview(taskState: GenerateTaskState): String {
@@ -1963,33 +2013,58 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun showGenerateCodeEditor() {
         val taskState = currentGenerateTaskState ?: return
-        if (codeEditorDialog?.isShowing == true) {
+        if (codeEditorDialog?.isShowing == true && codeEditorSource == CodeEditorSource.GENERATION) {
             updateGenerateCodeEditor(taskState)
             return
         }
 
+        val title = taskState.activeFilePath
+            ?.takeIf(String::isNotBlank)
+            ?: taskState.filePath
+                ?.let(::File)
+                ?.name
+                ?.takeIf(String::isNotBlank)
+            ?: if (taskState.isModification) "应用修改.diff" else "生成应用.html"
+        showCodeViewer(
+            source = CodeEditorSource.GENERATION,
+            title = title,
+            status = codePreviewMetadata(taskState),
+            language = codePreviewLanguage(taskState),
+            content = taskState.code
+        )
+    }
+
+    private fun showCodeViewer(
+        source: CodeEditorSource,
+        title: String,
+        status: String,
+        language: String,
+        content: String
+    ) {
+        codeEditorDialog?.dismiss()
         val editorBinding = DialogGenerateCodeEditorBinding.inflate(layoutInflater)
-        val dialog = Dialog(requireContext(), android.R.style.Theme_Material_NoActionBar_Fullscreen)
+        val dialog = Dialog(requireContext(), R.style.Theme_ManTou_CodeViewer)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(editorBinding.root)
         editorBinding.btnCloseCodeEditor.setOnClickListener { dialog.dismiss() }
         dialog.setOnDismissListener {
-            codeEditorBinding = null
-            codeEditorDialog = null
+            if (codeEditorDialog === dialog) {
+                codeEditorBinding = null
+                codeEditorDialog = null
+                codeEditorSource = null
+            }
         }
         codeEditorBinding = editorBinding
         codeEditorDialog = dialog
+        codeEditorSource = source
         editorBinding.tvCodeEditorLines.bindTo(editorBinding.tvCodeEditorContent)
+        bindCodeViewer(editorBinding, title, status, language, content)
         dialog.show()
-        dialog.window?.apply {
-            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            statusBarColor = ContextCompat.getColor(requireContext(), R.color.mt_generate_surface)
-            navigationBarColor = ContextCompat.getColor(requireContext(), R.color.mt_generate_surface)
-        }
-        updateGenerateCodeEditor(taskState)
+        configureCodeViewerWindow(dialog, editorBinding)
     }
 
     private fun updateGenerateCodeEditor(taskState: GenerateTaskState) {
+        if (codeEditorSource != CodeEditorSource.GENERATION) return
         val editorBinding = codeEditorBinding ?: return
         if (codeEditorDialog?.isShowing != true) return
 
@@ -2000,11 +2075,61 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             ?.name
             ?.takeIf(String::isNotBlank)
             ?: if (taskState.isModification) "应用修改.diff" else "生成应用.html"
-        editorBinding.tvCodeEditorTitle.text = title
-        editorBinding.tvCodeEditorStatus.text = codePreviewMetadata(taskState)
-        editorBinding.tvCodeEditorLanguage.text = codePreviewLanguage(taskState)
-        editorBinding.tvCodeEditorContent.text = taskState.code
-        editorBinding.tvCodeEditorLines.refreshLineNumbers()
+        bindCodeViewer(
+            binding = editorBinding,
+            title = title,
+            status = codePreviewMetadata(taskState),
+            language = codePreviewLanguage(taskState),
+            content = taskState.code
+        )
+    }
+
+    private fun bindCodeViewer(
+        binding: DialogGenerateCodeEditorBinding,
+        title: String,
+        status: String,
+        language: String,
+        content: String
+    ) {
+        binding.tvCodeEditorTitle.text = title
+        binding.tvCodeEditorStatus.text = status
+        binding.tvCodeEditorLanguage.text = language
+        binding.tvCodeEditorContent.text = content
+        binding.tvCodeEditorLines.refreshLineNumbers()
+    }
+
+    private fun configureCodeViewerWindow(
+        dialog: Dialog,
+        binding: DialogGenerateCodeEditorBinding
+    ) {
+        val window = dialog.window ?: return
+        val surfaceColor = ContextCompat.getColor(requireContext(), R.color.mt_generate_surface)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        window.setBackgroundDrawable(ColorDrawable(surfaceColor))
+        window.statusBarColor = surfaceColor
+        window.navigationBarColor = surfaceColor
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
+            val safeInsets = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+            )
+            view.setPadding(
+                safeInsets.left,
+                safeInsets.top,
+                safeInsets.right,
+                safeInsets.bottom
+            )
+            insets
+        }
+        ViewCompat.requestApplyInsets(binding.root)
     }
 
     private fun openImagePicker() {
@@ -3368,9 +3493,12 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     override fun onDestroyView() {
+        actionMenuDialog?.dismiss()
+        actionMenuDialog = null
         codeEditorDialog?.dismiss()
         codeEditorBinding = null
         codeEditorDialog = null
+        codeEditorSource = null
         super.onDestroyView()
         cancelVoiceInput()
         CameraPhotoBridge.detach(this)
@@ -3415,6 +3543,11 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val position: Int,
         val topOffset: Int
     )
+
+    private enum class CodeEditorSource {
+        GENERATION,
+        WORKSPACE_FILE
+    }
 
     private data class ModelProviderGroup(
         val provider: ProviderEntity,

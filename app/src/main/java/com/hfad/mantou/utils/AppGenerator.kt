@@ -96,11 +96,11 @@ object AppGenerator {
             6. 需要考虑安全区和移动端浏览器环境，可使用 padding: env(safe-area-inset-*)。
 
             持久化数据要求：
-            1. 每个生成的网页 App 都会伴随一个同名 JSON 数据文件，数据必须写入这个 JSON 文件，不能只存在内存变量里。
-            2. 如果 App 有待办、笔记、记录、设置、历史、分数、进度等需要下次打开仍保留的数据，必须使用 `window.MantouApp.storage`。
-            3. 读取：`var r = JSON.parse(window.MantouApp.storage.storageRead()); var state = r.success ? JSON.parse(r.data.content || "{}") : {};`
-            4. 写入：`window.MantouApp.storage.storageWrite(JSON.stringify(state));`
-            5. `storageWrite` 的参数必须是合法 JSON 字符串，建议把整个应用状态组织成一个对象后整体写入。
+            1. 项目内 JSON 只用于只读种子数据或配置，不能冒充运行时持久化。
+            2. 如果 App 有待办、笔记、记录、设置、历史、分数、进度等需要下次打开仍保留的数据，必须使用 `window.MantouApp.storage` 和稳定的应用状态 key。
+            3. 读取示例：`var r = JSON.parse(window.MantouApp.storage.storageGet('app-state-v1')); var state = r.success && r.data.exists ? JSON.parse(r.data.valueJson) : {};`
+            4. 写入示例：`window.MantouApp.storage.storageSet('app-state-v1', JSON.stringify(state));`
+            5. `app-state-v1` 只是示例；`storageSet` 的第二个参数必须是合法 JSON 字符串，同一应用始终逐字复用其规格声明的稳定 key。
         """.trimIndent()
 
         return appendOptimizedTools(
@@ -132,12 +132,11 @@ object AppGenerator {
             """.trimIndent()
         } else {
             """
-                1. 独立规划请求已经生成 `project.json`；第一轮必须读取它，再按计划开始实现。
-                2. 后续轮次严格按依赖顺序逐个生成文件；每次响应只读或写一个文件。
-                3. 写 CSS 或 JavaScript 前必须读取已生成的入口和相关文件，写回 HTML 前也必须读取关联样式与脚本；不能只凭历史摘要重建命名。
-                4. class、id、data-*、CSS 选择器和 DOM 查询名称是跨文件接口，所有文件必须使用同一套名称。
-                5. 至少包含入口 HTML、独立 CSS 和独立 JavaScript；确有静态数据时再增加 JSON，图形资源优先使用本地 SVG。
-                6. 所有计划文件写完后返回 `<mantou-finish/>`，交由 Harness 构建和测试。
+                1. Harness 会按 `dependsOn` 的拓扑顺序逐个下发唯一目标文件，并预先注入只读的 `project.json` 与直接依赖内容。
+                2. 每个文件任务使用独立上下文；只实现 `<harness_file_task>` 指定的目标，不自行选择下一个文件。
+                3. 只允许写入当前目标路径；不得列目录、删除文件、修改 `project.json`、验收条件或其他文件。
+                4. class、id、data-*、CSS 选择器和 DOM 查询名称是跨文件接口，必须严格复用计划和依赖中的命名。
+                5. 当前目标完整写入即结束该文件任务，不要返回 `<mantou-finish/>`；全部文件完成后 Harness 自动构建和测试。
             """.trimIndent()
         }
         val basePrompt = """
@@ -160,18 +159,31 @@ object AppGenerator {
 
             # project.json
 
-            `project.json` 是模型维护的项目计划，格式必须严格为：
+            `project.json` 是项目规格和宿主验收合同。新项目生成期间由 Harness 只读维护；修改项目时可维护文件清单，但不得删除、弱化、改写或绕过宿主给出的验收条件。下面只展示字段关系，不是可复制的合法计划；真实完整内容以宿主注入的 `project.json` 为准，禁止把字段替换为空数组或空对象：
             {
               "schemaVersion": 1,
               "name": "馒头应用名",
               "entry": "index.html",
               "files": [
-                {"path":"index.html","role":"entry","description":"页面语义结构"},
-                {"path":"styles/app.css","role":"style","description":"视觉系统与响应式布局"},
-                {"path":"scripts/app.js","role":"logic","description":"状态、交互与自测"}
-              ]
+                {"path":"index.html","role":"entry","description":"页面语义结构","dependsOn":[],"ownsCriteria":[]},
+                {"path":"styles/app.css","role":"style","description":"视觉系统","dependsOn":["index.html"],"ownsCriteria":[]},
+                {"path":"scripts/app.js","role":"script","description":"状态与交互","dependsOn":["index.html","styles/app.css"],"ownsCriteria":["AC-001"]}
+              ],
+              "appSpec": {
+                "specVersion": 1,
+                "summary": "宿主给出的应用范围",
+                "primaryGoal": "宿主给出的核心用户目标",
+                "selectors": ["稳定 selector 规格"],
+                "screens": ["页面规格"],
+                "components": ["组件规格"],
+                "state": "状态与持久化规格",
+                "interactions": ["交互规格"],
+                "userFlows": ["用户流程规格"],
+                "design": "设计 token 与约束",
+                "acceptanceContract": {"criteria": ["宿主拥有的可执行验收项"]}
+              }
             }
-            文件路径必须是项目内相对路径，不能包含 `..`、反斜杠、绝对路径或隐藏目录。计划最多 24 个文本文件；只声明确实会实现的文件。
+            `appSpec`、稳定 selector、交互、视觉约束和 AcceptanceContract 是不可规避的交付要求。文件路径必须是项目内相对路径，不能包含 `..`、反斜杠、绝对路径或隐藏目录。计划最多 24 个文本文件；只声明确实会实现的文件。
 
             # 单动作协议
 
@@ -186,9 +198,9 @@ object AppGenerator {
 
             # 数据与 Android 能力
 
-            需要跨启动保存的待办、笔记、设置、历史、游戏进度等运行数据必须使用 `window.MantouApp.storage`；源代码中的 JSON 只用于只读种子数据或配置，不能冒充持久化状态。
-            读取示例：`var r = JSON.parse(window.MantouApp.storage.storageRead()); var state = r.success ? JSON.parse(r.data.content || "{}") : {};`
-            写入示例：`window.MantouApp.storage.storageWrite(JSON.stringify(state));`
+            需要跨启动保存的待办、笔记、设置、历史、游戏进度等运行数据必须使用 `window.MantouApp.storage`；源代码中的 JSON 只用于只读种子数据或配置，不能冒充持久化状态。状态 key 必须严格使用 `project.json` 中的 `appSpec.state.storageKey`。
+            读取示例：`var r = JSON.parse(window.MantouApp.storage.storageGet('app-state-v1')); var state = r.success && r.data.exists ? JSON.parse(r.data.valueJson) : {};`
+            写入示例：`window.MantouApp.storage.storageSet('app-state-v1', JSON.stringify(state));`；`app-state-v1` 仅为示例，实际 key 必须逐字使用 `project.json` 的 `appSpec.state.storageKey`。
 
             # 当前编排方式
 

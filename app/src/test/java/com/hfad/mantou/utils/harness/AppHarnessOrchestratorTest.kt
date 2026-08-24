@@ -4,10 +4,12 @@ import com.hfad.mantou.data.GenerateTaskState
 import com.hfad.mantou.data.logging.HarnessTraceEvent
 import com.hfad.mantou.data.logging.HarnessTraceLogger
 import com.hfad.mantou.data.logging.HarnessTraceStatus
+import com.hfad.mantou.utils.project.WebAppAcceptanceContract
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -166,6 +168,46 @@ class AppHarnessOrchestratorTest {
                     it.outcome == GenerateTaskState.Outcome.PASSED
             }
         )
+    }
+
+    @Test
+    fun acceptanceContractIsOnlyExposedToTestSuite() = runBlocking {
+        val contract = WebAppAcceptanceContract(criteria = emptyList())
+        val checkRequests = mutableListOf<HarnessCheckRequest>()
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair { HarnessModelTurn(content = "done") },
+            fileTool = HarnessFileTool { request ->
+                HarnessToolResult(request.call.id, success = true, output = "ok")
+            },
+            builder = HarnessBuilder { request ->
+                checkRequests += request
+                HarnessCheckResult(true, "build ok")
+            },
+            inspector = HarnessInspector { request ->
+                checkRequests += request
+                HarnessCheckResult(true, "runtime ok")
+            },
+            testRunner = HarnessTestRunner { request ->
+                checkRequests += request
+                HarnessCheckResult(true, "tests ok")
+            }
+        )
+
+        val result = orchestrator.run(
+            newRequest().copy(
+                acceptanceContract = contract,
+                acceptanceRequired = true
+            )
+        )
+
+        assertTrue(result is HarnessRunResult.Delivered)
+        checkRequests.filterNot { it.kind == HarnessCheckKind.TEST_SUITE }.forEach { request ->
+            assertNull(request.acceptanceContract)
+            assertFalse(request.acceptanceRequired)
+        }
+        val testSuiteRequest = checkRequests.single { it.kind == HarnessCheckKind.TEST_SUITE }
+        assertEquals(contract, testSuiteRequest.acceptanceContract)
+        assertTrue(testSuiteRequest.acceptanceRequired)
     }
 
     @Test
@@ -697,8 +739,8 @@ class AppHarnessOrchestratorTest {
     }
 
     @Test
-    fun singleIterationCanExceedRemovedModelAndToolLimits() = runBlocking {
-        val interactionCount = 80
+    fun legacyCodingIterationCompletesWithinConfiguredTaskTurnLimit() = runBlocking {
+        val interactionCount = 2
         var modelTurns = 0
         var toolCalls = 0
         val orchestrator = AppHarnessOrchestrator(
@@ -724,7 +766,8 @@ class AppHarnessOrchestratorTest {
             },
             builder = HarnessBuilder { HarnessCheckResult(true, "build ok") },
             inspector = HarnessInspector { HarnessCheckResult(true, "runtime ok") },
-            testRunner = HarnessTestRunner { HarnessCheckResult(true, "tests ok") }
+            testRunner = HarnessTestRunner { HarnessCheckResult(true, "tests ok") },
+            limits = HarnessLimits(maxTaskTurns = interactionCount + 1)
         )
 
         val result = withTimeout(5_000) {
@@ -786,6 +829,238 @@ class AppHarnessOrchestratorTest {
             events.last().stage == GenerateTaskState.Stage.DELIVER &&
                 events.last().outcome == GenerateTaskState.Outcome.FAILED
         )
+    }
+
+    @Test
+    fun legacyCodingIterationStopsAtConfiguredTaskTurnLimit() = runBlocking {
+        var modelRequestCount = 0
+        var toolExecutionCount = 0
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair {
+                modelRequestCount++
+                HarnessModelTurn(
+                    toolCalls = listOf(
+                        HarnessToolCall(
+                            id = "read-$modelRequestCount",
+                            name = "read_file",
+                            arguments = mapOf("path" to "index.html")
+                        )
+                    )
+                )
+            },
+            fileTool = HarnessFileTool { request ->
+                toolExecutionCount++
+                HarnessToolResult(request.call.id, true, "ok")
+            },
+            builder = HarnessBuilder { HarnessCheckResult(true, "build ok") },
+            inspector = HarnessInspector { HarnessCheckResult(true, "runtime ok") },
+            testRunner = HarnessTestRunner { HarnessCheckResult(true, "tests ok") },
+            limits = HarnessLimits(maxTaskTurns = 2)
+        )
+
+        val result = withTimeout(5_000) {
+            orchestrator.run(newRequest())
+        }
+
+        assertTrue(result is HarnessRunResult.Failed)
+        assertEquals(1, result.iterations)
+        assertTrue((result as HarnessRunResult.Failed).reason.contains("2 次模型请求"))
+        assertEquals(2, modelRequestCount)
+        assertEquals(2, toolExecutionCount)
+    }
+
+    @Test
+    fun scheduledGenerationUsesStableDependencyOrderAndFreshTaskContexts() = runBlocking {
+        val modelRequests = mutableListOf<HarnessModelRequest>()
+        val toolCalls = mutableListOf<HarnessToolCall>()
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair { request ->
+                modelRequests += request
+                val target = request.metadata.getValue("task_path")
+                HarnessModelTurn(
+                    toolCalls = listOf(
+                        HarnessToolCall(
+                            id = "write-$target",
+                            name = "write_file",
+                            arguments = mapOf("path" to target, "content" to target)
+                        )
+                    )
+                )
+            },
+            fileTool = HarnessFileTool { request ->
+                toolCalls += request.call
+                val path = request.call.arguments.getValue("path")
+                if (request.call.name == "write_file") {
+                    HarnessToolResult(
+                        callId = request.call.id,
+                        success = true,
+                        output = "written",
+                        changedFiles = listOf(path)
+                    )
+                } else {
+                    HarnessToolResult(request.call.id, true, "content:$path")
+                }
+            },
+            builder = HarnessBuilder { HarnessCheckResult(true, "build ok") },
+            inspector = HarnessInspector { HarnessCheckResult(true, "runtime ok") },
+            testRunner = HarnessTestRunner { HarnessCheckResult(true, "tests ok") }
+        )
+        val request = newRequest().copy(
+            planPath = "project.json",
+            fileTasks = listOf(
+                HarnessFileTask("index.html", dependsOn = listOf("styles.css", "app.js")),
+                HarnessFileTask("app.js"),
+                HarnessFileTask("styles.css")
+            )
+        )
+
+        val result = orchestrator.run(request)
+
+        assertTrue(result is HarnessRunResult.Delivered)
+        assertEquals(1, result.iterations)
+        assertEquals(
+            listOf("app.js", "styles.css", "index.html"),
+            modelRequests.map { it.metadata.getValue("task_path") }
+        )
+        assertEquals(
+            listOf("app.js", "styles.css", "index.html"),
+            toolCalls.filter { it.name == "write_file" }.map { it.arguments.getValue("path") }
+        )
+        assertTrue(modelRequests.all { requestForTask ->
+            requestForTask.messages
+                .flatMap(HarnessMessage::toolCalls)
+                .filter { it.name == "write_file" }
+                .none()
+        })
+        val indexReads = modelRequests.last().messages
+            .flatMap(HarnessMessage::toolCalls)
+            .filter { it.name == "read_file" }
+            .map { it.arguments.getValue("path") }
+        assertEquals(listOf("project.json", "styles.css", "app.js"), indexReads)
+    }
+
+    @Test
+    fun scheduledGenerationRejectsOutOfScopeWriteBeforeExecutingTool() = runBlocking {
+        var modelTurns = 0
+        val executedWrites = mutableListOf<String>()
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair {
+                modelTurns++
+                val path = if (modelTurns == 1) "other.js" else "app.js"
+                HarnessModelTurn(
+                    toolCalls = listOf(
+                        HarnessToolCall(
+                            id = "write-$modelTurns",
+                            name = "write_file",
+                            arguments = mapOf("path" to path, "content" to "content")
+                        )
+                    )
+                )
+            },
+            fileTool = HarnessFileTool { request ->
+                val path = request.call.arguments.getValue("path")
+                if (request.call.name == "write_file") executedWrites += path
+                HarnessToolResult(
+                    callId = request.call.id,
+                    success = true,
+                    output = "ok",
+                    changedFiles = if (request.call.name == "write_file") listOf(path) else emptyList()
+                )
+            },
+            builder = HarnessBuilder { HarnessCheckResult(true, "build ok") },
+            inspector = HarnessInspector { HarnessCheckResult(true, "runtime ok") },
+            testRunner = HarnessTestRunner { HarnessCheckResult(true, "tests ok") },
+            limits = HarnessLimits(maxTaskTurns = 2)
+        )
+
+        val result = orchestrator.run(
+            newRequest().copy(fileTasks = listOf(HarnessFileTask("app.js")))
+        )
+
+        assertTrue(result is HarnessRunResult.Delivered)
+        assertEquals(listOf("app.js"), executedWrites)
+        assertEquals(2, modelTurns)
+    }
+
+    @Test
+    fun scheduledGenerationRequiresTargetInChangedFilesBeforeCompletingTask() = runBlocking {
+        var modelTurns = 0
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair {
+                modelTurns++
+                HarnessModelTurn(
+                    toolCalls = listOf(
+                        HarnessToolCall(
+                            id = "write-$modelTurns",
+                            name = "write_file",
+                            arguments = mapOf("path" to "app.js", "content" to "content")
+                        )
+                    )
+                )
+            },
+            fileTool = HarnessFileTool { request ->
+                HarnessToolResult(
+                    callId = request.call.id,
+                    success = true,
+                    output = "ok",
+                    changedFiles = if (modelTurns == 1) emptyList() else listOf("app.js")
+                )
+            },
+            builder = HarnessBuilder { HarnessCheckResult(true, "build ok") },
+            inspector = HarnessInspector { HarnessCheckResult(true, "runtime ok") },
+            testRunner = HarnessTestRunner { HarnessCheckResult(true, "tests ok") },
+            limits = HarnessLimits(maxTaskTurns = 2)
+        )
+
+        val result = orchestrator.run(
+            newRequest().copy(fileTasks = listOf(HarnessFileTask("app.js")))
+        )
+
+        assertTrue(result is HarnessRunResult.Delivered)
+        assertEquals(2, modelTurns)
+    }
+
+    @Test
+    fun scheduledGenerationDoesNotAcceptFinishBeforeTargetWrite() = runBlocking {
+        val requests = mutableListOf<HarnessModelRequest>()
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair { request ->
+                requests += request
+                if (requests.size == 1) {
+                    HarnessModelTurn(content = "<mantou-finish/>")
+                } else {
+                    HarnessModelTurn(
+                        toolCalls = listOf(
+                            HarnessToolCall(
+                                id = "write-app",
+                                name = "write_file",
+                                arguments = mapOf("path" to "app.js", "content" to "content")
+                            )
+                        )
+                    )
+                }
+            },
+            fileTool = HarnessFileTool { request ->
+                HarnessToolResult(
+                    callId = request.call.id,
+                    success = true,
+                    output = "ok",
+                    changedFiles = listOf("app.js")
+                )
+            },
+            builder = HarnessBuilder { HarnessCheckResult(true, "build ok") },
+            inspector = HarnessInspector { HarnessCheckResult(true, "runtime ok") },
+            testRunner = HarnessTestRunner { HarnessCheckResult(true, "tests ok") },
+            limits = HarnessLimits(maxTaskTurns = 2)
+        )
+
+        val result = orchestrator.run(
+            newRequest().copy(fileTasks = listOf(HarnessFileTask("app.js")))
+        )
+
+        assertTrue(result is HarnessRunResult.Delivered)
+        assertEquals(2, requests.size)
+        assertTrue(requests.last().messages.last().content.contains("TASK_INCOMPLETE_TARGET_NOT_WRITTEN"))
     }
 
     private fun newRequest(): HarnessRunRequest {

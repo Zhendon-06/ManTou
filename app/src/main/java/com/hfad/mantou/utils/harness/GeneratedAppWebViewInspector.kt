@@ -1,10 +1,12 @@
 package com.hfad.mantou.utils.harness
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.net.http.SslError
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.SslErrorHandler
@@ -15,7 +17,12 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.google.gson.Gson
+import com.hfad.mantou.utils.project.WebAppAcceptanceContract
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.security.MessageDigest
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -23,6 +30,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
+import kotlin.math.roundToInt
 
 fun interface WebRequestInterceptor {
     fun intercept(request: WebResourceRequest): WebResourceResponse?
@@ -105,6 +113,176 @@ class GeneratedAppWebViewInspector(
         timeoutMillis = timeoutMillis,
         requestInterceptor = requestInterceptor
     )
+
+    suspend fun runQualityGateSuite(
+        target: WebInspectionTarget,
+        qualityGateContract: WebQualityGateContract,
+        acceptanceContract: WebAppAcceptanceContract?,
+        acceptanceRequired: Boolean,
+        evidenceRunId: String,
+        settleMillis: Long = DEFAULT_SETTLE_MILLIS,
+        timeoutMillis: Long = DEFAULT_TEST_TIMEOUT_MILLIS,
+        requestInterceptor: WebRequestInterceptor? = null,
+        evidenceDirectory: File? = null
+    ): WebInspectionReport = inspectionMutex.withLock {
+        require(timeoutMillis > 0) { "timeoutMillis must be greater than zero" }
+        val startedAt = SystemClock.elapsedRealtime()
+        val reports = mutableListOf<WebInspectionReport>()
+        val visualEvidence = mutableListOf<WebVisualEvidence>()
+        val additionalDiagnostics = mutableListOf<WebInspectionDiagnostic>()
+        val initialState = qualityGateContract.requiredVisualStates.singleOrNull {
+            it.id == INITIAL_VISUAL_STATE_ID
+        }
+        qualityGateContract.requiredVisualStates
+            .filterNot { it.id == INITIAL_VISUAL_STATE_ID }
+            .forEach { state ->
+                additionalDiagnostics += testSuiteDiagnostic(
+                    code = "VISUAL_STATE_UNSUPPORTED",
+                    message = "无法自动驱动视觉状态 ${state.id}: ${state.description}"
+                )
+            }
+        if (initialState == null) {
+            additionalDiagnostics += testSuiteDiagnostic(
+                code = "INITIAL_VISUAL_STATE_MISSING",
+                message = "质量门禁必须声明 initial 视觉状态，且该状态会在验收动作前采集"
+            )
+        }
+        val acceptanceScripts = when (acceptanceContract) {
+            null -> {
+                if (!acceptanceRequired) {
+                    additionalDiagnostics += testSuiteDiagnostic(
+                        code = "LEGACY_ACCEPTANCE_NOT_REQUIRED",
+                        message = "legacy 项目未声明 typed AcceptanceContract，仅执行质量与视觉门禁",
+                        severity = WebDiagnosticSeverity.WARNING
+                    )
+                    emptyList()
+                } else {
+                    additionalDiagnostics += testSuiteDiagnostic(
+                        code = "ACCEPTANCE_CONTRACT_MISSING",
+                        message = "TEST_SUITE 要求 typed AcceptanceContract，但当前合同缺失"
+                    )
+                    emptyList()
+                }
+            }
+            else -> runCatching {
+                GeneratedAppHarnessScripts.acceptanceSuite(acceptanceContract)
+                acceptanceContract.criteria.map { criterion ->
+                    criterion.id to GeneratedAppHarnessScripts.acceptanceSuite(
+                        WebAppAcceptanceContract(criteria = listOf(criterion))
+                    )
+                }
+            }.getOrElse { error ->
+                additionalDiagnostics += testSuiteDiagnostic(
+                    code = "ACCEPTANCE_CONTRACT_INVALID",
+                    message = error.message ?: "typed AcceptanceContract 无效",
+                    stackTrace = error.stackTraceToString()
+                )
+                emptyList()
+            }
+        }
+        val outputDirectory = evidenceDirectory ?: defaultEvidenceDirectory(evidenceRunId)
+        val layoutSnapshot = withContext(Dispatchers.Main.immediate) { captureLayoutSnapshot() }
+
+        try {
+            for ((viewportIndex, viewport) in qualityGateContract.requiredViewports.withIndex()) {
+                val qualityReport = inspectOnMain(
+                    stage = WebInspectionStage.TEST_SUITE,
+                    mode = InspectionMode.Tests(
+                        target = target,
+                        testScript = GeneratedAppHarnessScripts.qualityGateSuite(
+                            contract = qualityGateContract,
+                            expectedViewport = viewport
+                        ),
+                        settleMillis = settleMillis.coerceAtLeast(0),
+                        requestInterceptor = requestInterceptor,
+                        expectedViewport = viewport
+                    ),
+                    timeoutMillis = timeoutMillis
+                ).scopedToViewport(viewport.id, QUALITY_PHASE_ID)
+                reports += qualityReport
+
+                if (initialState != null) {
+                    val dimensions = readCssViewportDimensions()
+                    if (dimensions == null) {
+                        additionalDiagnostics += testSuiteDiagnostic(
+                            code = "VIEWPORT_DIMENSIONS_UNAVAILABLE",
+                            message = "无法读取 ${viewport.id} 的实际 CSS viewport"
+                        )
+                    } else {
+                        val screenshotFile = File(
+                            outputDirectory,
+                            screenshotFileName(viewportIndex, viewport.id, initialState.id)
+                        )
+                        val screenshotResult = capturePngScreenshot(screenshotFile)
+                        val screenshot = screenshotResult.getOrNull()
+                        if (screenshot == null) {
+                            val error = screenshotResult.exceptionOrNull()
+                            additionalDiagnostics += testSuiteDiagnostic(
+                                code = "SCREENSHOT_CAPTURE_FAILED",
+                                message = "${viewport.id}/${initialState.id} 截图失败: " +
+                                    (error?.message ?: "未知错误"),
+                                stackTrace = error?.stackTraceToString(),
+                                severity = if (qualityGateContract.requireScreenshotEvidence) {
+                                    WebDiagnosticSeverity.ERROR
+                                } else {
+                                    WebDiagnosticSeverity.WARNING
+                                }
+                            )
+                        }
+                        visualEvidence += WebVisualEvidence(
+                            viewportId = viewport.id,
+                            visualStateId = initialState.id,
+                            widthCssPixels = dimensions.widthCssPixels,
+                            heightCssPixels = dimensions.heightCssPixels,
+                            screenshotArtifactPath = screenshot?.file?.absolutePath,
+                            screenshotPixelWidth = screenshot?.pixelWidth,
+                            screenshotPixelHeight = screenshot?.pixelHeight,
+                            screenshotSha256 = screenshot?.sha256
+                        )
+                    }
+                }
+
+                for ((criterionId, acceptanceScript) in acceptanceScripts) {
+                    reports += inspectOnMain(
+                        stage = WebInspectionStage.TEST_SUITE,
+                        mode = InspectionMode.Tests(
+                            target = target,
+                            testScript = acceptanceScript,
+                            settleMillis = settleMillis.coerceAtLeast(0),
+                            requestInterceptor = requestInterceptor,
+                            expectedViewport = viewport
+                        ),
+                        timeoutMillis = timeoutMillis
+                    ).scopedToViewport(
+                        viewportId = viewport.id,
+                        phaseId = "$ACCEPTANCE_PHASE_ID:$criterionId"
+                    )
+                }
+            }
+        } finally {
+            withContext(Dispatchers.Main.immediate) { restoreLayout(layoutSnapshot) }
+        }
+
+        val coverage = withContext(Dispatchers.IO) {
+            WebQualityGateEvaluator.evaluateEvidence(
+                contract = qualityGateContract,
+                evidence = visualEvidence
+            )
+        }
+        coverage.diagnostics.forEach { message ->
+            additionalDiagnostics += testSuiteDiagnostic(
+                code = "VISUAL_EVIDENCE_GATE_FAILED",
+                message = message
+            )
+        }
+        mergeWebInspectionReports(
+            stage = WebInspectionStage.TEST_SUITE,
+            reports = reports,
+            visualEvidence = visualEvidence,
+            additionalDiagnostics = additionalDiagnostics,
+            durationMillis = SystemClock.elapsedRealtime() - startedAt
+        )
+    }
 
     fun cancelCurrentInspection() {
         val cancel: () -> Unit = {
@@ -235,6 +413,10 @@ class GeneratedAppWebViewInspector(
         private var pageHandled = false
         private var finished = false
         private var cancellationEventEmitted = false
+        private val selfTestResultChannelPrefix = (mode as? InspectionMode.Tests)?.let {
+            "$SELF_TEST_RESULT_PREFIX${UUID.randomUUID()}:"
+        }
+        private var acceptingSelfTestResult = false
         var cancelContinuation: ((CancellationException) -> Unit)? = null
         private val timeoutRunnable = Runnable {
             addDiagnostic(
@@ -249,8 +431,13 @@ class GeneratedAppWebViewInspector(
         private val chromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
                 val message = consoleMessage.message().orEmpty()
-                if (mode is InspectionMode.Tests && message.startsWith(SELF_TEST_RESULT_PREFIX)) {
-                    handleSelfTestPayload(message.removePrefix(SELF_TEST_RESULT_PREFIX))
+                val resultPrefix = selfTestResultChannelPrefix
+                if (acceptingSelfTestResult &&
+                    resultPrefix != null &&
+                    message.startsWith(resultPrefix)
+                ) {
+                    acceptingSelfTestResult = false
+                    handleSelfTestPayload(message.removePrefix(resultPrefix))
                     return true
                 }
                 WebInspectionParsers.parseConsoleDiagnostic(
@@ -398,6 +585,7 @@ class GeneratedAppWebViewInspector(
                 webView.stopLoading()
                 webView.settings.javaScriptEnabled = true
                 webView.settings.domStorageEnabled = true
+                (mode as? InspectionMode.Tests)?.expectedViewport?.let(::applyViewport)
                 webView.webChromeClient = chromeClient
                 webView.webViewClient = viewClient
                 handler.postDelayed(timeoutRunnable, timeoutMillis)
@@ -446,6 +634,7 @@ class GeneratedAppWebViewInspector(
         fun dispose(stopLoading: Boolean) {
             if (finished) return
             finished = true
+            acceptingSelfTestResult = false
             handler.removeCallbacksAndMessages(null)
             if (stopLoading) runCatching { webView.stopLoading() }
             restoreClients()
@@ -711,7 +900,9 @@ class GeneratedAppWebViewInspector(
                 finish()
                 return
             }
-            webView.evaluateJavascript(selfTestRunnerScript(testScript), null)
+            val resultPrefix = checkNotNull(selfTestResultChannelPrefix)
+            acceptingSelfTestResult = true
+            webView.evaluateJavascript(selfTestRunnerScript(testScript, resultPrefix), null)
         }
 
         private fun handleSelfTestPayload(payload: String) {
@@ -848,6 +1039,7 @@ class GeneratedAppWebViewInspector(
         private fun finish(timedOut: Boolean = false) {
             if (finished) return
             finished = true
+            acceptingSelfTestResult = false
             handler.removeCallbacksAndMessages(null)
             if (timedOut) runCatching { webView.stopLoading() }
             restoreClients()
@@ -877,6 +1069,205 @@ class GeneratedAppWebViewInspector(
         }
     }
 
+    private fun testSuiteDiagnostic(
+        code: String,
+        message: String,
+        stackTrace: String? = null,
+        severity: WebDiagnosticSeverity = WebDiagnosticSeverity.ERROR
+    ): WebInspectionDiagnostic {
+        return WebInspectionDiagnostic(
+            stage = WebInspectionStage.TEST_SUITE,
+            severity = severity,
+            category = WebDiagnosticCategory.TEST_SUITE,
+            code = code,
+            message = message,
+            stackTrace = stackTrace
+        )
+    }
+
+    private fun WebInspectionReport.scopedToViewport(
+        viewportId: String,
+        phaseId: String
+    ): WebInspectionReport {
+        val scope = "$viewportId/$phaseId"
+        return copy(
+            diagnostics = diagnostics.map { diagnostic ->
+                diagnostic.copy(message = "[$scope] ${diagnostic.message}")
+            },
+            selfTests = selfTests.map { testCase ->
+                testCase.copy(name = "$scope/${testCase.name}")
+            }
+        )
+    }
+
+    private fun defaultEvidenceDirectory(evidenceRunId: String): File {
+        return File(
+            webView.context.cacheDir,
+            "mantou-harness/visual-evidence/${safeEvidenceComponent(evidenceRunId)}"
+        )
+    }
+
+    private fun screenshotFileName(
+        viewportIndex: Int,
+        viewportId: String,
+        visualStateId: String
+    ): String {
+        return "%02d-%s-%s.png".format(
+            viewportIndex + 1,
+            safeEvidenceComponent(viewportId),
+            safeEvidenceComponent(visualStateId)
+        )
+    }
+
+    private fun safeEvidenceComponent(value: String): String {
+        return value.trim()
+            .replace(Regex("[^A-Za-z0-9._-]+"), "-")
+            .trim('-', '.')
+            .take(80)
+            .ifBlank { "test-suite" }
+    }
+
+    private fun captureLayoutSnapshot(): WebViewLayoutSnapshot {
+        val layoutParams = webView.layoutParams
+        return WebViewLayoutSnapshot(
+            left = webView.left,
+            top = webView.top,
+            width = webView.width,
+            height = webView.height,
+            layoutParamsWidth = layoutParams?.width,
+            layoutParamsHeight = layoutParams?.height
+        )
+    }
+
+    private fun applyViewport(viewport: WebQualityViewport) {
+        val density = webView.resources.displayMetrics.density
+            .takeIf { value -> value.isFinite() && value > 0f }
+            ?: 1f
+        val pixelWidth = (viewport.widthCssPixels * density).roundToInt().coerceAtLeast(1)
+        val pixelHeight = (viewport.heightCssPixels * density).roundToInt().coerceAtLeast(1)
+        webView.layoutParams?.let { layoutParams ->
+            layoutParams.width = pixelWidth
+            layoutParams.height = pixelHeight
+            webView.layoutParams = layoutParams
+        }
+        webView.requestLayout()
+        webView.measure(
+            View.MeasureSpec.makeMeasureSpec(pixelWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(pixelHeight, View.MeasureSpec.EXACTLY)
+        )
+        webView.layout(
+            webView.left,
+            webView.top,
+            webView.left + pixelWidth,
+            webView.top + pixelHeight
+        )
+    }
+
+    private fun restoreLayout(snapshot: WebViewLayoutSnapshot) {
+        webView.layoutParams?.let { layoutParams ->
+            snapshot.layoutParamsWidth?.let { layoutParams.width = it }
+            snapshot.layoutParamsHeight?.let { layoutParams.height = it }
+            webView.layoutParams = layoutParams
+        }
+        webView.requestLayout()
+        webView.measure(
+            View.MeasureSpec.makeMeasureSpec(snapshot.width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(snapshot.height, View.MeasureSpec.EXACTLY)
+        )
+        webView.layout(
+            snapshot.left,
+            snapshot.top,
+            snapshot.left + snapshot.width,
+            snapshot.top + snapshot.height
+        )
+    }
+
+    private suspend fun readCssViewportDimensions(): CssViewportDimensions? =
+        withContext(Dispatchers.Main.immediate) {
+            suspendCancellableCoroutine { continuation ->
+                runCatching {
+                    webView.evaluateJavascript(VIEWPORT_DIMENSIONS_SCRIPT) { value ->
+                        if (!continuation.isActive) return@evaluateJavascript
+                        val payload = WebInspectionParsers.decodeJavascriptString(value)
+                        val dimensions = payload?.let { json ->
+                            runCatching {
+                                gson.fromJson(json, CssViewportDimensions::class.java)
+                            }.getOrNull()
+                        }?.takeIf { item ->
+                            item.widthCssPixels > 0 && item.heightCssPixels > 0
+                        }
+                        continuation.resume(dimensions)
+                    }
+                }.onFailure {
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            }
+        }
+
+    private suspend fun capturePngScreenshot(file: File): Result<CapturedScreenshot> {
+        val bitmapResult = withContext(Dispatchers.Main.immediate) {
+            runCatching {
+                val width = webView.width
+                val height = webView.height
+                require(width > 0 && height > 0) { "WebView 没有可截图的像素尺寸" }
+                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                    webView.draw(Canvas(bitmap))
+                }
+            }
+        }
+        val bitmap = bitmapResult.getOrElse { return Result.failure(it) }
+        return try {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val parent = requireNotNull(file.parentFile) { "截图目录无效" }
+                    check(parent.isDirectory || parent.mkdirs()) { "无法创建截图目录 ${parent.absolutePath}" }
+                    val bytes = ByteArrayOutputStream().use { output ->
+                        check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                            "WebView 截图 PNG 编码失败"
+                        }
+                        output.toByteArray()
+                    }
+                    file.writeBytes(bytes)
+                    CapturedScreenshot(
+                        file = file,
+                        pixelWidth = bitmap.width,
+                        pixelHeight = bitmap.height,
+                        sha256 = sha256(bytes)
+                    )
+                }
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun sha256(bytes: ByteArray): String {
+        return MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    private data class WebViewLayoutSnapshot(
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val height: Int,
+        val layoutParamsWidth: Int?,
+        val layoutParamsHeight: Int?
+    )
+
+    private data class CssViewportDimensions(
+        val widthCssPixels: Int,
+        val heightCssPixels: Int
+    )
+
+    private data class CapturedScreenshot(
+        val file: File,
+        val pixelWidth: Int,
+        val pixelHeight: Int,
+        val sha256: String
+    )
+
     private sealed interface InspectionMode {
         data class Build(val html: String) : InspectionMode
         data class Runtime(
@@ -888,7 +1279,8 @@ class GeneratedAppWebViewInspector(
             val target: WebInspectionTarget,
             val testScript: String,
             val settleMillis: Long,
-            val requestInterceptor: WebRequestInterceptor?
+            val requestInterceptor: WebRequestInterceptor?,
+            val expectedViewport: WebQualityViewport? = null
         ) : InspectionMode
     }
 
@@ -898,7 +1290,18 @@ class GeneratedAppWebViewInspector(
         const val DEFAULT_TEST_TIMEOUT_MILLIS = 15_000L
         const val DEFAULT_SETTLE_MILLIS = 500L
         internal const val RUNTIME_HARNESS_MARKER = "__mantouHarnessInspector"
+        private const val INITIAL_VISUAL_STATE_ID = "initial"
+        private const val QUALITY_PHASE_ID = "quality"
+        private const val ACCEPTANCE_PHASE_ID = "acceptance"
         private const val SELF_TEST_RESULT_PREFIX = "__MANTOU_SELF_TEST_RESULT__"
+        private val VIEWPORT_DIMENSIONS_SCRIPT = """
+            (function () {
+              return JSON.stringify({
+                widthCssPixels: Math.round(window.innerWidth),
+                heightCssPixels: Math.round(window.innerHeight)
+              });
+            })();
+        """.trimIndent()
         private val BUILD_INSPECTOR_PAGE =
             "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" +
                 WebInspectionParsers.EMPTY_FAVICON_LINK +
@@ -918,6 +1321,59 @@ class GeneratedAppWebViewInspector(
               window.__MANTOU_HARNESS_DRY_RUN__ = true;
               if (!window.MantouApp || typeof window.MantouApp.isMantouApp !== 'function') {
                 var toolCache = {};
+                var storageState = {};
+                var storageResponse = function (data, error) {
+                  return JSON.stringify({ success: !error, data: data || null, error: error || null });
+                };
+                var parseStorageObject = function (value) {
+                  var parsed = JSON.parse(value || '{}');
+                  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+                    throw new Error('storage root must be a JSON object');
+                  }
+                  return parsed;
+                };
+                var resetStorageState = function () {
+                  Object.keys(storageState).forEach(function (key) { delete storageState[key]; });
+                };
+                var storage = {
+                  storageRead: function () {
+                    return storageResponse({ content: JSON.stringify(storageState) });
+                  },
+                  storageWrite: function (jsonContent) {
+                    try {
+                      var nextState = parseStorageObject(jsonContent);
+                      resetStorageState();
+                      Object.keys(nextState).forEach(function (key) { storageState[key] = nextState[key]; });
+                      return storageResponse({ bytes: String(jsonContent || '').length });
+                    } catch (error) {
+                      return storageResponse(null, error.message || String(error));
+                    }
+                  },
+                  storageGet: function (key) {
+                    var exists = Object.prototype.hasOwnProperty.call(storageState, key);
+                    return storageResponse({
+                      exists: exists,
+                      valueJson: exists ? JSON.stringify(storageState[key]) : 'null'
+                    });
+                  },
+                  storageSet: function (key, valueJson) {
+                    try {
+                      storageState[key] = JSON.parse(valueJson);
+                      return storageResponse({ key: key });
+                    } catch (error) {
+                      return storageResponse(null, error.message || String(error));
+                    }
+                  },
+                  storageRemove: function (key) {
+                    delete storageState[key];
+                    return storageResponse({ key: key });
+                  },
+                  storageClear: function () {
+                    resetStorageState();
+                    return storageResponse({ cleared: true });
+                  }
+                };
+                state.resetStorage = resetStorageState;
                 var dryResult = function (method, args) {
                   var data = {
                     dryRun: true,
@@ -944,7 +1400,8 @@ class GeneratedAppWebViewInspector(
                 };
                 window.MantouApp = new Proxy({
                   isMantouApp: function () { return true; },
-                  getToolNames: function () { return '[]'; }
+                  getToolNames: function () { return '[]'; },
+                  storage: storage
                 }, {
                   get: function (target, name) {
                     if (name in target) return target[name];
@@ -1042,10 +1499,11 @@ class GeneratedAppWebViewInspector(
             """.trimIndent()
         }
 
-        private fun selfTestRunnerScript(testScript: String): String {
+        private fun selfTestRunnerScript(testScript: String, resultPrefix: String): String {
             return """
                 (function () {
                   var source = ${gson.toJson(testScript)};
+                  var resultPrefix = ${gson.toJson(resultPrefix)};
                   function safeText(value) {
                     if (value == null) return null;
                     if (typeof value === 'string') return value;
@@ -1074,7 +1532,7 @@ class GeneratedAppWebViewInspector(
                     return { passed: cases.length > 0 && cases.every(function (item) { return item.passed; }), cases: cases };
                   }
                   function send(result) {
-                    console.log('$SELF_TEST_RESULT_PREFIX' + JSON.stringify(result));
+                    console.log(resultPrefix + JSON.stringify(result));
                   }
                   var value;
                   try {
