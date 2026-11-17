@@ -23,3 +23,8 @@ Thumbs.db
 leetcode/
 __pycache__/
 *.pyc
+
+# Local build, tool and personal working files
+/.kotlin/
+/.claude/settings.local.json
+/tmp/pdfs/
