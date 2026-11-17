@@ -20,3 +20,8 @@ Thumbs.db
 
 # 其他
 .cxx/
+
+# Local build, tool and personal working files
+/.kotlin/
+/.claude/settings.local.json
+/tmp/pdfs/
