@@ -5,4 +5,17 @@
     <string name="harness_notification_channel_name">Harness 运行进度</string>
     <string name="harness_notification_channel_description">后台 Harness 构建、检查与自动修复进度</string>
     <string name="harness_notification_cancel">停止</string>
+    <string name="code_preview_close">关闭</string>
+    <string name="code_preview_title">源码预览</string>
+    <string name="code_preview_files">文件</string>
+    <string name="code_preview_return">返回代码</string>
+    <string name="code_preview_file_count">项目文件 · %1$d</string>
+    <string name="code_preview_follow">跟随生成</string>
+    <string name="code_preview_latest">查看最新文件</string>
+    <string name="code_preview_following_status">跟随生成 · %1$s</string>
+    <string name="code_preview_loading">正在读取文件…</string>
+    <string name="code_preview_waiting">等待生成代码</string>
+    <string name="code_preview_empty">此文件为空</string>
+    <string name="code_preview_binary">此文件类型无法显示源码</string>
+    <string name="code_preview_read_error">无法读取此文件</string>
 </resources>

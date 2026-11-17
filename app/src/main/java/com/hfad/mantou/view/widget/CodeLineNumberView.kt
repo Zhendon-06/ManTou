@@ -23,11 +23,11 @@ class CodeLineNumberView @JvmOverloads constructor(
         override fun onTextChanged(text: CharSequence?, start: Int, before: Int, count: Int) = Unit
 
         override fun afterTextChanged(text: Editable?) {
-            refreshLineNumbers()
+            invalidate()
         }
     }
     private val codeLayoutChangeListener = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-        refreshLineNumbers()
+        invalidate()
     }
 
     fun bindTo(textView: TextView) {
@@ -36,11 +36,6 @@ class CodeLineNumberView @JvmOverloads constructor(
         codeView = textView
         textView.addTextChangedListener(codeTextWatcher)
         textView.addOnLayoutChangeListener(codeLayoutChangeListener)
-        refreshLineNumbers()
-    }
-
-    fun refreshLineNumbers() {
-        requestLayout()
         invalidate()
     }
 

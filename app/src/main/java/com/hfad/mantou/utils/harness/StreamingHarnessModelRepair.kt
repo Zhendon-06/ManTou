@@ -13,7 +13,10 @@ import com.hfad.mantou.data.logging.record
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class StreamingHarnessModelRepair(
@@ -29,6 +32,7 @@ class StreamingHarnessModelRepair(
 ) : HarnessModelRepair {
 
     private val callSequence = AtomicLong()
+    private val reasoningEffortRejected = AtomicBoolean()
 
     init {
         require(maxTokens > 0) { "maxTokens must be positive" }
@@ -46,6 +50,7 @@ class StreamingHarnessModelRepair(
             maxTokens = maxTokens,
             temperature = temperature,
             topP = topP,
+            reasoningEffort = config.webProjectReasoningEffort.takeUnless { reasoningEffortRejected.get() },
             diagnosticContext = ApiDiagnosticContext(
                 runId = request.runId,
                 operation = "harness.${request.purpose.name.lowercase()}",
@@ -71,12 +76,13 @@ class StreamingHarnessModelRepair(
                 "model" to config.model,
                 "message_count" to request.messages.size.toString(),
                 "message_chars" to request.messages.sumOf { it.content.length }.toString(),
-                "max_tokens" to maxTokens.toString()
+                "max_tokens" to maxTokens.toString(),
+                "reasoning_effort" to (apiRequest.reasoningEffort ?: "provider_default")
             )
         )
 
         try {
-            streamChatCompletion(config, apiRequest).collect { event ->
+            streamTurn(apiRequest, request, turnSequence).collect { event ->
                 when (event) {
                     is StreamingApiService.StreamEvent.Start -> {
                         traceLogger.record(
@@ -311,6 +317,40 @@ class StreamingHarnessModelRepair(
                 )
             )
             throw error
+        }
+    }
+
+    private fun streamTurn(
+        apiRequest: ChatRequest,
+        request: HarnessModelRequest,
+        turnSequence: Long
+    ): Flow<StreamingApiService.StreamEvent> = flow {
+        var rejectedOption: StreamingApiService.StreamEvent.Error? = null
+        streamChatCompletion(config, apiRequest).collect { event ->
+            if (apiRequest.reasoningEffort != null && event is StreamingApiService.StreamEvent.Error &&
+                event.rejectsRequestOption("reasoning_effort")
+            ) {
+                rejectedOption = event
+            } else {
+                emit(event)
+            }
+        }
+        rejectedOption?.let { error ->
+            reasoningEffortRejected.set(true)
+            traceLogger.record(
+                runId = request.runId,
+                component = "MODEL_STREAM",
+                operation = "retry_request",
+                status = HarnessTraceStatus.STARTED,
+                message = "模型接口拒绝推理强度参数，正在使用兼容参数重试",
+                iteration = request.iteration,
+                details = mapOf(
+                    "turn_sequence" to turnSequence.toString(),
+                    "http_status" to error.httpStatus.toString(),
+                    "diagnostic_id" to error.diagnosticId.orEmpty()
+                )
+            )
+            emitAll(streamChatCompletion(config, apiRequest.copy(reasoningEffort = null)))
         }
     }
 

@@ -151,7 +151,7 @@ object StreamingApiService {
             createStreamingCallback(
                 call = call,
                 tokenUsage = tokenUsage,
-                onEachLine = { line -> processAnthropicLine(line, tokenUsage) }
+                onEachLine = { line -> listOfNotNull(processAnthropicLine(line, tokenUsage)) }
             )
         )
         awaitClose { call.cancel() }
@@ -160,7 +160,7 @@ object StreamingApiService {
     private fun kotlinx.coroutines.channels.ProducerScope<StreamEvent>.createStreamingCallback(
         call: Call,
         tokenUsage: RequestTokenUsageTracker,
-        onEachLine: (String) -> StreamEvent?
+        onEachLine: (String) -> List<StreamEvent>
     ): Callback {
         return object : Callback {
             private val trace = call.request().tag(ApiRequestTrace::class.java)
@@ -244,25 +244,25 @@ object StreamingApiService {
                 try {
                     response.body?.charStream()?.buffered()?.useLines { lines ->
                         lines.forEach { line ->
-                            val event = onEachLine(line)
-                                ?.withDiagnosticId(trace?.id)
-                                ?: return@forEach
-                            if (event is StreamEvent.Done) {
-                                sawDone = true
-                            }
-                            tokenUsage.record(event)
-                            if (event is StreamEvent.Error) {
-                                disconnectionReported = true
-                                markStreamFailed(
-                                    message = event.message,
-                                    retryable = event.retryable,
-                                    upstreamRequestId = event.upstreamRequestId,
-                                    bodyPreview = event.bodyPreview
-                                )
-                            }
-                            trySendBlocking(event)
-                            if (event is StreamEvent.Done || event is StreamEvent.Error) {
-                                return@useLines
+                            for (rawEvent in onEachLine(line)) {
+                                val event = rawEvent.withDiagnosticId(trace?.id)
+                                if (event is StreamEvent.Done) {
+                                    sawDone = true
+                                }
+                                tokenUsage.record(event)
+                                if (event is StreamEvent.Error) {
+                                    disconnectionReported = true
+                                    markStreamFailed(
+                                        message = event.message,
+                                        retryable = event.retryable,
+                                        upstreamRequestId = event.upstreamRequestId,
+                                        bodyPreview = event.bodyPreview
+                                    )
+                                }
+                                trySendBlocking(event)
+                                if (event is StreamEvent.Done || event is StreamEvent.Error) {
+                                    return@useLines
+                                }
                             }
                         }
                     }
@@ -385,6 +385,7 @@ object StreamingApiService {
         upstreamRequestId: String?
     ): String {
         return buildString {
+            ApiFailureDiagnostics.configurationHint(statusCode, body)?.let { appendLine(it) }
             append("请求失败 (").append(statusCode).append(")")
             val detail = body.ifBlank { responseMessage }.trim()
             if (detail.isNotBlank()) append(' ').append(detail)
@@ -522,10 +523,10 @@ object StreamingApiService {
     private fun processOpenAiLine(
         line: String,
         tokenUsage: RequestTokenUsageTracker
-    ): StreamEvent? {
-        if (line.isBlank() || line.startsWith(":") || !line.startsWith("data:")) return null
+    ): List<StreamEvent> {
+        if (line.isBlank() || line.startsWith(":") || !line.startsWith("data:")) return emptyList()
         val data = line.removePrefix("data:").trim()
-        if (data == "[DONE]") return StreamEvent.Done
+        if (data == "[DONE]") return listOf(StreamEvent.Done)
         return try {
             val obj = JsonParser.parseString(data).asJsonObject
             obj.get("usage")
@@ -542,19 +543,33 @@ object StreamingApiService {
                 val message = error.get("message")?.asString ?: "OpenAI 流式错误"
                 val type = error.get("type")?.asString
                 val detail = listOfNotNull(type, message).joinToString(": ")
-                return StreamEvent.Error(
+                return listOf(StreamEvent.Error(
                     message = detail,
                     retryable = isRetryableFailure(httpStatus = null, message = detail),
                     upstreamRequestId = ApiFailureDiagnostics.extractRequestId(data),
                     bodyPreview = ApiLogRedactor.redactBody(data.take(maxErrorBodyChars))
-                )
+                ))
             }
-            val chunk = gson.fromJson(obj, StreamChunk::class.java)
-            val delta = chunk.choices?.firstOrNull()?.delta ?: return null
-            delta.reasoningContent?.let { return StreamEvent.Thinking(it) }
-            delta.content?.let { StreamEvent.Content(it) }
+            val choice = obj.getAsJsonArray("choices")?.firstOrNull()?.asJsonObject
+                ?: return emptyList()
+            val delta = choice.getAsJsonObject("delta")
+            buildList {
+                delta?.get("reasoning_content")?.takeUnless { it.isJsonNull }?.asString
+                    ?.takeIf { it.isNotEmpty() }?.let { add(StreamEvent.Thinking(it)) }
+                delta?.get("content")?.takeUnless { it.isJsonNull }?.asString
+                    ?.takeIf { it.isNotEmpty() }?.let { add(StreamEvent.Content(it)) }
+                val reason = choice.get("finish_reason")?.takeUnless { it.isJsonNull }?.asString
+                if (reason == "length" || reason == "content_filter") {
+                    add(StreamEvent.Error(
+                        message = if (reason == "length") "模型输出达到长度上限，响应已截断，请增加输出预算或缩小任务"
+                            else "模型响应被供应商内容过滤中止",
+                        retryable = false,
+                        finishReason = reason
+                    ))
+                }
+            }
         } catch (_: Exception) {
-            null
+            emptyList()
         }
     }
 
@@ -589,7 +604,11 @@ object StreamingApiService {
                             totalTokens = null
                         )
                     }
-                    null
+                    val reason = obj.getAsJsonObject("delta")?.get("stop_reason")
+                        ?.takeUnless { it.isJsonNull }?.asString
+                    if (reason == "max_tokens") {
+                        StreamEvent.Error("模型输出达到长度上限，响应已截断，请增加输出预算或缩小任务", finishReason = reason)
+                    } else null
                 }
 
                 "content_block_delta" -> {
@@ -716,8 +735,12 @@ object StreamingApiService {
             val retryable: Boolean = isRetryableFailure(httpStatus, message),
             val diagnosticId: String? = null,
             val upstreamRequestId: String? = null,
-            val bodyPreview: String? = null
-        ) : StreamEvent()
+            val bodyPreview: String? = null,
+            val finishReason: String? = null
+        ) : StreamEvent() {
+            internal fun rejectsRequestOption(option: String): Boolean =
+                (httpStatus == 400 || httpStatus == 422) && message.contains(option, ignoreCase = true)
+        }
     }
 
     private const val ERROR_BODY_BUFFER_CHARS = 1_024

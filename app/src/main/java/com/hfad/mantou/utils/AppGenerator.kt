@@ -116,8 +116,8 @@ object AppGenerator {
         userMessage: String,
         isModification: Boolean
     ): String {
-        val metrics = context.resources.displayMetrics
-        val orientation = when (context.resources.configuration.orientation) {
+        val configuration = context.resources.configuration
+        val orientation = when (configuration.orientation) {
             Configuration.ORIENTATION_LANDSCAPE -> "landscape"
             Configuration.ORIENTATION_PORTRAIT -> "portrait"
             else -> "unknown"
@@ -153,9 +153,17 @@ object AppGenerator {
             - HTML 负责语义结构，CSS 负责完整视觉系统，JavaScript 负责真实交互；不要把大量 CSS/JS 重新内联回 HTML。
             - 跨文件的 class、id、data-*、CSS 选择器和 DOM 查询必须逐项一致；不得让 HTML 与 CSS/JavaScript 使用不同版本的结构命名。
             - 应用命名使用“馒头xxx”的自然名称，入口必须包含移动端 viewport、非空 title、清晰主任务、空状态和完整交互。
-            - 触控目标不小于 44px，布局适配 ${metrics.widthPixels}x${metrics.heightPixels}、$orientation、安全区和内容滚动。
+            - 使用计划中的 CSS 视口和真实可用空间做响应式布局。设备配置约 ${configuration.screenWidthDp}×${configuration.screenHeightDp} dp，当前方向 $orientation。
             - 不能留下 TODO、占位实现、空函数或只展示不能操作的界面。
-            - JavaScript 应提供 `window.__MANTOU_SELF_TEST__`，返回自测用例数组，覆盖核心状态和至少一个主要交互。
+            - JavaScript 应提供 `window.__MANTOU_SELF_TEST__`，调用时实际运行自测，覆盖核心状态和至少一个主要交互。
+            - 每项自测执行后返回 `{name: "用例名", passed: true 或 false, message: "失败原因"}`，最终返回这些结果组成的数组。宿主只读取结果，不会调用返回对象中的 run、fn 或 test 函数。
+
+            # 界面与交互
+
+            - HTML 依照 screens 落地首屏布局与组件顺序，CSS 依照 design 统一颜色角色、字号和间距，JS 落地状态与操作反馈。以用户的主要任务组织内容，打开即可操作，列表直接展示用户内容，空态就地给出下一步。页面标题、功能说明和空态提示各保留有用信息，删除标语、填充徽标与重复文案。
+            - 常规工具用紧凑顶栏、列表行或分隔线，按内容决定是否需要卡片。每屏只突出一个主要操作，次要操作用低强调样式，危险操作与常用操作拉开距离。使用统一的本地无衬线字族与图标风格，图标按钮提供可访问名称。色彩服务于层级和状态，避免用多层阴影、大渐变或大圆角给所有区域加同等强调。
+            - 新界面的主要触控区域至少 48 CSS px，提供按下、焦点、禁用、错误和结果反馈。保证窄屏单手可操作，输入获得焦点时仍可滚动到保存或取消。浮动控件避开设备安全区及馒头右上角的退出、分享控件；页面内弹层或子页提供明确的关闭或返回操作。
+            - 游戏、绘图等沉浸内容优先保证画布空间、手势控制、暂停与恢复，视觉风格从题材与用户要求出发。对已有项目的局部修改沿用现有界面约定与用户数据，按用户明确要求调整设计。
 
             # project.json
 

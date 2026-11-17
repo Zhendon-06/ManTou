@@ -190,6 +190,27 @@ class StreamingHarnessModelRepairTest {
     }
 
     @Test
+    fun glm53UsesLowEffortAndRemembersIfGatewayRejectsIt() = runBlocking {
+        val requests = mutableListOf<ChatRequest>()
+        val repair = StreamingHarnessModelRepair(
+            config = testConfig().copy(model = "glm-5.3"),
+            streamChatCompletion = { _, request ->
+                requests += request
+                if (requests.size == 1) events(
+                    StreamingApiService.StreamEvent.Error("unsupported reasoning_effort", httpStatus = 400)
+                ) else events(
+                    StreamingApiService.StreamEvent.Content("<mantou-read path=\"index.html\"/>"),
+                    StreamingApiService.StreamEvent.Done
+                )
+            }
+        )
+
+        assertEquals("read_file", repair.requestTurn(modelRequest()).toolCalls.single().name)
+        assertEquals("read_file", repair.requestTurn(modelRequest()).toolCalls.single().name)
+        assertEquals(listOf("low", null, null), requests.map { it.reasoningEffort })
+    }
+
+    @Test
     fun transportErrorsAreThrownAndReported() = runBlocking {
         val progress = mutableListOf<HarnessModelStreamProgress>()
         val repair = StreamingHarnessModelRepair(

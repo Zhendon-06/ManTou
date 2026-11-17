@@ -45,8 +45,8 @@ class DesktopAppScannerTest {
 
         assertEquals("馒头时钟", app.displayName)
         assertEquals(release.entryFile.absolutePath, app.htmlPath)
-        assertTrue(app.htmlPath.contains("/releases/"))
-        assertTrue(!app.htmlPath.contains("/drafts/"))
+        assertTrue(File(app.htmlPath).invariantSeparatorsPath.contains("/releases/"))
+        assertTrue(!File(app.htmlPath).invariantSeparatorsPath.contains("/drafts/"))
     }
 
     @Test

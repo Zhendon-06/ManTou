@@ -905,7 +905,7 @@ class WebAppProjectValidator(
         diagnostics: MutableList<WebProjectValidationDiagnostic>
     ) {
         val relativePath = WebProjectPaths.relativePath(contentRoot, entry)
-        val html = runCatching { entry.readText() }.getOrElse { readError ->
+        val html = runCatching { withoutHtmlComments(entry.readText()) }.getOrElse { readError ->
             diagnostics += error(
                 code = "ENTRY_POINT_UNREADABLE",
                 message = readError.message ?: "Unable to read HTML entry point",
@@ -972,7 +972,7 @@ class WebAppProjectValidator(
             )
         }
 
-        val html = runCatching { entry.readText() }.getOrNull() ?: return
+        val html = runCatching { withoutHtmlComments(entry.readText()) }.getOrNull() ?: return
         val declaredStylePaths = declaredStyles.mapNotNullTo(mutableSetOf()) { declared ->
             runCatching { WebProjectPaths.resolve(contentRoot, declared.path).canonicalPath }.getOrNull()
         }
@@ -1029,6 +1029,10 @@ class WebAppProjectValidator(
                 path = manifest.entryPoint
             )
         }
+    }
+
+    private fun withoutHtmlComments(html: String): String = HTML_COMMENT_OR_RAW_TEXT_REGEX.replace(html) { match ->
+        if (match.groups[1] == null) " " else match.value
     }
 
     private fun htmlAttribute(tag: String, name: String): String? {
@@ -1190,6 +1194,10 @@ class WebAppProjectValidator(
         private val SHA256_REGEX = Regex("^[0-9a-fA-F]{64}$")
         private val HTML_ROOT_REGEX = Regex("<html(?:\\s|>)", RegexOption.IGNORE_CASE)
         private val HTML_END_REGEX = Regex("</html\\s*>", RegexOption.IGNORE_CASE)
+        private val HTML_COMMENT_OR_RAW_TEXT_REGEX = Regex(
+            """<!--.*?-->|<(script|style)\b[^>]*>.*?</\1\s*>""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        )
         private val HTML_RESOURCE_REGEX = Regex(
             """<(script|link|img|source|audio|video|iframe)\b[^>]*?\b(src|href|poster)\s*=\s*(["'])([^"']+)\3""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)

@@ -211,6 +211,38 @@ class WebAppProjectTest {
     }
 
     @Test
+    fun validatorIgnoresResourceTagsInHtmlComments() {
+        val contentRoot = File(temporaryRoot, "documented-resources").apply { mkdirs() }
+        File(contentRoot, "index.html").writeText(
+            """
+            <!DOCTYPE html>
+            <html><head>
+            <!-- <link rel="stylesheet" href="app.css"> -->
+            <script src="app.js"></script>
+            </head><body>
+            <!-- Example of a photo note:
+                 <img src="..." alt="Example photo"> -->
+            </body></html>
+            """.trimIndent()
+        )
+        File(contentRoot, "app.css").writeText("body { color: navy; }")
+        File(contentRoot, "app.js").writeText("console.log('ready');")
+        val manifest = WebAppProjectManifest(
+            projectId = "documented-resources",
+            displayName = "Documented resources",
+            files = listOf(
+                WebAppProjectFile("index.html", WebAppProjectFileRole.ENTRY),
+                WebAppProjectFile("app.css", WebAppProjectFileRole.STYLE),
+                WebAppProjectFile("app.js", WebAppProjectFileRole.SCRIPT)
+            )
+        )
+
+        val report = WebAppProjectValidator().validate(manifest, contentRoot)
+
+        assertEquals(listOf("ENTRY_STYLESHEET_REFERENCE_MISSING"), report.diagnostics.map { it.code })
+    }
+
+    @Test
     fun publishingInvalidDraftLeavesReleaseStateUntouched() {
         val projectRoot = File(temporaryRoot, "invalid-release")
         val workspace = WebAppProjectWorkspace()

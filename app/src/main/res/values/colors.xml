@@ -24,7 +24,7 @@
     <color name="mt_generate_surface">#151923</color>
     <color name="mt_generate_surface_soft">#202635</color>
     <color name="mt_generate_code">#C7F9CC</color>
-    <color name="mt_generate_line">#687386</color>
+    <color name="mt_generate_line">#95A2B7</color>
     <color name="mt_generate_text">#F4F7FB</color>
     <color name="mt_generate_accent">#63B3FF</color>
 </resources>

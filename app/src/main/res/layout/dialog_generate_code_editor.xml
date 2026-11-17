@@ -9,11 +9,11 @@
     <LinearLayout
         android:id="@+id/codeEditorToolbar"
         android:layout_width="0dp"
-        android:layout_height="56dp"
+        android:layout_height="wrap_content"
+        android:minHeight="56dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingStart="16dp"
-        android:paddingEnd="16dp"
+        android:paddingHorizontal="12dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent">
@@ -21,52 +21,37 @@
         <TextView
             android:id="@+id/btnCloseCodeEditor"
             android:layout_width="wrap_content"
-            android:layout_height="match_parent"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackground"
             android:gravity="center"
-            android:paddingEnd="18dp"
-            android:text="关闭"
+            android:minWidth="56dp"
+            android:text="@string/code_preview_close"
             android:textColor="@color/mt_generate_accent"
-            android:textSize="15sp" />
+            android:textSize="14sp" />
 
-        <LinearLayout
+        <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:orientation="vertical">
-
-            <TextView
-                android:id="@+id/tvCodeEditorTitle"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:ellipsize="middle"
-                android:gravity="center"
-                android:maxLines="1"
-                android:text="生成代码"
-                android:textColor="@color/mt_generate_text"
-                android:textSize="15sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:id="@+id/tvCodeEditorStatus"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:gravity="center"
-                android:maxLines="1"
-                android:textColor="@color/mt_generate_line"
-                android:textSize="10sp" />
-
-        </LinearLayout>
+            android:gravity="center"
+            android:text="@string/code_preview_title"
+            android:textColor="@color/mt_generate_text"
+            android:textSize="16sp"
+            android:textStyle="bold" />
 
         <TextView
-            android:id="@+id/tvCodeEditorLanguage"
-            android:layout_width="56dp"
-            android:layout_height="wrap_content"
-            android:gravity="end"
-            android:text="HTML"
+            android:id="@+id/btnCodeEditorFiles"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackground"
+            android:gravity="center"
+            android:minWidth="56dp"
+            android:paddingHorizontal="8dp"
+            android:text="@string/code_preview_files"
             android:textColor="@color/mt_generate_accent"
-            android:textSize="12sp"
-            android:textStyle="bold" />
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:visibility="invisible" />
 
     </LinearLayout>
 
@@ -79,6 +64,57 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/codeEditorToolbar" />
 
+    <LinearLayout
+        android:id="@+id/codeEditorDetails"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="@color/mt_generate_surface_soft"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="18dp"
+        android:paddingVertical="12dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/codeEditorDivider">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tvCodeEditorTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="middle"
+                android:fontFamily="monospace"
+                android:maxLines="1"
+                android:textColor="@color/mt_generate_text"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/tvCodeEditorStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textColor="@color/mt_generate_line"
+                android:textSize="12sp" />
+
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tvCodeEditorLanguage"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:gravity="end"
+            android:textColor="@color/mt_generate_accent"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+    </LinearLayout>
+
     <ScrollView
         android:id="@+id/codeEditorVerticalScroll"
         android:layout_width="0dp"
@@ -88,11 +124,11 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/codeEditorDivider">
+        app:layout_constraintTop_toBottomOf="@id/codeEditorDetails">
 
         <HorizontalScrollView
             android:id="@+id/codeEditorHorizontalScroll"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:fillViewport="true"
             android:overScrollMode="never">
@@ -100,7 +136,6 @@
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:minHeight="480dp"
                 android:orientation="horizontal"
                 android:paddingTop="14dp"
                 android:paddingBottom="32dp">
@@ -121,7 +156,6 @@
                     android:id="@+id/tvCodeEditorContent"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:minWidth="320dp"
                     android:fontFamily="monospace"
                     android:includeFontPadding="false"
                     android:lineSpacingExtra="3dp"
@@ -135,5 +169,74 @@
         </HorizontalScrollView>
 
     </ScrollView>
+
+    <TextView
+        android:id="@+id/tvCodeEditorMessage"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:accessibilityLiveRegion="polite"
+        android:gravity="center"
+        android:padding="24dp"
+        android:textColor="@color/mt_generate_line"
+        android:textSize="14sp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/codeEditorDetails" />
+
+    <LinearLayout
+        android:id="@+id/codeEditorFilePanel"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:orientation="vertical"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/codeEditorDivider">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@color/mt_generate_surface_soft"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="18dp"
+            android:paddingVertical="4dp">
+
+            <TextView
+                android:id="@+id/tvCodeEditorFileCount"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="@color/mt_generate_text"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnCodeEditorFollow"
+                android:layout_width="wrap_content"
+                android:layout_height="48dp"
+                android:background="?attr/selectableItemBackground"
+                android:gravity="center"
+                android:paddingHorizontal="8dp"
+                android:text="@string/code_preview_follow"
+                android:textColor="@color/mt_generate_accent"
+                android:textSize="14sp" />
+
+        </LinearLayout>
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvCodeEditorFiles"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:paddingHorizontal="4dp"
+            android:paddingBottom="16dp"
+            android:scrollbars="vertical" />
+
+    </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

@@ -14,4 +14,14 @@ data class ChatCallConfig(
     val apiFormat: String  // ProviderEntity.API_FORMAT_OPENAI / ANTHROPIC
 ) {
     val isAnthropic: Boolean get() = apiFormat == ProviderEntity.API_FORMAT_ANTHROPIC
+
+    internal val webProjectReasoningEffort: String?
+        get() = "low".takeIf {
+            apiFormat == ProviderEntity.API_FORMAT_OPENAI &&
+                model.substringAfterLast('/').lowercase() in LOW_EFFORT_MODELS
+        }
+
+    private companion object {
+        val LOW_EFFORT_MODELS = setOf("glm-5.3", "glm-5.3-flash")
+    }
 }

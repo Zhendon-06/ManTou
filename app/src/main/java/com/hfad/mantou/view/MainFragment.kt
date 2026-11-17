@@ -43,7 +43,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.core.view.ViewCompat
-import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.doOnNextLayout
@@ -79,7 +78,6 @@ import com.hfad.mantou.data.preferences.ContextLimitStore
 import com.hfad.mantou.data.preferences.VoiceInputModelStore
 import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
-import com.hfad.mantou.databinding.DialogGenerateCodeEditorBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
 import com.hfad.mantou.databinding.LayoutDesktopPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
@@ -171,9 +169,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var runningSessionIds: Set<Long> = emptySet()
     private var generateTaskStates: Map<Long, GenerateTaskState> = emptyMap()
     private var currentGenerateTaskState: GenerateTaskState? = null
-    private var codeEditorDialog: Dialog? = null
-    private var codeEditorBinding: DialogGenerateCodeEditorBinding? = null
-    private var codeEditorSource: CodeEditorSource? = null
+    private var codeEditorDialog: CodeViewerDialog? = null
     private var actionMenuDialog: Dialog? = null
     private var drawerSearchQuery: String = ""
     private var showArchivedSessions: Boolean = false
@@ -562,12 +558,13 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val harnessState = taskState.copy(
             phase = when (taskState.phase) {
                 GenerateTaskState.Phase.COMPLETED,
+                GenerateTaskState.Phase.PAUSED,
                 GenerateTaskState.Phase.ERROR -> taskState.phase
                 else -> GenerateTaskState.Phase.REQUESTING_MODEL
             },
             code = "",
             filePath = null,
-            status = if (taskState.phase == GenerateTaskState.Phase.ERROR) taskState.status else "",
+            status = if (!taskState.isRunning) taskState.status else "",
             diagnostics = emptyList(),
             updatedAt = taskState.harnessEvents.last().timestamp
         )
@@ -783,13 +780,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 Toast.makeText(requireContext(), "读取失败: ${it.message}", Toast.LENGTH_SHORT).show()
                 return@launch
             }
-            showCodeViewer(
-                source = CodeEditorSource.WORKSPACE_FILE,
-                title = file.name,
-                status = codePreviewMetadata(file.name, content),
-                language = codePreviewLanguage(file.name),
-                content = content
-            )
+            createCodeViewer().apply {
+                showFile(file.name, content)
+                show()
+            }
         }
     }
 
@@ -1923,16 +1917,21 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun renderGenerateTaskState(taskState: GenerateTaskState?) {
         val wasCodePreviewVisible = chatBinding.generateCodeCard.visibility == View.VISIBLE
-        val hasCodePreview = taskState?.code?.isNotBlank() == true
+        val hasCodePreview = taskState != null &&
+            (taskState.code.isNotBlank() || taskState.projectFiles.isNotEmpty())
         val visibilityChanged = wasCodePreviewVisible != hasCodePreview
         val shouldKeepLatestMessageVisible = visibilityChanged &&
             ::chatAdapter.isInitialized && shouldFollowNewMessages()
         currentGenerateTaskState = taskState
+        codeEditorDialog?.takeIf { it.isShowing && it.sessionId != null }?.let { dialog ->
+            if (taskState != null && taskState.sessionId == dialog.sessionId) {
+                dialog.updateProject(taskState)
+            } else {
+                dialog.dismiss()
+            }
+        }
         if (!hasCodePreview) {
             chatBinding.generateCodeCard.visibility = View.GONE
-            if (codeEditorSource == CodeEditorSource.GENERATION) {
-                codeEditorDialog?.dismiss()
-            }
             if (visibilityChanged) updateChatListScrollBoundary()
             if (shouldKeepLatestMessageVisible) scrollChatToBottom()
             return
@@ -1940,7 +1939,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         chatBinding.generateCodeCard.visibility = View.VISIBLE
         val language = codePreviewLanguage(taskState)
-        val metadata = codePreviewMetadata(taskState)
+        val metadata = codePreviewMetadata(taskState.activeFilePath, taskState.code)
         chatBinding.tvGenerateCodeLanguage.text = language
         chatBinding.tvGenerateCodeTitle.text = if (taskState.projectFiles.size > 1) {
             "项目源码 · ${taskState.projectFiles.size} 文件"
@@ -1949,51 +1948,14 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
         chatBinding.tvGenerateCodeStatus.text = metadata
         chatBinding.tvGenerateCodePreview.text = buildGenerateCodePreview(taskState)
-        chatBinding.generateCodeCard.contentDescription = "打开源码预览，$language，$metadata"
-        updateGenerateCodeEditor(taskState)
+        chatBinding.generateCodeCard.contentDescription = "打开${chatBinding.tvGenerateCodeTitle.text}，$language，$metadata"
         if (visibilityChanged) updateChatListScrollBoundary()
         if (shouldKeepLatestMessageVisible) scrollChatToBottom()
     }
 
-    private fun codePreviewLanguage(taskState: GenerateTaskState): String {
-        val code = taskState.code
-        val looksLikeDiff = code.lineSequence().take(8).any { line ->
-            line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("@@ ")
-        }
-        if (looksLikeDiff) return "DIFF"
-        return taskState.activeFilePath
-            ?.substringAfterLast('/')
-            ?.substringAfterLast('\\')
-            ?.substringAfterLast('.', missingDelimiterValue = "")
-            ?.takeIf(String::isNotBlank)
-            ?.uppercase(Locale.ROOT)
-            ?: taskState.filePath
-            ?.substringAfterLast('.', missingDelimiterValue = "")
-            ?.takeIf(String::isNotBlank)
-            ?.uppercase(Locale.ROOT)
-            ?: "HTML"
-    }
-
-    private fun codePreviewLanguage(fileName: String): String {
-        return fileName.substringAfterLast('.', missingDelimiterValue = "")
-            .takeIf(String::isNotBlank)
-            ?.uppercase(Locale.ROOT)
-            ?: "TEXT"
-    }
-
-    private fun codePreviewMetadata(taskState: GenerateTaskState): String {
-        return codePreviewMetadata(taskState.activeFilePath, taskState.code)
-    }
-
-    private fun codePreviewMetadata(label: String?, code: String): String {
-        val lineCount = if (code.isEmpty()) 0 else code.count { it == '\n' } + 1
-        val metrics = "$lineCount 行 · ${code.length} 字符"
-        return label?.takeIf(String::isNotBlank)?.let { "$it · $metrics" } ?: metrics
-    }
-
     private fun buildGenerateCodePreview(taskState: GenerateTaskState): String {
         if (taskState.code.isBlank()) {
-            return "\$ ${taskState.languageLabel.lowercase(Locale.ROOT)} -- waiting"
+            return taskState.status
         }
         return taskState.code
             .lineSequence()
@@ -2013,123 +1975,20 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun showGenerateCodeEditor() {
         val taskState = currentGenerateTaskState ?: return
-        if (codeEditorDialog?.isShowing == true && codeEditorSource == CodeEditorSource.GENERATION) {
-            updateGenerateCodeEditor(taskState)
-            return
+        createCodeViewer(taskState.sessionId).apply {
+            updateProject(taskState)
+            show()
         }
-
-        val title = taskState.activeFilePath
-            ?.takeIf(String::isNotBlank)
-            ?: taskState.filePath
-                ?.let(::File)
-                ?.name
-                ?.takeIf(String::isNotBlank)
-            ?: if (taskState.isModification) "应用修改.diff" else "生成应用.html"
-        showCodeViewer(
-            source = CodeEditorSource.GENERATION,
-            title = title,
-            status = codePreviewMetadata(taskState),
-            language = codePreviewLanguage(taskState),
-            content = taskState.code
-        )
     }
 
-    private fun showCodeViewer(
-        source: CodeEditorSource,
-        title: String,
-        status: String,
-        language: String,
-        content: String
-    ) {
+    private fun createCodeViewer(sessionId: Long? = null): CodeViewerDialog {
         codeEditorDialog?.dismiss()
-        val editorBinding = DialogGenerateCodeEditorBinding.inflate(layoutInflater)
-        val dialog = Dialog(requireContext(), R.style.Theme_ManTou_CodeViewer)
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        dialog.setContentView(editorBinding.root)
-        editorBinding.btnCloseCodeEditor.setOnClickListener { dialog.dismiss() }
+        val dialog = CodeViewerDialog(requireContext(), viewLifecycleOwner.lifecycleScope, sessionId)
         dialog.setOnDismissListener {
-            if (codeEditorDialog === dialog) {
-                codeEditorBinding = null
-                codeEditorDialog = null
-                codeEditorSource = null
-            }
+            if (codeEditorDialog === dialog) codeEditorDialog = null
         }
-        codeEditorBinding = editorBinding
         codeEditorDialog = dialog
-        codeEditorSource = source
-        editorBinding.tvCodeEditorLines.bindTo(editorBinding.tvCodeEditorContent)
-        bindCodeViewer(editorBinding, title, status, language, content)
-        dialog.show()
-        configureCodeViewerWindow(dialog, editorBinding)
-    }
-
-    private fun updateGenerateCodeEditor(taskState: GenerateTaskState) {
-        if (codeEditorSource != CodeEditorSource.GENERATION) return
-        val editorBinding = codeEditorBinding ?: return
-        if (codeEditorDialog?.isShowing != true) return
-
-        val title = taskState.activeFilePath
-            ?.takeIf(String::isNotBlank)
-            ?: taskState.filePath
-            ?.let(::File)
-            ?.name
-            ?.takeIf(String::isNotBlank)
-            ?: if (taskState.isModification) "应用修改.diff" else "生成应用.html"
-        bindCodeViewer(
-            binding = editorBinding,
-            title = title,
-            status = codePreviewMetadata(taskState),
-            language = codePreviewLanguage(taskState),
-            content = taskState.code
-        )
-    }
-
-    private fun bindCodeViewer(
-        binding: DialogGenerateCodeEditorBinding,
-        title: String,
-        status: String,
-        language: String,
-        content: String
-    ) {
-        binding.tvCodeEditorTitle.text = title
-        binding.tvCodeEditorStatus.text = status
-        binding.tvCodeEditorLanguage.text = language
-        binding.tvCodeEditorContent.text = content
-        binding.tvCodeEditorLines.refreshLineNumbers()
-    }
-
-    private fun configureCodeViewerWindow(
-        dialog: Dialog,
-        binding: DialogGenerateCodeEditorBinding
-    ) {
-        val window = dialog.window ?: return
-        val surfaceColor = ContextCompat.getColor(requireContext(), R.color.mt_generate_surface)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        window.setBackgroundDrawable(ColorDrawable(surfaceColor))
-        window.statusBarColor = surfaceColor
-        window.navigationBarColor = surfaceColor
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            window.isStatusBarContrastEnforced = false
-            window.isNavigationBarContrastEnforced = false
-        }
-        WindowCompat.getInsetsController(window, window.decorView).apply {
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
-        }
-        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
-            val safeInsets = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-            )
-            view.setPadding(
-                safeInsets.left,
-                safeInsets.top,
-                safeInsets.right,
-                safeInsets.bottom
-            )
-            insets
-        }
-        ViewCompat.requestApplyInsets(binding.root)
+        return dialog
     }
 
     private fun openImagePicker() {
@@ -3496,9 +3355,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         actionMenuDialog?.dismiss()
         actionMenuDialog = null
         codeEditorDialog?.dismiss()
-        codeEditorBinding = null
         codeEditorDialog = null
-        codeEditorSource = null
         super.onDestroyView()
         cancelVoiceInput()
         CameraPhotoBridge.detach(this)
@@ -3543,11 +3400,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val position: Int,
         val topOffset: Int
     )
-
-    private enum class CodeEditorSource {
-        GENERATION,
-        WORKSPACE_FILE
-    }
 
     private data class ModelProviderGroup(
         val provider: ProviderEntity,

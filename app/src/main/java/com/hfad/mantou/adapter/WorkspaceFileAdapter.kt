@@ -22,6 +22,7 @@ class WorkspaceFileAdapter(
     private val visibleNodes = mutableListOf<WorkspaceNode>()
     private val expandedPaths = mutableSetOf<String>()
     private var textColor: Int = Color.BLACK
+    private var selectedFilePath: String? = null
 
     fun submitNodes(nodes: List<WorkspaceNode>) {
         roots.clear()
@@ -36,6 +37,24 @@ class WorkspaceFileAdapter(
         if (textColor == color) return
         textColor = color
         notifyItemRangeChanged(0, itemCount, PAYLOAD_TEXT_COLOR)
+    }
+
+    fun selectFile(path: String?) {
+        val previous = selectedFilePath
+        if (previous == path) return
+        selectedFilePath = path
+        visibleNodes.forEachIndexed { index, node ->
+            if (!node.isDirectory && (node.displayPath == previous || node.displayPath == path)) {
+                notifyItemChanged(index)
+            }
+        }
+    }
+
+    fun expandToFile(path: String) {
+        val parents = generateSequence(path) { it.substringBeforeLast('/', "").takeIf(String::isNotEmpty) }
+            .drop(1)
+            .toList()
+        if (expandedPaths.addAll(parents)) rebuildVisibleNodes()
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): WorkspaceNodeViewHolder {
@@ -99,6 +118,12 @@ class WorkspaceFileAdapter(
 
         fun bind(node: WorkspaceNode) {
             binding.tvNodeName.text = node.name
+            val isSelected = !node.isDirectory && node.displayPath == selectedFilePath
+            binding.root.isSelected = isSelected
+            binding.root.setBackgroundColor(
+                if (isSelected) binding.root.context.getColor(R.color.mt_generate_surface_soft)
+                else Color.TRANSPARENT
+            )
             applyTextColor()
             binding.ivNodeIcon.setImageResource(
                 if (node.isDirectory) R.drawable.ic_folder_outline else R.drawable.ic_file_markdown

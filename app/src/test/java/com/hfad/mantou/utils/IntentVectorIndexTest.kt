@@ -29,7 +29,7 @@ class IntentVectorIndexTest {
             "44c696631b2a8c200220aaaad5f987f096e986df",
             index.get("model_revision").asString,
         )
-        assertEquals(sha256(corpusFile.readBytes()), index.get("corpus_sha256").asString)
+        assertEquals(sha256(corpusFile.readText().replace("\r\n", "\n").toByteArray(Charsets.UTF_8)), index.get("corpus_sha256").asString)
 
         val dimension = index.get("dimension").asInt
         assertTrue(dimension > 0)

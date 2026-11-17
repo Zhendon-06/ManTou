@@ -12,10 +12,11 @@ data class GenerateTaskState(
     val harnessIteration: Int = 0,
     val harnessEvents: List<HarnessEvent> = emptyList(),
     val diagnostics: List<String> = emptyList(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val projectContentRoot: String? = null
 ) {
     val isRunning: Boolean
-        get() = phase != Phase.COMPLETED && phase != Phase.ERROR
+        get() = phase != Phase.COMPLETED && phase != Phase.ERROR && phase != Phase.PAUSED
 
     val languageLabel: String
         get() = when {
@@ -48,6 +49,7 @@ data class GenerateTaskState(
                 isModification -> "应用源码已更新"
                 else -> "应用已通过验证"
             }
+            Phase.PAUSED -> "生成进度已保存"
             Phase.ERROR -> "生成任务出错"
         }
 
@@ -93,6 +95,7 @@ data class GenerateTaskState(
         TESTING,
         REPAIRING,
         COMPLETED,
+        PAUSED,
         ERROR
     }
 

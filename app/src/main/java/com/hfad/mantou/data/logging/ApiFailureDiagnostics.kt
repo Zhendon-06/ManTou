@@ -43,6 +43,16 @@ object ApiFailureDiagnostics {
             normalized.contains("overloaded")
     }
 
+    fun configurationHint(httpStatus: Int?, body: String): String? = when {
+        httpStatus == 400 && body.contains("product is not activated", ignoreCase = true) ->
+            "当前模型的上游产品未开通。请在服务商后台开通，或在模型设置中选择已开通的模型。"
+        httpStatus == 402 || body.contains("insufficient_balance_error", ignoreCase = true) ->
+            "模型服务商余额不足或套餐不可用。请检查账户余额和套餐。"
+        httpStatus == 401 ->
+            "模型服务商拒绝了身份验证。请检查模型设置中的 API Key。"
+        else -> null
+    }
+
     fun extractRequestId(headers: Headers, body: String): String? {
         requestIdHeaders.forEach { name ->
             headers[name]?.normalizeRequestId()?.let { return it }

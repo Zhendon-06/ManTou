@@ -22,6 +22,138 @@ import java.nio.file.Files
 class StreamingWebProjectPlannerTest {
 
     @Test
+    fun repeatedTruncationStopsAfterOneBudgetRetry() = runBlocking {
+        var calls = 0
+        val planner = StreamingWebProjectPlanner(
+            config = testConfig(),
+            streamChatCompletion = { _, _ ->
+                calls++
+                flowOf(StreamingApiService.StreamEvent.Error("truncated", finishReason = "length"))
+            }
+        )
+        try {
+            planner.plan("测试")
+            throw AssertionError("Expected truncation failure")
+        } catch (error: WebAppProjectException) {
+            assertEquals("truncated", error.message)
+        }
+        assertEquals(2, calls)
+    }
+
+    @Test
+    fun authenticationErrorDoesNotFallBackOrRetry() = runBlocking {
+        var calls = 0
+        val planner = StreamingWebProjectPlanner(
+            config = testConfig(),
+            streamChatCompletion = { _, _ ->
+                calls++
+                flowOf(StreamingApiService.StreamEvent.Error("unauthorized", httpStatus = 401))
+            }
+        )
+        try {
+            planner.plan("测试")
+            throw AssertionError("Expected authentication failure")
+        } catch (error: WebAppProjectException) {
+            assertEquals("unauthorized", error.message)
+        }
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun unsupportedJsonModeFallsBackOnceWithoutLosingValidation() = runBlocking {
+        val requests = mutableListOf<ChatRequest>()
+        val planner = StreamingWebProjectPlanner(
+            config = testConfig(),
+            streamChatCompletion = { _, request ->
+                requests += request
+                if (requests.size == 1) flowOf(
+                    StreamingApiService.StreamEvent.Error("response_format json_object is unsupported", httpStatus = 400)
+                ) else flowOf(
+                    StreamingApiService.StreamEvent.Content(structuredPlanJson()),
+                    StreamingApiService.StreamEvent.Done
+                )
+            }
+        )
+        assertTrue(planner.plan("测试").requireAppSpec().acceptanceContract.criteria.isNotEmpty())
+        assertEquals(2, requests.size)
+        assertEquals("json_object", requests.first().responseFormat?.get("type"))
+        assertNull(requests.last().responseFormat)
+    }
+
+    @Test
+    fun glm53PlannerUsesLowEffortAndDropsItIfGatewayRejectsIt() = runBlocking {
+        val requests = mutableListOf<ChatRequest>()
+        val planner = StreamingWebProjectPlanner(
+            config = testConfig().copy(model = "gateway/glm-5.3"),
+            streamChatCompletion = { _, request ->
+                requests += request
+                if (requests.size == 1) flowOf(
+                    StreamingApiService.StreamEvent.Error("unknown parameter reasoning_effort", httpStatus = 422)
+                ) else flowOf(
+                    StreamingApiService.StreamEvent.Content(structuredPlanJson()),
+                    StreamingApiService.StreamEvent.Done
+                )
+            }
+        )
+
+        assertTrue(planner.plan("测试").requireAppSpec().acceptanceContract.criteria.isNotEmpty())
+        assertEquals(listOf("low", null), requests.map { it.reasoningEffort })
+        assertTrue(requests.all { it.responseFormat?.get("type") == "json_object" })
+    }
+
+    @Test
+    fun transportRetryDiscardsPartialPlanAndReportsActualAttemptCount() = runBlocking {
+        val requests = mutableListOf<ChatRequest>()
+        val traces = mutableListOf<HarnessTraceEvent>()
+        val retryMessages = mutableListOf<String>()
+        val planner = StreamingWebProjectPlanner(
+            config = testConfig(),
+            traceLogger = HarnessTraceLogger(traces::add),
+            onRetry = { retryMessages += it },
+            streamChatCompletion = { _, request ->
+                requests += request
+                if (requests.size == 1) flowOf(
+                    StreamingApiService.StreamEvent.Content("{"),
+                    StreamingApiService.StreamEvent.Disconnected("连接已断开")
+                ) else flowOf(
+                    StreamingApiService.StreamEvent.Content(structuredPlanJson()),
+                    StreamingApiService.StreamEvent.Done
+                )
+            }
+        )
+
+        assertEquals("馒头测试", planner.plan("测试").manifest.displayName)
+        assertEquals(2, requests.size)
+        assertEquals(requests.first(), requests.last())
+        assertTrue(retryMessages.single().contains("连接中断"))
+        assertEquals("2", traces.last().details["attempt_count"])
+        assertEquals("1", traces.single { it.operation == "retry_request" }.details["response_chars"])
+    }
+
+    @Test
+    fun truncatedPlanIsRegeneratedWithLargerOutputBudget() = runBlocking {
+        val requests = mutableListOf<ChatRequest>()
+        val planner = StreamingWebProjectPlanner(
+            config = testConfig(),
+            maxTokens = 8_000,
+            streamChatCompletion = { _, request ->
+                requests += request
+                if (requests.size == 1) flowOf(
+                    StreamingApiService.StreamEvent.Content("{"),
+                    StreamingApiService.StreamEvent.Error("模型输出达到长度上限，响应已截断", finishReason = "length")
+                ) else flowOf(
+                    StreamingApiService.StreamEvent.Content(structuredPlanJson()),
+                    StreamingApiService.StreamEvent.Done
+                )
+            }
+        )
+        planner.plan("测试")
+        assertEquals(2, requests.size)
+        assertEquals(16_000, requests.last().maxTokens)
+        assertFalse(requests.last().messages.any { it.role == ChatMessage.ROLE_ASSISTANT })
+    }
+
+    @Test
     fun streamingPlanCarriesDiagnosticContextAndEmitsCorrelatedTrace() = runBlocking {
         val response = structuredPlanJson()
         val traces = mutableListOf<HarnessTraceEvent>()

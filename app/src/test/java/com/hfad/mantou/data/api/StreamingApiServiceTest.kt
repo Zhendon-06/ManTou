@@ -2,6 +2,7 @@ package com.hfad.mantou.data.api
 
 import com.hfad.mantou.data.database.ProviderEntity
 import com.hfad.mantou.data.logging.ApiDiagnosticContext
+import com.hfad.mantou.data.logging.ApiFailureDiagnostics
 import com.hfad.mantou.data.logging.ApiLogStore
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -22,6 +23,58 @@ import kotlin.concurrent.thread
 class StreamingApiServiceTest {
 
     @Test
+    fun anthropicTokenLimitReportsTruncation() = runBlocking {
+        val events = collectOpenAiSse(
+            """
+            data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}
+
+            data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}
+
+            data: {"type":"message_stop"}
+
+            """.trimIndent(),
+            testRequest("test-model"),
+            apiFormat = ProviderEntity.API_FORMAT_ANTHROPIC
+        )
+        assertEquals("max_tokens", events.filterIsInstance<StreamingApiService.StreamEvent.Error>().single().finishReason)
+        assertFalse(events.any { it is StreamingApiService.StreamEvent.Done })
+    }
+
+    @Test
+    fun reasoningAndContentInSameChunkBothSurvive() = runBlocking {
+        val events = collectOpenAiSse(
+            """
+            data: {"choices":[{"delta":{"reasoning_content":"","content":"{"}}]}
+
+            data: {"choices":[{"delta":{"reasoning_content":"thinking","content":"}"}}]}
+
+            data: [DONE]
+
+            """.trimIndent(),
+            testRequest("test-model")
+        )
+        assertEquals("{}", events.filterIsInstance<StreamingApiService.StreamEvent.Content>().joinToString("") { it.text })
+        assertEquals(listOf("thinking"), events.filterIsInstance<StreamingApiService.StreamEvent.Thinking>().map { it.text })
+        assertTrue(events.last() is StreamingApiService.StreamEvent.Done)
+    }
+
+    @Test
+    fun lengthTerminationReportsTruncationInsteadOfSuccess() = runBlocking {
+        val events = collectOpenAiSse(
+            """
+            data: {"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]}
+
+            data: [DONE]
+
+            """.trimIndent(),
+            testRequest("test-model")
+        )
+        assertEquals("partial", events.filterIsInstance<StreamingApiService.StreamEvent.Content>().single().text)
+        assertTrue(events.filterIsInstance<StreamingApiService.StreamEvent.Error>().single().message.contains("响应已截断"))
+        assertFalse(events.any { it is StreamingApiService.StreamEvent.Done })
+    }
+
+    @Test
     fun streamingRequestsHaveFiniteTimeoutsAndClassifyRetryableFailures() {
         val client = StreamingApiService.createClient()
         assertEquals(
@@ -40,6 +93,14 @@ class StreamingApiServiceTest {
         assertTrue(StreamingApiService.isRetryableFailure(503, "service unavailable"))
         assertFalse(StreamingApiService.isRetryableNetworkFailure("请求失败 (401) unauthorized"))
         assertFalse(StreamingApiService.isRetryableFailure(403, "forbidden"))
+    }
+
+    @Test
+    fun modelActivationErrorIsActionableAndNonRetryable() {
+        val body = """{"code":"InvalidParameter","message":"The product is not activated"}"""
+        assertTrue(ApiFailureDiagnostics.configurationHint(400, body).orEmpty().contains("未开通"))
+        assertFalse(StreamingApiService.isRetryableFailure(400, body))
+        assertNull(ApiFailureDiagnostics.configurationHint(400, "unsupported response_format"))
     }
 
     @Test
@@ -395,7 +456,8 @@ class StreamingApiServiceTest {
 
     private suspend fun collectOpenAiSse(
         streamBody: String,
-        request: ChatRequest
+        request: ChatRequest,
+        apiFormat: String = ProviderEntity.API_FORMAT_OPENAI
     ): List<StreamingApiService.StreamEvent> {
         val body = streamBody.toByteArray(Charsets.UTF_8)
         val serverFailure = AtomicReference<Throwable?>()
@@ -420,7 +482,7 @@ class StreamingApiServiceTest {
                     }
                 }.onFailure(serverFailure::set)
             }
-            val config = testConfig(server.localPort)
+            val config = testConfig(server.localPort).copy(apiFormat = apiFormat)
             val events = withTimeout(10_000) {
                 StreamingApiService.streamChatCompletion(config, request).toList()
             }

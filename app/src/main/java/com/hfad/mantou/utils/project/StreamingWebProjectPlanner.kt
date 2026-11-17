@@ -11,6 +11,7 @@ import com.hfad.mantou.data.logging.HarnessTraceStatus
 import com.hfad.mantou.data.logging.elapsedMillisSince
 import com.hfad.mantou.data.logging.record
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import java.security.MessageDigest
@@ -30,6 +31,7 @@ class StreamingWebProjectPlanner(
     private val onThinking: suspend (String) -> Unit = {},
     private val onProgress: suspend (Int) -> Unit = {},
     private val traceLogger: HarnessTraceLogger = HarnessTraceLogger {},
+    private val onRetry: suspend (String) -> Unit = {},
     private val streamChatCompletion: (
         ChatCallConfig,
         ChatRequest
@@ -48,6 +50,7 @@ class StreamingWebProjectPlanner(
         val diagnosticRunId = runId?.trim()?.takeIf(String::isNotEmpty)
         val traceRunId = diagnosticRunId ?: UNCORRELATED_RUN_ID
         var iteration = 0
+        var attempt = 0
         var phase = PlannerPhase.STREAM
         var completed = false
         var firstPayloadRecorded = false
@@ -57,6 +60,11 @@ class StreamingWebProjectPlanner(
         var failureDetails = emptyMap<String, String>()
         var response = StringBuilder()
 
+        val initialMessages = listOf(
+            ApiMessage("system", PLANNING_PROMPT),
+            ApiMessage(ChatMessage.ROLE_USER, userRequirement)
+        )
+        var request = planningRequest(initialMessages, diagnosticRunId)
         traceLogger.record(
             runId = traceRunId,
             component = "PLANNER",
@@ -67,7 +75,8 @@ class StreamingWebProjectPlanner(
             details = mapOf(
                 "model" to config.model,
                 "api_format" to config.apiFormat,
-                "max_tokens" to maxTokens.toString(),
+                "max_tokens" to request.maxTokens.toString(),
+                "reasoning_effort" to (request.reasoningEffort ?: "provider_default"),
                 "requirement_chars" to userRequirement.length.toString(),
                 "requirement_sha256" to sha256(userRequirement),
                 "system_prompt_chars" to PLANNING_PROMPT.length.toString(),
@@ -75,18 +84,13 @@ class StreamingWebProjectPlanner(
             )
         )
 
-        val initialMessages = listOf(
-            ApiMessage("system", PLANNING_PROMPT),
-            ApiMessage(ChatMessage.ROLE_USER, userRequirement)
-        )
-        var request = planningRequest(
-            messages = initialMessages,
-            diagnosticRunId = diagnosticRunId,
-            iteration = iteration
-        )
-
+        var truncationRetryUsed = false
+        var transportRetryUsed = false
         try {
             while (true) {
+                attempt++
+                val attemptStartedAt = System.nanoTime()
+                var retry: PlannerRetry? = null
                 phase = PlannerPhase.STREAM
                 completed = false
                 firstPayloadRecorded = false
@@ -106,7 +110,8 @@ class StreamingWebProjectPlanner(
                                 status = HarnessTraceStatus.PROGRESS,
                                 message = "项目规划上游流已建立",
                                 iteration = iteration,
-                                durationMs = elapsedMillisSince(startedAt)
+                                durationMs = elapsedMillisSince(attemptStartedAt),
+                                details = mapOf("attempt" to attempt.toString())
                             )
                         }
 
@@ -131,6 +136,18 @@ class StreamingWebProjectPlanner(
 
                         is StreamingApiService.StreamEvent.Content -> {
                             contentChunks++
+                            if (contentChunks == 1) {
+                                traceLogger.record(
+                                    runId = traceRunId,
+                                    component = "PLANNER_STREAM",
+                                    operation = "first_content",
+                                    status = HarnessTraceStatus.PROGRESS,
+                                    message = "收到项目规划正文",
+                                    iteration = iteration,
+                                    durationMs = elapsedMillisSince(attemptStartedAt),
+                                    details = mapOf("attempt" to attempt.toString())
+                                )
+                            }
                             if (!firstPayloadRecorded) {
                                 firstPayloadRecorded = true
                                 traceLogger.record(
@@ -172,7 +189,9 @@ class StreamingWebProjectPlanner(
                                 put("stream_event", "disconnected")
                                 event.diagnosticId?.let { put("diagnostic_id", it) }
                             }
-                            throw WebAppProjectException(event.message)
+                            if (transportRetryUsed) throw WebAppProjectException(event.message)
+                            transportRetryUsed = true
+                            retry = PlannerRetry(PlannerRetryReason.TRANSPORT, request)
                         }
 
                         is StreamingApiService.StreamEvent.Error -> {
@@ -182,10 +201,60 @@ class StreamingWebProjectPlanner(
                                 event.httpStatus?.let { put("http_status", it.toString()) }
                                 event.diagnosticId?.let { put("diagnostic_id", it) }
                                 event.upstreamRequestId?.let { put("upstream_request_id", it) }
+                                event.finishReason?.let { put("finish_reason", it) }
                             }
-                            throw WebAppProjectException(event.message)
+                            val compatibilityRequest = request.withoutRejectedOptions(event)
+                            when {
+                                compatibilityRequest != null -> {
+                                    retry = PlannerRetry(PlannerRetryReason.COMPATIBILITY, compatibilityRequest)
+                                }
+                                event.finishReason in listOf("length", "max_tokens") &&
+                                    !truncationRetryUsed && request.maxTokens < MAX_RETRY_TOKENS -> {
+                                    truncationRetryUsed = true
+                                    val system = request.messages.first()
+                                    retry = PlannerRetry(
+                                        PlannerRetryReason.TRUNCATION,
+                                        request.copy(
+                                            maxTokens = (request.maxTokens.toLong() * 2)
+                                                .coerceAtMost(MAX_RETRY_TOKENS.toLong()).toInt(),
+                                            messages = listOf(system.copy(
+                                                content = system.content.toString() + "\n\n" + TRUNCATION_GUIDANCE
+                                            )) + request.messages.drop(1)
+                                        )
+                                    )
+                                }
+                                event.retryable && !transportRetryUsed -> {
+                                    transportRetryUsed = true
+                                    retry = PlannerRetry(PlannerRetryReason.TRANSPORT, request)
+                                }
+                                else -> throw WebAppProjectException(event.message)
+                            }
                         }
                     }
+                }
+                val next = retry
+                if (next != null) {
+                    traceLogger.record(
+                        runId = traceRunId,
+                        component = "PLANNER_REPAIR",
+                        operation = "retry_request",
+                        status = HarnessTraceStatus.STARTED,
+                        message = next.reason.message,
+                        iteration = iteration,
+                        durationMs = elapsedMillisSince(attemptStartedAt),
+                        details = responseDetails(response, contentChunks, thinkingChunks, thinkingChars) +
+                            failureDetails + mapOf(
+                                "attempt" to attempt.toString(),
+                                "retry_reason" to next.reason.name,
+                                "max_tokens" to next.request.maxTokens.toString(),
+                                "reasoning_effort" to (next.request.reasoningEffort ?: "provider_default"),
+                                "json_mode" to (next.request.responseFormat != null).toString()
+                            )
+                    )
+                    onRetry(next.reason.message)
+                    if (next.reason == PlannerRetryReason.TRANSPORT) delay(TRANSPORT_RETRY_DELAY_MS)
+                    request = next.request
+                    continue
                 }
                 if (!completed) throw WebAppProjectException("项目规划请求在返回完整计划前结束")
 
@@ -205,6 +274,12 @@ class StreamingWebProjectPlanner(
                     )
                 )
                 val result = try {
+                    if (response.isBlank()) {
+                        throw WebAppProjectException(
+                            if (thinkingChars > 0) "模型只返回了思考内容，未返回项目计划 JSON 正文"
+                            else "模型返回了空响应，未返回项目计划 JSON 正文"
+                        )
+                    }
                     WebProjectPlanCodec.parse(response.toString(), requireAppSpec = true)
                 } catch (error: Exception) {
                     if (error is CancellationException) throw error
@@ -219,7 +294,7 @@ class StreamingWebProjectPlanner(
                         "phase" to phase.logValue,
                         "stream_completed" to completed.toString(),
                         "error_type" to error::class.java.simpleName,
-                        "attempt_count" to (iteration + 1).toString()
+                        "attempt_count" to attempt.toString()
                     )
                     traceLogger.record(
                         runId = traceRunId,
@@ -248,16 +323,22 @@ class StreamingWebProjectPlanner(
                     }
 
                     val nextIteration = iteration + 1
-                    request = planningRequest(
-                        messages = initialMessages + listOf(
+                    val feedback = ApiMessage(ChatMessage.ROLE_USER, repairFeedback(diagnostics))
+                    val repairMessages = if (response.isBlank()) {
+                        listOf(request.messages.first(), initialMessages.last().copy(
+                            content = "$userRequirement\n\n${feedback.content}"
+                        ))
+                    } else {
+                        listOf(
+                            request.messages.first(),
+                            initialMessages.last(),
                             ApiMessage(ChatMessage.ROLE_ASSISTANT, response.toString()),
-                            ApiMessage(
-                                ChatMessage.ROLE_USER,
-                                repairFeedback(diagnostics)
-                            )
-                        ),
-                        diagnosticRunId = diagnosticRunId,
-                        iteration = nextIteration
+                            feedback
+                        )
+                    }
+                    request = request.copy(
+                        messages = repairMessages,
+                        diagnosticContext = request.diagnosticContext?.copy(iteration = nextIteration)
                     )
                     traceLogger.record(
                         runId = traceRunId,
@@ -272,6 +353,7 @@ class StreamingWebProjectPlanner(
                             "max_repair_attempts" to MAX_REPAIR_ATTEMPTS.toString()
                         )
                     )
+                    onRetry("项目计划未通过验收规则校验，正在按诊断修复")
                     iteration = nextIteration
                     continue
                 }
@@ -289,7 +371,7 @@ class StreamingWebProjectPlanner(
                         .acceptanceContract.criteria.size.toString(),
                     "display_name_chars" to result.manifest.displayName.length.toString(),
                     "display_name_sha256" to sha256(result.manifest.displayName),
-                    "attempt_count" to (iteration + 1).toString()
+                    "attempt_count" to attempt.toString()
                 )
                 traceLogger.record(
                     runId = traceRunId,
@@ -341,7 +423,7 @@ class StreamingWebProjectPlanner(
                     thinkingChars = thinkingChars
                 ) + mapOf(
                     "phase" to phase.logValue,
-                    "attempt_count" to (iteration + 1).toString()
+                    "attempt_count" to attempt.toString()
                 )
             )
             throw error
@@ -355,7 +437,7 @@ class StreamingWebProjectPlanner(
                 "phase" to phase.logValue,
                 "stream_completed" to completed.toString(),
                 "error_type" to error::class.java.simpleName,
-                "attempt_count" to (iteration + 1).toString()
+                "attempt_count" to attempt.toString()
             )
             traceLogger.record(
                 runId = traceRunId,
@@ -377,21 +459,35 @@ class StreamingWebProjectPlanner(
 
     private fun planningRequest(
         messages: List<ApiMessage>,
-        diagnosticRunId: String?,
-        iteration: Int
+        diagnosticRunId: String?
     ): ChatRequest {
+        val openAiFormat = !config.isAnthropic
         return ChatRequest(
             model = config.model,
             messages = messages,
             stream = true,
             maxTokens = maxTokens,
+            responseFormat = if (openAiFormat) mapOf("type" to "json_object") else null,
+            reasoningEffort = config.webProjectReasoningEffort,
             temperature = 0.2,
             topP = 0.9,
             diagnosticContext = ApiDiagnosticContext(
                 runId = diagnosticRunId,
                 operation = "harness.plan",
-                iteration = iteration
+                iteration = 0
             )
+        )
+    }
+
+    private fun ChatRequest.withoutRejectedOptions(event: StreamingApiService.StreamEvent.Error): ChatRequest? {
+        val rejectedJsonMode = responseFormat != null &&
+            (event.rejectsRequestOption("response_format") || event.rejectsRequestOption("json_object"))
+        val rejectedReasoningEffort = reasoningEffort != null &&
+            event.rejectsRequestOption("reasoning_effort")
+        if (!rejectedJsonMode && !rejectedReasoningEffort) return null
+        return copy(
+            responseFormat = responseFormat.takeUnless { rejectedJsonMode },
+            reasoningEffort = reasoningEffort.takeUnless { rejectedReasoningEffort }
         )
     }
 
@@ -477,10 +573,14 @@ class StreamingWebProjectPlanner(
 
     private companion object {
         const val DEFAULT_MAX_TOKENS = 8_000
+        const val MAX_RETRY_TOKENS = 32_000
+        const val TRANSPORT_RETRY_DELAY_MS = 1_000L
         const val UNCORRELATED_RUN_ID = "planner-unscoped"
         const val MAX_REPAIR_ATTEMPTS = 1
         const val MAX_DIAGNOSTIC_CHARS = 1_000
         val DIAGNOSTIC_WHITESPACE = Regex("\\s+")
+        const val TRUNCATION_GUIDANCE =
+            "上一轮计划达到输出上限。直接返回精简的完整 JSON，保留用户明确要求、完整 appSpec 及验收条件。"
 
         fun sha256(content: String): String {
             return MessageDigest.getInstance("SHA-256")
@@ -536,15 +636,17 @@ class StreamingWebProjectPlanner(
                   {"id":"reject-empty","title":"阻止空内容提交","interactionIds":["reject-empty-item"],"criterionIds":["AC-003"]}
                 ],
                 "design": {
-                  "theme":"清晰、克制的移动端主题",
+                  "theme":"单手快速记录的 Android 工具。紧凑顶栏、同一条内容边线，主色用于保存和当前状态。",
                   "tokens":[
-                    {"name":"color-primary","value":"#4F46E5","purpose":"主要操作"},
-                    {"name":"space-md","value":"16px","purpose":"标准间距"},
-                    {"name":"radius-md","value":"12px","purpose":"卡片和控件圆角"}
+                    {"name":"color-primary","value":"#2B5D47","purpose":"保存按钮底色与选中状态"},
+                    {"name":"color-surface","value":"#FAFAF4","purpose":"页面底色"},
+                    {"name":"color-text","value":"#18201B","purpose":"标题、正文与表单文字"},
+                    {"name":"space-md","value":"16px","purpose":"页面横向边距"},
+                    {"name":"title-size","value":"22px","purpose":"顶栏标题字号"}
                   ],
-                  "constraints":["无横向溢出","支持安全区和内容滚动","文本与背景保持可读对比度"],
+                  "constraints":["从顶栏、输入与保存、到记录列表排列；首屏可见主操作","记录列表使用分隔线；空态就地提示创建第一条记录","键盘出现后输入与保存仍可通过纵向滚动触达"],
                   "viewportWidths":[360,393],
-                  "minTouchTargetPx":44
+                  "minTouchTargetPx":48
                 },
                 "acceptanceContract": {
                   "criteria":[
@@ -585,6 +687,11 @@ class StreamingWebProjectPlanner(
             }
 
             约束：
+            - 直接生成精简规划。只为实际需求增加文件与验收条件；简单项目优先使用示例的三文件结构。
+            - 先确定谁在什么场景使用、打开后第一步做什么。screens[].purpose 写出各屏的内容顺序和主操作，components 写出操作反馈及相关状态。
+            - design.theme 用一句话定下适合题材的视觉方向。tokens 为本项目指定实际使用的色彩角色、字号等级和间距，约束写清首屏、主要操作位置、导航或返回路径及键盘遮挡时的行为。示例配色仅说明字段关系。
+            - 工具默认参照 Android Material 3 的组件和交互层级。单屏任务用紧凑标题栏和就地操作，多目的地才规划底部导航，短任务可用底部面板，长编辑用独立界面。游戏、绘图等沉浸内容保留题材风格，优先规划画布、控制区、手势冲突与暂停恢复。用户指定的风格和横竖屏优先。
+            - 手机主要控件的有效点击区域至少 48 CSS px，正常字号文本与背景至少 4.5:1。使用实际功能决定组件，去掉标语、占位数据、装饰性徽标和重复状态提醒。
             - 文件数 3-24 个，必须包含且只包含一个 entry，并至少包含独立 CSS 与独立 JavaScript。
             - 可以按需规划 data/*.json、assets/*.svg 和拆分后的 JS modules，但不规划二进制文件。
             - 路径只能使用项目内相对路径和 `/`，不能出现隐藏目录、空段、`.`、`..` 或绝对路径。
@@ -608,6 +715,14 @@ class StreamingWebProjectPlanner(
         STREAM("stream"),
         PARSE("parse")
     }
+
+    private enum class PlannerRetryReason(val message: String) {
+        COMPATIBILITY("模型接口拒绝了可选参数，正在使用兼容参数重新规划"),
+        TRUNCATION("规划输出达到上限，正在增加预算并生成更精简的计划"),
+        TRANSPORT("模型连接中断或服务暂时不可用，正在重试项目规划")
+    }
+
+    private data class PlannerRetry(val reason: PlannerRetryReason, val request: ChatRequest)
 
     private data class PlannerRepairDiagnostic(
         val code: String,

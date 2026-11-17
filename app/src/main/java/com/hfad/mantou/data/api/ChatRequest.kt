@@ -31,6 +31,12 @@ data class ChatRequest(
     @SerializedName("stream_options")
     val streamOptions: StreamOptions? = if (stream) StreamOptions() else null,
 
+    @SerializedName("response_format")
+    val responseFormat: Map<String, String>? = null,
+
+    @SerializedName("reasoning_effort")
+    val reasoningEffort: String? = null,
+
     @Transient
     val diagnosticContext: ApiDiagnosticContext? = null,
 
