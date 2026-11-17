@@ -169,7 +169,9 @@ data class HarnessLimits(
     val modelRetryBaseDelayMs: Long = 600,
     val modelRetryMaxDelayMs: Long = 2_400,
     val maxDiagnostics: Int = 40,
-    val maxDiagnosticChars: Int = 24_000
+    val maxDiagnosticChars: Int = 24_000,
+    val allowSelfTestBypass: Boolean = true,
+    val maxTotalModelTurns: Int = 256
 ) {
     init {
         require(maxCodeIterations > 0)
@@ -180,6 +182,7 @@ data class HarnessLimits(
         require(modelRetryMaxDelayMs >= modelRetryBaseDelayMs)
         require(maxDiagnostics > 0)
         require(maxDiagnosticChars > 0)
+        require(maxTotalModelTurns > 0)
     }
 
     private companion object {

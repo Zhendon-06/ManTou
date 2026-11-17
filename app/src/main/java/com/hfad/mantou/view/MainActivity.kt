@@ -11,6 +11,7 @@ import androidx.core.view.GravityCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnNextLayout
 import androidx.drawerlayout.widget.DrawerLayout
 import com.hfad.mantou.R
 import com.hfad.mantou.service.HarnessForegroundService
@@ -85,6 +86,11 @@ class MainActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         ViewCompat.requestApplyInsets(findViewById(R.id.main))
         ViewCompat.requestApplyInsets(findViewById(R.id.drawerMenu))
+        // Glass targets use pixel bounds; refresh after the rotated layout is measured.
+        drawerLayout.doOnNextLayout {
+            glassHandle?.refresh()
+        }
+        drawerLayout.requestLayout()
         drawerLayout.post {
             applySystemBarIconAppearance()
             glassHandle?.refresh()

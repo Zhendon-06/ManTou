@@ -45,7 +45,7 @@
             android:exported="false" />
         <activity
             android:name=".view.MainActivity"
-            android:configChanges="orientation|screenSize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:exported="true"
             android:windowSoftInputMode="adjustNothing">
             <intent-filter>
@@ -56,6 +56,7 @@
         </activity>
         <activity
             android:name=".view.VirtualAppActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:exported="true"
             android:theme="@style/Theme.ManTou">
             <intent-filter>

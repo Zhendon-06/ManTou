@@ -102,8 +102,6 @@ internal class GlassHostView(
             composeView,
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         )
-        viewTreeObserver.addOnGlobalLayoutListener(onGlobalLayout)
-        viewTreeObserver.addOnScrollChangedListener(onScrollChanged)
         contentRoot.addOnAttachStateChangeListener(onContentAttachStateChange)
     }
 
@@ -159,25 +157,45 @@ internal class GlassHostView(
         }
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (disposed) return
+        viewTreeObserver.addOnGlobalLayoutListener(onGlobalLayout)
+        viewTreeObserver.addOnScrollChangedListener(onScrollChanged)
+        post { refreshTargets() }
+    }
+
     override fun onDetachedFromWindow() {
+        // A window detach can be temporary (for example during configuration changes).
+        // Keep the host reusable when Compose recreates its AndroidView on reattach.
+        removeTreeListeners()
+        restoreContent()
         super.onDetachedFromWindow()
-        if (!disposed) release()
     }
 
     private fun release() {
         disposed = true
+        removeTreeListeners()
+        restoreContent()
+        contentRoot.removeOnAttachStateChangeListener(onContentAttachStateChange)
+        LiquidGlass.onHostDisposed(this)
+        composeView.disposeComposition()
+    }
+
+    private fun removeTreeListeners() {
         if (viewTreeObserver.isAlive) {
             viewTreeObserver.removeOnGlobalLayoutListener(onGlobalLayout)
             viewTreeObserver.removeOnScrollChangedListener(onScrollChanged)
         }
+    }
+
+    private fun restoreContent() {
         originalBackgrounds.forEach { (view, background) -> view.background = background }
         originalAlphas.forEach { (view, alpha) -> view.alpha = alpha }
         originalBackgrounds.clear()
         backgroundPlaceholders.clear()
         originalAlphas.clear()
-        contentRoot.removeOnAttachStateChangeListener(onContentAttachStateChange)
-        LiquidGlass.onHostDisposed(this)
-        composeView.disposeComposition()
+        targets = emptyList()
     }
 
     private fun collectStyledViews(view: View, result: MutableList<Pair<View, GlassStyle>>) {

@@ -160,7 +160,7 @@ internal class HarnessActivityRenderer(
             }
             val stateColor = when (event.outcome) {
                 GenerateTaskState.Outcome.FAILED -> ContextCompat.getColor(context, R.color.mt_error)
-                GenerateTaskState.Outcome.RETRYING -> ContextCompat.getColor(context, R.color.mt_primary_dark)
+                GenerateTaskState.Outcome.RETRYING, GenerateTaskState.Outcome.WARNING -> ContextCompat.getColor(context, R.color.mt_primary_dark)
                 else -> secondaryColor
             }
 
@@ -181,7 +181,7 @@ internal class HarnessActivityRenderer(
             eventBinding.ivHarnessEventState.setImageResource(
                 when (event.outcome) {
                     GenerateTaskState.Outcome.PASSED -> R.drawable.ic_harness_check
-                    GenerateTaskState.Outcome.FAILED -> R.drawable.ic_harness_error
+                    GenerateTaskState.Outcome.FAILED, GenerateTaskState.Outcome.WARNING -> R.drawable.ic_harness_error
                     GenerateTaskState.Outcome.RETRYING -> R.drawable.ic_harness_retry
                     GenerateTaskState.Outcome.RUNNING -> R.drawable.ic_harness_check
                 }

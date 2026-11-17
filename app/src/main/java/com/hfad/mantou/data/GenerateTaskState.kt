@@ -43,7 +43,11 @@ data class GenerateTaskState(
             Phase.SELF_TESTING -> "正在运行应用自测"
             Phase.TESTING -> "正在运行测试集"
             Phase.REPAIRING -> "正在自动修复"
-            Phase.COMPLETED -> if (isModification) "应用源码已更新" else "应用已通过验证"
+            Phase.COMPLETED -> when {
+                harnessEvents.any { it.outcome == Outcome.WARNING } -> "应用已交付（含验收警告）"
+                isModification -> "应用源码已更新"
+                else -> "应用已通过验证"
+            }
             Phase.ERROR -> "生成任务出错"
         }
 
@@ -117,6 +121,7 @@ data class GenerateTaskState(
     enum class Outcome {
         RUNNING,
         PASSED,
+        WARNING,
         FAILED,
         RETRYING
     }

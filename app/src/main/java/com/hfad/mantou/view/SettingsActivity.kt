@@ -7,6 +7,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.hfad.mantou.databinding.ActivitySettingsBinding
+import com.hfad.mantou.data.preferences.HarnessSettingsStore
+import com.hfad.mantou.utils.harness.HarnessIntensity
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
 class SettingsActivity : AppCompatActivity() {
 
@@ -25,6 +28,26 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         binding.toolbar.setNavigationOnClickListener { finish() }
+        fun refreshIntensity() {
+            val intensity = HarnessSettingsStore.intensity(this)
+            binding.tvHarnessIntensity.text = "生成强度：${intensity.label}"
+        }
+        refreshIntensity()
+        binding.rowHarnessIntensity.setOnClickListener {
+            val options = HarnessIntensity.entries
+            MaterialAlertDialogBuilder(this)
+                .setTitle("生成强度")
+                .setSingleChoiceItems(
+                    options.map { "${it.label} · ${it.description}" }.toTypedArray(),
+                    options.indexOf(HarnessSettingsStore.intensity(this))
+                ) { dialog, index ->
+                    HarnessSettingsStore.setIntensity(this, options[index])
+                    refreshIntensity()
+                    dialog.dismiss()
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        }
         binding.rowModelConfig.setOnClickListener {
             startActivity(Intent(this, ModelSettingActivity::class.java))
         }

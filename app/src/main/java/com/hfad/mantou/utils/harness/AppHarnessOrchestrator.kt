@@ -55,6 +55,9 @@ class AppHarnessOrchestrator(
                 put("self_test_script_chars", request.selfTestScript.orEmpty().length.toString())
                 put("test_suite_script_chars", request.testSuiteScript.orEmpty().length.toString())
                 put("max_iterations", limits.maxCodeIterations.toString())
+                put("max_total_model_turns", limits.maxTotalModelTurns.toString())
+                put("self_test_bypass_allowed", limits.allowSelfTestBypass.toString())
+                request.metadata["intensity"]?.let { put("intensity", it) }
             }
         )
 
@@ -145,7 +148,7 @@ class AppHarnessOrchestrator(
         emit(
             stage = GenerateTaskState.Stage.INPUT,
             outcome = GenerateTaskState.Outcome.PASSED,
-            message = "输入过滤完成",
+            message = request.metadata["intensity"]?.let { "输入过滤完成 · 执行强度 $it" } ?: "输入过滤完成",
             diagnostics = preparedPrompt.notices
         )
         traceLogger.record(
@@ -239,6 +242,9 @@ class AppHarnessOrchestrator(
                         )
                     }
                     iterationTurn++
+                    if (totalModelTurns >= limits.maxTotalModelTurns) {
+                        throw HarnessLimitException("已达到 ${limits.maxTotalModelTurns} 次模型编排预算，保留草稿")
+                    }
                     totalModelTurns++
                     emit(
                     stage = GenerateTaskState.Stage.MODEL,
@@ -849,7 +855,8 @@ class AppHarnessOrchestrator(
                         } else {
                             selfTestFailureCount++
                             val canRequestSelfTestRepair =
-                                selfTestFailureCount < limits.maxSelfTestFailuresBeforeBypass &&
+                                (!limits.allowSelfTestBypass ||
+                                    selfTestFailureCount < limits.maxSelfTestFailuresBeforeBypass) &&
                                     iteration < limits.maxCodeIterations
                             if (canRequestSelfTestRepair) {
                                 runCodingIteration(
@@ -859,10 +866,13 @@ class AppHarnessOrchestrator(
                                 gate = HarnessGate.DEVELOPMENT_BUILD
                                 transitionReason = "self_test_failed_repaired"
                             } else {
+                                if (!limits.allowSelfTestBypass) {
+                                    throw HarnessLimitException("严格模式自测未通过，停止交付：${result.diagnostics.joinToString("; ").take(2000)}")
+                                }
                                 selfTestBypassed = true
                                 emit(
                                     stage = GenerateTaskState.Stage.SELF_TEST,
-                                    outcome = GenerateTaskState.Outcome.PASSED,
+                                    outcome = GenerateTaskState.Outcome.WARNING,
                                     message = "页面自测第 ${selfTestFailureCount} 次未通过，已按非阻塞策略放行",
                                     diagnostics = (
                                         listOf(
@@ -899,7 +909,7 @@ class AppHarnessOrchestrator(
                         if (result.passed) {
                             emit(
                                 stage = GenerateTaskState.Stage.DELIVER,
-                                outcome = GenerateTaskState.Outcome.PASSED,
+                                outcome = if (selfTestBypassed) GenerateTaskState.Outcome.WARNING else GenerateTaskState.Outcome.PASSED,
                                 message = if (selfTestBypassed) {
                                     "构建、运行检查和测试均已通过；自测未通过但已按非阻塞策略放行，可以交付"
                                 } else {

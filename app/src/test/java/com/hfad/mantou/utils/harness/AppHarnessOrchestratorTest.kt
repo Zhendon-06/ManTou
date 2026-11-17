@@ -16,6 +16,44 @@ import org.junit.Test
 class AppHarnessOrchestratorTest {
 
     @Test
+    fun strictSelfTestFailureNeverPublishes() = runBlocking {
+        var finalSuiteRan = false
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair { HarnessModelTurn(content = "ready") },
+            fileTool = HarnessFileTool { HarnessToolResult(it.call.id, true, "ok") },
+            builder = HarnessBuilder { HarnessCheckResult(true, "ok") },
+            inspector = HarnessInspector { HarnessCheckResult(true, "ok") },
+            testRunner = HarnessTestRunner {
+                if (it.kind == HarnessCheckKind.TEST_SUITE) finalSuiteRan = true
+                HarnessCheckResult(false, "failed", listOf("CORE_FAILED"))
+            },
+            limits = HarnessLimits(maxCodeIterations = 2, allowSelfTestBypass = false)
+        )
+        val events = mutableListOf<GenerateTaskState.HarnessEvent>()
+        assertTrue(orchestrator.run(newRequest()) { events += it } is HarnessRunResult.Failed)
+        assertFalse(finalSuiteRan)
+        assertFalse(events.any { it.operation == "SELF_TEST_BYPASS" })
+    }
+
+    @Test
+    fun totalTurnBudgetStopsToolLoop() = runBlocking {
+        var calls = 0
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair {
+                calls++
+                HarnessModelTurn(toolCalls = listOf(HarnessToolCall("$calls", "read_file", mapOf("path" to "index.html"))))
+            },
+            fileTool = HarnessFileTool { HarnessToolResult(it.call.id, true, "ok") },
+            builder = HarnessBuilder { HarnessCheckResult(true, "ok") },
+            inspector = HarnessInspector { HarnessCheckResult(true, "ok") },
+            testRunner = HarnessTestRunner { HarnessCheckResult(true, "ok") },
+            limits = HarnessLimits(maxTotalModelTurns = 2)
+        )
+        assertTrue(orchestrator.run(newRequest()) is HarnessRunResult.Failed)
+        assertEquals(2, calls)
+    }
+
+    @Test
     fun traceCapturesToolMetadataGateTransitionsAndScriptHashes() = runBlocking {
         val traces = mutableListOf<HarnessTraceEvent>()
         val turns = ArrayDeque(
@@ -268,7 +306,7 @@ class AppHarnessOrchestratorTest {
             modelPurposes
         )
         val bypass = events.single { it.operation == "SELF_TEST_BYPASS" }
-        assertEquals(GenerateTaskState.Outcome.PASSED, bypass.outcome)
+        assertEquals(GenerateTaskState.Outcome.WARNING, bypass.outcome)
         assertTrue(bypass.message.contains("第 2 次"))
         assertTrue(bypass.diagnostics.contains("self_test_policy=advisory"))
     }

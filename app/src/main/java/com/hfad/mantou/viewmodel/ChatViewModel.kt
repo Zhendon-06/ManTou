@@ -52,7 +52,7 @@ import com.hfad.mantou.utils.harness.HarnessBuilder
 import com.hfad.mantou.utils.harness.HarnessCheckResult
 import com.hfad.mantou.utils.harness.HarnessFileTask
 import com.hfad.mantou.utils.harness.HarnessFileTool
-import com.hfad.mantou.utils.harness.HarnessLimits
+import com.hfad.mantou.data.preferences.HarnessSettingsStore
 import com.hfad.mantou.utils.harness.HarnessRunRequest
 import com.hfad.mantou.utils.harness.HarnessRunResult
 import com.hfad.mantou.utils.harness.HarnessToolResult
@@ -1095,15 +1095,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     inspectionAdapter.build(checkRequest)
                 }
             }
+            val intensity = HarnessSettingsStore.intensity(getApplication<Application>())
             val orchestrator = AppHarnessOrchestrator(
                 modelRepair = modelRepair,
                 fileTool = harnessFileTool,
                 builder = projectBuilder,
                 inspector = inspectionAdapter,
                 testRunner = inspectionAdapter,
-                limits = HarnessLimits(
-                    maxCodeIterations = GENERATED_APP_HARNESS_MAX_ITERATIONS
-                ),
+                limits = intensity.limits(),
                 eventLogger = { eventRunId, event ->
                     logHarnessEvent(state.sessionId, eventRunId, event)
                 },
@@ -1121,12 +1120,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         testSuiteScript = GeneratedAppHarnessScripts.testSuite,
                         acceptanceContract = binding.manifest.appSpec?.acceptanceContract,
                         acceptanceRequired = binding.manifest.appSpec != null,
-                        qualityGateContract = binding.manifest.appSpec?.design?.let { design ->
+                        qualityGateContract = intensity.qualityGate(binding.manifest.appSpec?.design?.let { design ->
                             WebQualityGateContract().withDesignRequirements(
                                 viewportWidths = design.viewportWidths,
                                 minTouchTargetCssPixels = design.minTouchTargetPx
                             )
-                        } ?: WebQualityGateContract(),
+                        } ?: WebQualityGateContract()),
                         planPath = PROJECT_PLAN_FILE_NAME.takeUnless { isModification },
                         fileTasks = if (isModification) {
                             emptyList()
@@ -1144,7 +1143,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                     )
                                 }
                         },
-                        metadata = mapOf("projectId" to binding.manifest.projectId)
+                        metadata = mapOf(
+                            "projectId" to binding.manifest.projectId,
+                            "intensity" to intensity.name
+                        )
                     )
                 ) { event ->
                     val projectFiles = withContext(Dispatchers.IO) {
@@ -2879,9 +2881,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         initialCode: String? = null
     ) {
         var iteration = startingIteration.coerceAtLeast(1)
+        val maxIterations = HarnessSettingsStore.intensity(getApplication<Application>()).iterations
         var code = initialCode ?: withContext(Dispatchers.IO) { htmlFile.readText() }
 
-        while (iteration <= GENERATED_APP_HARNESS_MAX_ITERATIONS) {
+        while (iteration <= maxIterations) {
             val inspectorWebView = withContext(Dispatchers.Main) {
                 WebView(getApplication<Application>())
             }
@@ -3172,7 +3175,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        throw IllegalStateException("Harness 自动修复已达到 $GENERATED_APP_HARNESS_MAX_ITERATIONS 轮上限")
+        throw IllegalStateException("Harness 自动修复已达到 $maxIterations 轮上限")
     }
 
     private fun updateHarnessFailure(
@@ -4684,7 +4687,6 @@ private const val WEB_HARNESS_LOG_TAG = "ManTouHarness"
 private const val APP_DIFF_LOG_PREVIEW_CHARS = 3_000
 private const val HARNESS_TRACE_VALUE_CHARS = 1_000
 private const val HARNESS_TRACE_DETAILS_CHARS = 8_000
-private const val GENERATED_APP_HARNESS_MAX_ITERATIONS = 8
 private const val GENERATED_APP_REPAIR_PATCH_ATTEMPTS = 2
 private const val HARNESS_NOTIFICATION_UPDATE_INTERVAL_MS = 750L
 private const val PROJECT_PLAN_FILE_NAME = "project.json"
