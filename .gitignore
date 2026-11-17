@@ -28,3 +28,4 @@ __pycache__/
 /.kotlin/
 /.claude/settings.local.json
 /tmp/pdfs/
+/output/pdf/
