@@ -237,7 +237,7 @@ class WebAppProjectWorkspace(
         val stagingRoot = File(parent, ".${root.name}.adopt-${UUID.randomUUID()}")
         var managedPathsCreated = false
         try {
-            WebProjectPaths.copyDirectory(root, stagingRoot)
+            WebProjectPaths.copyDirectory(root, stagingRoot, excludedRootDirectory = RUNTIME_MEDIA_DIRECTORY_NAME)
             val stagedEntry = WebProjectPaths.resolve(stagingRoot, manifest.entryPoint)
             if (!stagedEntry.isFile) {
                 throw WebAppProjectException("Copied legacy entry point is missing: ${manifest.entryPoint}")
@@ -544,6 +544,7 @@ class WebAppProjectWorkspace(
         const val MANIFEST_FILE_NAME = "project.json"
         const val WORKSPACE_STATE_FILE_NAME = "workspace.json"
         const val RUNTIME_STATE_FILE_NAME = "app-state.json"
+        private const val RUNTIME_MEDIA_DIRECTORY_NAME = ".mantou-media"
         const val DRAFTS_DIRECTORY_NAME = "drafts"
         const val RELEASES_DIRECTORY_NAME = "releases"
         private const val WORKSPACE_SCHEMA_VERSION = 1
@@ -558,6 +559,9 @@ class WebAppProjectWorkspace(
 
         fun runtimeStateFile(projectRoot: File): File =
             File(metadataDirectory(projectRoot), RUNTIME_STATE_FILE_NAME)
+
+        internal fun runtimeMediaDirectory(projectRoot: File): File =
+            File(projectRoot, RUNTIME_MEDIA_DIRECTORY_NAME)
 
         fun metadataDirectory(projectRoot: File): File =
             File(projectRoot, METADATA_DIRECTORY_NAME)
@@ -1386,7 +1390,7 @@ internal object WebProjectPaths {
         }
     }
 
-    fun copyDirectory(source: File, target: File) {
+    fun copyDirectory(source: File, target: File, excludedRootDirectory: String? = null) {
         if (!source.isDirectory) throw WebAppProjectException("Copy source is not a directory: ${source.path}")
         if (target.exists()) throw WebAppProjectException("Copy target already exists: ${target.path}")
         target.mkdirsOrThrow()
@@ -1396,6 +1400,7 @@ internal object WebProjectPaths {
                 val sourcePath = iterator.next()
                 if (sourcePath == source.toPath()) continue
                 val relative = source.toPath().relativize(sourcePath)
+                if (relative.getName(0).toString() == excludedRootDirectory) continue
                 val targetPath = target.toPath().resolve(relative)
                 if (Files.isSymbolicLink(sourcePath)) {
                     throw WebAppProjectException("Symbolic links cannot be copied into a project version")

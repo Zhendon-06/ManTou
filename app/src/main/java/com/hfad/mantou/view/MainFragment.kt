@@ -83,6 +83,7 @@ import com.hfad.mantou.databinding.LayoutDesktopPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
 import com.hfad.mantou.data.repository.ProviderRepository
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
+import com.hfad.mantou.tool.impl.WebAppDeviceHost
 import com.hfad.mantou.tool.impl.CameraPhotoHost
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.AutoContrastColor
@@ -138,6 +139,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private val selectedImageUris = mutableListOf<Uri>()
     private var activeAppWebView: WebView? = null
     private lateinit var cameraPhotoHost: CameraPhotoHost
+    private lateinit var webAppDeviceHost: WebAppDeviceHost
     private var voiceRecorder: WavAudioRecorder? = null
     private var voiceInputFile: File? = null
     private var voiceRecordingConfig: VoiceInputConfig? = null
@@ -207,6 +209,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        webAppDeviceHost = WebAppDeviceHost(requireActivity(), this, this)
         cameraPhotoHost = CameraPhotoHost(
             activity = requireActivity(),
             takePictureLauncher = takePictureLauncher,
@@ -1747,6 +1750,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
      */
     private fun setupChatRecyclerView() {
         chatAdapter = ChatAdapter(
+            deviceHost = webAppDeviceHost,
             onDataChanged = { itemCount ->
                 updateGreetingVisibility(itemCount > 0)
             },

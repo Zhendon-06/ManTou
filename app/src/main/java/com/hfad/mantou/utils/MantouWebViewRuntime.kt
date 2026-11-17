@@ -1,13 +1,28 @@
 package com.hfad.mantou.utils
 
+import android.graphics.Bitmap
+import android.net.Uri
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.hfad.mantou.tool.BaseTool
 import com.hfad.mantou.tool.MantouTool
 import com.hfad.mantou.tool.ToolMethod
 import com.hfad.mantou.tool.ToolParam
 import com.hfad.mantou.tool.ToolReturns
 import com.hfad.mantou.tool.ToolRegistry
+import com.hfad.mantou.tool.impl.NotificationTool
+import com.hfad.mantou.tool.impl.PhotoPickerTool
+import com.hfad.mantou.tool.impl.RecorderTool
+import com.hfad.mantou.tool.impl.SpeechTool
+import com.hfad.mantou.tool.impl.WebAppDeviceHost
+import com.hfad.mantou.tool.impl.WebAppDevicePage
+import com.hfad.mantou.tool.impl.WebAppMedia
+import com.hfad.mantou.utils.project.WebAppProjectSnapshot
+import com.hfad.mantou.utils.project.WebAppProjectWorkspace
+import com.hfad.mantou.utils.project.WebProjectPaths
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -19,32 +34,87 @@ object MantouWebViewRuntime {
     private const val TOOL_BRIDGE_PREFIX = "MantouApp_"
     private const val STORAGE_TOOL_NAME = "storage"
 
-    fun install(
+    internal fun install(
         webView: WebView,
-        htmlFile: File? = null,
-        storageFile: File? = null
-    ) {
+        snapshot: WebAppProjectSnapshot,
+        contentServer: WebProjectContentServer?,
+        deviceHost: WebAppDeviceHost
+    ): String {
+        release(webView)
         webView.settings.userAgentString =
             AppGenerator.withMantouWebAppUserAgent(webView.settings.userAgentString)
 
-        // 主桥：暴露 isMantouApp() + getToolNames()，运行时门禁 + Tool 别名挂载用。
-        webView.addJavascriptInterface(MainBridge, AppGenerator.WEB_APP_BRIDGE_NAME)
-
-        // 把 Tools 实例化并逐个注册为独立 bridge。
-        // runtime guard 的 JS 会在页面里把它们挂到 window.MantouApp.<toolName> 下，
-        // 让生成网页可以写 `window.MantouApp.toast.toastShow(...)`。
         ToolRegistry.init(webView.context)
-        for (tool in ToolRegistry.instances()) {
+        val storageFile = if (contentServer == null) AppGenerator.ensureWebAppDataFile(snapshot.entryFile)
+            else WebAppProjectWorkspace.runtimeStateFile(snapshot.projectRoot)
+        val entryUrl = contentServer?.entryUrl ?: Uri.fromFile(snapshot.entryFile).toString()
+        val statePath = storageFile.canonicalPath
+        val workspacePath = AgentWorkspace.webDir(webView.context).canonicalPath + File.separator
+        val page = if (statePath.startsWith(workspacePath)) {
+            val key = WebProjectPaths.sha256(snapshot.projectRoot.canonicalPath.toByteArray()).take(32)
+            val directory = WebAppProjectWorkspace.runtimeMediaDirectory(snapshot.projectRoot)
+            val mediaHost = contentServer?.originHost
+                ?: WebProjectContentServer.originHostForIdentity(snapshot.manifest.projectId)
+            WebAppDevicePage(
+                webView, deviceHost,
+                WebAppMedia(directory, mediaHost, contentServer != null),
+                key, snapshot.manifest.displayName,
+                if (contentServer == null) snapshot.entryFile else snapshot.projectRoot,
+                entryUrl
+            )
+        } else {
+            null
+        }
+        val tools = buildList {
+            addAll(ToolRegistry.instances())
+            add(StorageTool(webView.context, storageFile))
+            if (page != null) {
+                add(PhotoPickerTool(page))
+                add(SpeechTool(page))
+                add(NotificationTool(page))
+                add(RecorderTool(page))
+            }
+        }
+        for (tool in tools) {
             webView.addJavascriptInterface(tool, TOOL_BRIDGE_PREFIX + tool.toolName)
         }
-        val resolvedStorageFile = storageFile ?: htmlFile?.let(AppGenerator::ensureWebAppDataFile)
         webView.addJavascriptInterface(
-            StorageTool(webView.context, resolvedStorageFile),
-            TOOL_BRIDGE_PREFIX + STORAGE_TOOL_NAME
+            MainBridge(tools.map(BaseTool::toolName)), AppGenerator.WEB_APP_BRIDGE_NAME
         )
+        webView.webViewClient = RuntimeClient(contentServer, page)
+        return entryUrl
     }
 
-    private object MainBridge {
+    fun release(webView: WebView) {
+        (webView.webViewClient as? RuntimeClient)?.close()
+        for (name in pageToolNames) webView.removeJavascriptInterface(TOOL_BRIDGE_PREFIX + name)
+    }
+
+    fun pauseAudio(webView: WebView) {
+        (webView.webViewClient as? RuntimeClient)?.pauseAudio()
+    }
+
+    private val pageToolNames = listOf("photoPicker", "speech", "notification", "recorder")
+
+    private class RuntimeClient(
+        private val contentServer: WebProjectContentServer?,
+        private val page: WebAppDevicePage?
+    ) : WebViewClient() {
+        fun close() = page?.close()
+
+        fun pauseAudio() = page?.let { it.host.interruptAudio(it) }
+
+        override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+            page?.onPageStarted(url)
+        }
+
+        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
+            page?.media?.intercept(request) ?: runCatching { contentServer?.intercept(request) }.getOrNull()
+    }
+
+    private class MainBridge(toolNames: List<String>) {
+        private val names = JSONArray(toolNames).toString()
+
         @JavascriptInterface
         fun isMantouApp(): Boolean = true
 
@@ -53,12 +123,7 @@ object MantouWebViewRuntime {
          * runtime guard JS 用它来构建 `window.MantouApp.<toolName>` 别名表。
          */
         @JavascriptInterface
-        fun getToolNames(): String {
-            val arr = JSONArray()
-            for (tool in ToolRegistry.instances()) arr.put(tool.toolName)
-            arr.put(STORAGE_TOOL_NAME)
-            return arr.toString()
-        }
+        fun getToolNames(): String = names
     }
 
     @MantouTool(

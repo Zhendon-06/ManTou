@@ -1,6 +1,7 @@
 package com.hfad.mantou.utils
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ToolPromptRetrieverTest {
@@ -53,5 +54,20 @@ class ToolPromptRetrieverTest {
 
         assertEquals(listOf("toast", "vibration"), result.names)
         assertEquals("required+embedding-none", result.source)
+    }
+
+    @Test
+    fun newDeviceToolsMatchChineseRequestsWithoutEmbeddings() {
+        val available = names + listOf("notification", "photoPicker", "recorder", "speech")
+        listOf(
+            "做一个可以从相册里选照片的手账" to "photoPicker",
+            "倒数时用语音播报" to "speech",
+            "做个能发测试通知的待办" to "notification",
+            "做个能回放的语音备忘录" to "recorder"
+        ).forEach { (message, tool) ->
+            val result = ToolPromptRetriever.selectNames(message, available, null)
+            assertTrue("No $tool documentation for $message", tool in result.names)
+            assertEquals("required+keyword-embedding-unavailable", result.source)
+        }
     }
 }

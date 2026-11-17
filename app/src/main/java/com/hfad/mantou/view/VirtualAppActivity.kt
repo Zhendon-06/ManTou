@@ -7,11 +7,8 @@ import android.provider.OpenableColumns
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -21,6 +18,7 @@ import com.hfad.mantou.R
 import com.hfad.mantou.databinding.VirtualappBinding
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
 import com.hfad.mantou.tool.impl.CameraPhotoHost
+import com.hfad.mantou.tool.impl.WebAppDeviceHost
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.AppGenerator
 import com.hfad.mantou.utils.MantouWebViewRuntime
@@ -29,7 +27,6 @@ import com.hfad.mantou.utils.project.WebAppProjectExporter
 import com.hfad.mantou.utils.project.WebAppProjectResolver
 import com.hfad.mantou.utils.project.WebAppProjectSnapshot
 import com.hfad.mantou.utils.project.WebAppProjectSnapshotKind
-import com.hfad.mantou.utils.project.WebAppProjectWorkspace
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -44,6 +41,7 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
     private lateinit var binding: VirtualappBinding
     private lateinit var webView: WebView
     private lateinit var cameraPhotoHost: CameraPhotoHost
+    private lateinit var webAppDeviceHost: WebAppDeviceHost
     private var currentHtmlPath: String? = null
     private var currentSnapshot: WebAppProjectSnapshot? = null
 
@@ -63,6 +61,7 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        webAppDeviceHost = WebAppDeviceHost(this, this, this)
 
         binding = VirtualappBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -95,7 +94,6 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
         val htmlPath = intent.getStringExtra(EXTRA_HTML_PATH)
 
         webView.apply {
-            webViewClient = WebViewClient()
             webChromeClient = WebChromeClient()
             settings.apply {
                 javaScriptEnabled = true
@@ -148,11 +146,9 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
         currentHtmlPath = entryFile.absolutePath
         currentSnapshot = snapshot
         webView.apply {
-            webViewClient = WebViewClient()
             settings.allowFileAccess = true
             settings.allowContentAccess = true
-            MantouWebViewRuntime.install(this, entryFile)
-            loadUrl("file://${entryFile.absolutePath}")
+            loadUrl(MantouWebViewRuntime.install(this, snapshot, null, webAppDeviceHost))
         }
         return true
     }
@@ -175,23 +171,9 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
         currentHtmlPath = snapshot.entryFile.absolutePath
         currentSnapshot = snapshot
         webView.apply {
-            webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(
-                    view: WebView,
-                    request: WebResourceRequest
-                ): WebResourceResponse? {
-                    return runCatching { contentServer.intercept(request) }.getOrNull()
-                        ?: super.shouldInterceptRequest(view, request)
-                }
-            }
             settings.allowFileAccess = false
             settings.allowContentAccess = false
-            MantouWebViewRuntime.install(
-                webView = this,
-                htmlFile = snapshot.entryFile,
-                storageFile = WebAppProjectWorkspace.runtimeStateFile(snapshot.projectRoot)
-            )
-            loadUrl(contentServer.entryUrl)
+            loadUrl(MantouWebViewRuntime.install(this, snapshot, contentServer, webAppDeviceHost))
         }
         return true
     }
@@ -450,6 +432,7 @@ class VirtualAppActivity : AppCompatActivity(), CameraPhotoBridge.Host {
     override fun onDestroy() {
         CameraPhotoBridge.detach(this)
         webView.apply {
+            MantouWebViewRuntime.release(this)
             stopLoading()
             settings.javaScriptEnabled = false
             loadUrl("about:blank")

@@ -12,7 +12,10 @@ class GeneratedToolMetadataTest {
     @Test
     fun kspGeneratesDocumentAndRuntimeRegistry() {
         assertEquals(
-            listOf("alarm", "calendar", "camera", "clipboard", "flashlight", "storage", "toast", "vibration"),
+            listOf(
+                "alarm", "calendar", "camera", "clipboard", "flashlight", "notification",
+                "photoPicker", "recorder", "speech", "storage", "toast", "vibration"
+            ),
             GeneratedMantouToolsDoc.documentedToolNames
         )
         assertEquals(
@@ -30,5 +33,13 @@ class GeneratedToolMetadataTest {
                 .contains("window.MantouApp.calendar.calendarAdd")
         )
         assertFalse(GeneratedToolRegistry.toolNames.contains("storage"))
+        mapOf(
+            "notification" to "notificationShow",
+            "photoPicker" to "photoPick",
+            "recorder" to "recordAudio",
+            "speech" to "speechSpeak"
+        ).forEach { (tool, method) ->
+            assertTrue(GeneratedMantouToolsDoc.markdown.contains("window.MantouApp.$tool.$method"))
+        }
     }
 }

@@ -11,11 +11,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.ImageView
 import android.widget.TextView
 import androidx.core.content.ContextCompat
@@ -34,15 +31,16 @@ import com.hfad.mantou.data.preferences.AppearanceSettingsStore
 import com.hfad.mantou.databinding.ItemChatAssistantBinding
 import com.hfad.mantou.databinding.ItemChatLoadingBinding
 import com.hfad.mantou.databinding.ItemChatUserBinding
+import com.hfad.mantou.tool.impl.WebAppDeviceHost
 import com.hfad.mantou.utils.MantouWebViewRuntime
 import com.hfad.mantou.utils.RichTextFormatter
 import com.hfad.mantou.utils.WebProjectContentServer
 import com.hfad.mantou.utils.project.WebAppProjectResolver
 import com.hfad.mantou.utils.project.WebAppProjectSnapshotKind
-import com.hfad.mantou.utils.project.WebAppProjectWorkspace
 import java.io.File
 
-class ChatAdapter(
+internal class ChatAdapter(
+    private val deviceHost: WebAppDeviceHost,
     private val onDataChanged: ((itemCount: Int) -> Unit)? = null,
     private val onFullscreenClick: ((htmlPath: String) -> Unit)? = null,
     private val onMessageLongClick: ((ChatMessage) -> Unit)? = null,
@@ -186,6 +184,11 @@ class ChatAdapter(
         }
     }
 
+    override fun onViewDetachedFromWindow(holder: RecyclerView.ViewHolder) {
+        super.onViewDetachedFromWindow(holder)
+        (holder as? AssistantMessageViewHolder)?.pauseWebViewAudio()
+    }
+
     inner class UserMessageViewHolder(
         private val binding: ItemChatUserBinding
     ) : RecyclerView.ViewHolder(binding.root) {
@@ -267,17 +270,6 @@ class ChatAdapter(
             }
 
             ensureWebView().apply {
-                webViewClient = contentServer?.let { server ->
-                    object : WebViewClient() {
-                        override fun shouldInterceptRequest(
-                            view: WebView,
-                            request: WebResourceRequest
-                        ): WebResourceResponse? {
-                            return runCatching { server.intercept(request) }.getOrNull()
-                                ?: super.shouldInterceptRequest(view, request)
-                        }
-                    }
-                } ?: WebViewClient()
                 webChromeClient = WebChromeClient()
                 settings.apply {
                     javaScriptEnabled = true
@@ -288,22 +280,14 @@ class ChatAdapter(
                     useWideViewPort = true
                     loadWithOverviewMode = true
                 }
-                if (contentServer != null) {
-                    MantouWebViewRuntime.install(
-                        webView = this,
-                        htmlFile = snapshot.entryFile,
-                        storageFile = WebAppProjectWorkspace.runtimeStateFile(snapshot.projectRoot)
-                    )
-                } else {
-                    MantouWebViewRuntime.install(this, snapshot.entryFile)
-                }
+                val entryUrl = MantouWebViewRuntime.install(this, snapshot, contentServer, deviceHost)
                 setOnTouchListener { view, event ->
                     if (event.action == MotionEvent.ACTION_DOWN) {
                         (view as? WebView)?.let { onActiveWebViewChanged?.invoke(it) }
                     }
                     false
                 }
-                loadUrl(contentServer?.entryUrl ?: "file://${snapshot.entryFile.absolutePath}")
+                loadUrl(entryUrl)
                 onActiveWebViewChanged?.invoke(this)
             }
 
@@ -332,9 +316,14 @@ class ChatAdapter(
             clearWebViewOnly()
         }
 
+        fun pauseWebViewAudio() {
+            appWebView?.let(MantouWebViewRuntime::pauseAudio)
+        }
+
         private fun clearWebViewOnly() {
             appWebView?.let { webView ->
                 onWebViewReleased?.invoke(webView)
+                MantouWebViewRuntime.release(webView)
                 webView.loadUrl("about:blank")
             }
         }

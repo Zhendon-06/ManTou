@@ -5,6 +5,7 @@
     <string name="harness_notification_channel_name">Harness 运行进度</string>
     <string name="harness_notification_channel_description">后台 Harness 构建、检查与自动修复进度</string>
     <string name="harness_notification_cancel">停止</string>
+    <string name="web_app_notification_channel">小应用通知</string>
     <string name="code_preview_close">关闭</string>
     <string name="code_preview_title">源码预览</string>
     <string name="code_preview_files">文件</string>

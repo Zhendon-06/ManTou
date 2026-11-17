@@ -154,6 +154,10 @@ internal object ToolPromptRetriever {
         "camera" to listOf("相机", "拍照", "照片", "录像", "录视频", "摄像头"),
         "clipboard" to listOf("剪贴板", "复制", "粘贴", "clipboard"),
         "flashlight" to listOf("手电筒", "闪光灯", "照明", "flashlight"),
+        "photoPicker" to listOf("选照片", "选取照片", "选择照片", "选图", "挑照片", "导入照片", "系统照片", "相册", "照片墙"),
+        "speech" to listOf("语音播报", "语音提示", "播报", "朗读", "读出来", "文字转语音", "语音倒数"),
+        "notification" to listOf("系统通知", "本地通知", "通知栏", "发通知", "发送通知", "测试通知"),
+        "recorder" to listOf("录音", "录声音", "语音备忘录", "语音日记", "语音备注", "麦克风"),
         "toast" to listOf("toast", "原生提示", "安卓提示"),
         "vibration" to listOf("震动", "振动", "震感", "触觉反馈", "vibration"),
     )

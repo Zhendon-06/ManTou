@@ -541,12 +541,11 @@ class WebProjectContentServer private constructor(
                     require(REVISION_PATTERN.matches(value)) { "Project revision contains unsafe characters" }
                 } ?: computeRevision(files)
                 val identity = projectId?.trim()?.takeIf(String::isNotEmpty) ?: canonicalRoot.path
-                val hostHash = sha256(identity.toByteArray(Charsets.UTF_8)).take(24)
                 val server = WebProjectContentServer(
                     projectRoot = canonicalRoot,
                     entryFile = canonicalEntry,
                     revision = resolvedRevision,
-                    originHost = "app-$hostHash.mantou.local",
+                    originHost = originHostForIdentity(identity),
                     files = files,
                     htmlTransformer = htmlTransformer,
                     traceRunId = normalizedRunId,
@@ -766,6 +765,9 @@ class WebProjectContentServer private constructor(
         private fun shortHash(value: String): String {
             return sha256(value.toByteArray(Charsets.UTF_8)).take(12)
         }
+
+        internal fun originHostForIdentity(identity: String): String =
+            "app-${sha256(identity.toByteArray(Charsets.UTF_8)).take(24)}.mantou.local"
 
         private fun sha256(bytes: ByteArray): String {
             return MessageDigest.getInstance("SHA-256").digest(bytes).toHex()

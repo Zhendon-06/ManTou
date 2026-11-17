@@ -211,7 +211,7 @@ object AgentWorkspace {
         return memory.take(500)
     }
 
-    private fun webDir(context: Context) = File(context.filesDir, WEB_DIR)
+    internal fun webDir(context: Context) = File(context.filesDir, WEB_DIR)
     private fun toolDocDir(context: Context) = File(context.filesDir, TOOL_DOC_DIR)
     private fun agentDir(context: Context) = File(context.filesDir, AGENT_DIR)
     private fun memoryDir(context: Context) = File(context.filesDir, MEMORY_DIR)

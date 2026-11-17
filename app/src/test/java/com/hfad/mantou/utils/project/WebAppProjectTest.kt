@@ -138,6 +138,8 @@ class WebAppProjectTest {
         File(legacyRoot, "styles.css").writeText("body { color: navy; }")
         val legacyState = "{\"notes\":[{\"text\":\"保留我\"}]}"
         File(legacyRoot, "index.json").writeText(legacyState)
+        val media = WebAppProjectWorkspace.runtimeMediaDirectory(legacyRoot).apply { mkdirs() }
+        val recording = File(media, "recording.m4a").apply { writeText("sample media") }
         val legacy = WebAppProjectResolver.resolve(legacyRoot)
         val workspace = WebAppProjectWorkspace()
 
@@ -150,6 +152,8 @@ class WebAppProjectTest {
         assertTrue(File(legacyRoot, "styles.css").isFile)
         assertTrue(File(firstDraft.contentRoot, "styles.css").isFile)
         assertEquals(legacyState, WebAppProjectWorkspace.runtimeStateFile(legacyRoot).readText())
+        assertEquals("sample media", recording.readText())
+        assertFalse(File(firstDraft.contentRoot, media.name).exists())
         assertEquals(WebAppProjectVersions(1L, 0L, null), workspace.versions(legacyRoot))
         assertEquals(firstDraft.entryFile, WebAppProjectResolver.resolve(legacyRoot).entryFile)
 
