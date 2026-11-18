@@ -1182,7 +1182,11 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                         systemPrompt = projectSystemPrompt,
                         userInput = filteredInput.content,
                         artifactPath = binding.entryFile.absolutePath,
-                        selfTestScript = GeneratedAppHarnessScripts.selfTest,
+                        selfTestScript = if (validation.shallowAcceptance) {
+                            GeneratedAppHarnessScripts.basicScenarios(binding.manifest.appSpec?.acceptanceContract)
+                        } else {
+                            GeneratedAppHarnessScripts.selfTest
+                        },
                         testSuiteScript = GeneratedAppHarnessScripts.testSuite,
                         acceptanceContract = binding.manifest.appSpec?.acceptanceContract,
                         acceptanceRequired = binding.manifest.appSpec != null,
@@ -1209,6 +1213,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                                     )
                                 }
                         },
+                        shallowAcceptance = validation.shallowAcceptance,
                         metadata = mapOf(
                             "projectId" to binding.manifest.projectId,
                             "task_complexity" to complexity.level.name,
@@ -1309,8 +1314,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                         state = state,
                         release = release,
                         isModification = isModification,
-                        iteration = result.iterations,
-                        selfTestBypassed = result.selfTestBypassed
+                        result = result
                     )
                     traceLogger.record(
                         runId = runId,
@@ -1683,9 +1687,14 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         state: StreamingSessionState,
         release: WebAppProjectSnapshot,
         isModification: Boolean,
-        iteration: Int,
-        selfTestBypassed: Boolean = false
+        result: HarnessRunResult.Delivered
     ) {
+        val testSummary = result.testCounts?.summary()
+        val releaseSummary = when {
+            testSummary != null -> "浅验收通过，已发布。$testSummary"
+            result.selfTestBypassed -> "多文件项目已构建、运行检查和测试并发布（自测非阻塞放行）"
+            else -> "多文件项目已构建、测试并发布"
+        }
         val projectFiles = withContext(Dispatchers.IO) {
             ProjectWorkspaceOperations.projectFilePaths(WebProjectFileTool(release.contentRoot))
         }
@@ -1704,13 +1713,9 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     activeFilePath = release.manifest.entryPoint,
                     projectFiles = projectFiles,
                     projectContentRoot = release.contentRoot.absolutePath,
-                    status = if (selfTestBypassed) {
-                        "多文件项目已构建、运行检查和测试并发布（自测非阻塞放行）"
-                    } else {
-                        "多文件项目已构建、测试并发布"
-                    },
+                    status = releaseSummary,
                     isModification = isModification,
-                    harnessIteration = maxOf(current?.harnessIteration ?: 0, iteration),
+                    harnessIteration = maxOf(current?.harnessIteration ?: 0, result.iterations),
                     diagnostics = emptyList(),
                     updatedAt = System.currentTimeMillis()
                 )
@@ -1720,14 +1725,16 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         }
         addFinalAssistantMessage(
             state = state,
-            content = if (isModification) {
-                if (selfTestBypassed) {
+            content = if (testSummary != null) {
+                "$releaseSummary。点击下方预览 👇"
+            } else if (isModification) {
+                if (result.selfTestBypassed) {
                     "项目修改已完成，并通过构建、WebView 检查和测试集；自测非阻塞放行，点击下方查看 👇"
                 } else {
                     "项目修改已完成，并通过构建、WebView 检查、自测和测试集，点击下方查看 👇"
                 }
             } else {
-                if (selfTestBypassed) {
+                if (result.selfTestBypassed) {
                     "多文件 Web 应用已生成，并通过构建、WebView 检查和测试集；自测非阻塞放行，点击下方预览 👇"
                 } else {
                     "多文件 Web 应用已生成，并通过完整 Harness，点击下方预览 👇"

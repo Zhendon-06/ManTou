@@ -259,12 +259,18 @@ internal class HarnessActivityRenderer(
         return if (firstEvent?.iteration.orZero() > 1) {
             "我会根据上一轮的诊断继续修改代码，并重新执行构建、运行检查和测试。"
         } else {
-            "我会先整理输入与系统指令，再让模型调用本地工具修改代码；随后持续构建、检查和测试，直到可以交付。"
+            "我会先整理需求，再生成代码并按当前验收策略检查。"
         }
     }
 
     private fun resultText(state: GenerateTaskState): String {
         val latest = state.harnessEvents.lastOrNull() ?: return ""
+        if (state.harnessEvents.any { it.operation == "SHALLOW_ACCEPTANCE" }) {
+            if (state.phase == GenerateTaskState.Phase.COMPLETED) return state.status
+            if (latest.stage == GenerateTaskState.Stage.DELIVER &&
+                latest.outcome != GenerateTaskState.Outcome.FAILED
+            ) return latest.message
+        }
         val selfTestBypassed = state.harnessEvents.any {
             it.operation == "SELF_TEST_BYPASS"
         }
@@ -311,7 +317,8 @@ internal class HarnessActivityRenderer(
             "FINAL_BUILD" -> "交付前构建"
             "RUNTIME" -> "运行检查"
             "SELF_TEST" -> "应用自测"
-            "TEST_SUITE" -> "完整测试集"
+            "TEST_SUITE" -> "多样例测试集"
+            "SHALLOW_ACCEPTANCE" -> "浅验收"
             "SELF_TEST_BYPASS" -> "自测放行"
             "INITIAL" -> "首次生成"
             "TOOL_FOLLOW_UP" -> "工具结果回传"

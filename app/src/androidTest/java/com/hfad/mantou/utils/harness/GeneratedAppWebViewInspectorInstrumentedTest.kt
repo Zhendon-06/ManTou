@@ -12,6 +12,7 @@ import com.hfad.mantou.utils.project.WebAppAcceptanceAssertion
 import com.hfad.mantou.utils.project.WebAppAcceptanceAssertionType
 import com.hfad.mantou.utils.project.WebAppAcceptanceContract
 import com.hfad.mantou.utils.project.WebAppAcceptanceCriterion
+import com.hfad.mantou.utils.project.WebAppAcceptanceCoverage
 import com.hfad.mantou.utils.project.WebAppAcceptancePriority
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -225,6 +226,54 @@ class GeneratedAppWebViewInspectorInstrumentedTest {
         assertFalse(report.passed)
         assertEquals(listOf("host-runner-result"), report.selfTests.map(WebSelfTestCase::name))
         assertTrue(report.diagnostics.any { it.code == "SELF_TEST_FAILED" })
+    }
+
+    @Test
+    fun shallowAcceptanceChecksOneCoreScenarioAndReportsRealSampleCounts() = runBlocking {
+        val html = VALID_HTML.replace(
+            "window.fixtureReady = true;",
+            """
+                window.fixtureReady = true;
+                window.__MANTOU_SELF_TEST__ = function () { throw new Error('Unexpected app self-test'); };
+            """.trimIndent()
+        )
+        val failingSample = WebAppAcceptanceCriterion(
+            id = "missing-result",
+            title = "Additional sample",
+            priority = WebAppAcceptancePriority.P1,
+            actions = listOf(WebAppAcceptanceAction(WebAppAcceptanceActionType.CLICK, "#fixture-action")),
+            expected = listOf(WebAppAcceptanceAssertion(WebAppAcceptanceAssertionType.EXISTS, "#missing"))
+        )
+        val coreSample = failingSample.copy(
+            id = "core",
+            title = "Core scenario",
+            priority = WebAppAcceptancePriority.P0,
+            covers = listOf(WebAppAcceptanceCoverage.CORE_SUCCESS),
+            expected = listOf(WebAppAcceptanceAssertion(WebAppAcceptanceAssertionType.VISIBLE, "#fixture-action"))
+        )
+        val contract = WebAppAcceptanceContract(listOf(failingSample, coreSample))
+        val target = WebInspectionTarget.Html(html)
+
+        val basic = inspector.runSelfTests(target, GeneratedAppHarnessScripts.basicScenarios(contract))
+        assertPassed(basic)
+        assertTrue(basic.selfTests.any { it.name == "acceptance:P0:core" })
+        assertFalse(basic.selfTests.any { it.name.contains("missing-result") })
+
+        val report = inspector.runQualityGateSuite(
+            target = target,
+            qualityGateContract = WebQualityGateContract(
+                requiredViewports = listOf(WebQualityViewport("phone", 393, 852)),
+                requireScreenshotEvidence = false
+            ),
+            acceptanceContract = contract,
+            acceptanceRequired = true,
+            evidenceRunId = "shallow-test",
+            reportOnly = true
+        )
+
+        assertFalse(report.passed)
+        assertEquals(HarnessTestCounts(passed = 1, total = 2), report.testCounts)
+        assertTrue(report.visualEvidence.isEmpty())
     }
 
     @Test

@@ -127,13 +127,16 @@ class GeneratedAppWebViewInspector(
         timeoutMillis: Long = DEFAULT_TEST_TIMEOUT_MILLIS,
         requestInterceptor: WebRequestInterceptor? = null,
         evidenceDirectory: File? = null,
-        reopenInterceptor: ((String) -> WebRequestInterceptor)? = null
+        reopenInterceptor: ((String) -> WebRequestInterceptor)? = null,
+        reportOnly: Boolean = false
     ): WebInspectionReport = inspectionMutex.withLock {
         require(timeoutMillis > 0) { "timeoutMillis must be greater than zero" }
         val startedAt = SystemClock.elapsedRealtime()
         val reports = mutableListOf<WebInspectionReport>()
         val visualEvidence = mutableListOf<WebVisualEvidence>()
         val additionalDiagnostics = mutableListOf<WebInspectionDiagnostic>()
+        var passedCases = 0
+        var totalCases = 0
         val initialState = qualityGateContract.requiredVisualStates.singleOrNull {
             it.id == INITIAL_VISUAL_STATE_ID
         }
@@ -224,7 +227,15 @@ class GeneratedAppWebViewInspector(
                 ).scopedToViewport(viewport.id, QUALITY_PHASE_ID)
                 reports += qualityReport
 
-                if (initialState != null) {
+                if (reportOnly && acceptanceContract == null) {
+                    // Older projects have no functional samples. Count the built-in page checks.
+                    val cases = qualityReport.selfTests.filterNot {
+                        it.name.endsWith("/self-test-script") || it.name.endsWith("/self-test-promise")
+                    }
+                    totalCases += cases.size
+                    passedCases += cases.count { it.passed }
+                }
+                if (!reportOnly && initialState != null) {
                     val dimensions = readCssViewportDimensions()
                     if (dimensions == null) {
                         additionalDiagnostics += testSuiteDiagnostic(
@@ -278,7 +289,7 @@ class GeneratedAppWebViewInspector(
                         mode = mode,
                         timeoutMillis = timeoutMillis
                     )
-                    val report = if (firstReport.timedOut && firstReport.diagnostics.none {
+                    val report = if (!reportOnly && firstReport.timedOut && firstReport.diagnostics.none {
                             it.severity == WebDiagnosticSeverity.ERROR &&
                                 it.category != WebDiagnosticCategory.TIMEOUT
                         }
@@ -295,6 +306,9 @@ class GeneratedAppWebViewInspector(
                         viewportId = viewport.id,
                         phaseId = "$ACCEPTANCE_PHASE_ID:$criterionId"
                     )
+                    var casePassed = report.passed && report.selfTests.any {
+                        it.name.startsWith("acceptance:") && it.passed
+                    }
                     if (report.passed && reopen != null) {
                         val reopenedMode = when (target) {
                             is WebInspectionTarget.Html -> mode.copy(
@@ -309,17 +323,24 @@ class GeneratedAppWebViewInspector(
                             }
                         }
                         if (reopenedMode == null) {
+                            casePassed = false
                             additionalDiagnostics += testSuiteDiagnostic(
                                 code = "ACCEPTANCE_REOPEN_UNAVAILABLE",
                                 message = "${viewport.id}/$criterionId: 无法为重新打开的页面初始化测试存储"
                             )
                         } else {
-                            reports += inspectOnMain(
+                            val reopenReport = inspectOnMain(
                                 stage = WebInspectionStage.TEST_SUITE,
                                 mode = reopenedMode,
                                 timeoutMillis = timeoutMillis
-                            ).scopedToViewport(viewport.id, "acceptance-reopen:$criterionId")
+                            )
+                            reports += reopenReport.scopedToViewport(viewport.id, "acceptance-reopen:$criterionId")
+                            casePassed = casePassed && reopenReport.passed
                         }
+                    }
+                    if (reportOnly) {
+                        totalCases++
+                        if (casePassed) passedCases++
                     }
                 }
             }
@@ -327,17 +348,19 @@ class GeneratedAppWebViewInspector(
             withContext(Dispatchers.Main.immediate) { restoreLayout(layoutSnapshot) }
         }
 
-        val coverage = withContext(Dispatchers.IO) {
-            WebQualityGateEvaluator.evaluateEvidence(
-                contract = qualityGateContract,
-                evidence = visualEvidence
-            )
-        }
-        coverage.diagnostics.forEach { message ->
-            additionalDiagnostics += testSuiteDiagnostic(
-                code = "VISUAL_EVIDENCE_GATE_FAILED",
-                message = message
-            )
+        if (!reportOnly) {
+            val coverage = withContext(Dispatchers.IO) {
+                WebQualityGateEvaluator.evaluateEvidence(
+                    contract = qualityGateContract,
+                    evidence = visualEvidence
+                )
+            }
+            coverage.diagnostics.forEach { message ->
+                additionalDiagnostics += testSuiteDiagnostic(
+                    code = "VISUAL_EVIDENCE_GATE_FAILED",
+                    message = message
+                )
+            }
         }
         mergeWebInspectionReports(
             stage = WebInspectionStage.TEST_SUITE,
@@ -345,7 +368,7 @@ class GeneratedAppWebViewInspector(
             visualEvidence = visualEvidence,
             additionalDiagnostics = additionalDiagnostics,
             durationMillis = SystemClock.elapsedRealtime() - startedAt
-        )
+        ).copy(testCounts = HarnessTestCounts(passedCases, totalCases).takeIf { reportOnly })
     }
 
     fun cancelCurrentInspection() {

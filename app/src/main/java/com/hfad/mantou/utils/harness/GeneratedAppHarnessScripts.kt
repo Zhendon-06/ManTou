@@ -7,6 +7,8 @@ import com.hfad.mantou.utils.project.WebAppAcceptanceAssertion
 import com.hfad.mantou.utils.project.WebAppAcceptanceAssertionType
 import com.hfad.mantou.utils.project.WebAppAcceptanceContract
 import com.hfad.mantou.utils.project.WebAppAcceptanceCriterion
+import com.hfad.mantou.utils.project.WebAppAcceptanceCoverage
+import com.hfad.mantou.utils.project.WebAppAcceptancePriority
 
 object GeneratedAppHarnessScripts {
 
@@ -83,6 +85,32 @@ object GeneratedAppHarnessScripts {
     """.trimIndent()
 
     val testSuite: String = qualityGateSuite()
+
+    internal fun basicScenarios(contract: WebAppAcceptanceContract?): String {
+        val criteria = contract?.criteria.orEmpty()
+        val primary = criteria.firstOrNull { WebAppAcceptanceCoverage.CORE_SUCCESS in it.covers.orEmpty() }
+            ?: criteria.firstOrNull { it.priority == WebAppAcceptancePriority.P0 }
+        val primaryScript = primary?.let { acceptanceSuite(WebAppAcceptanceContract(listOf(it))) }
+        return """
+            return (async function () {
+              var body = document.body;
+              var rendered = body && (body.getBoundingClientRect().height > 0 ||
+                Array.from(body.children).some(function (child) {
+                  return child.getBoundingClientRect().height > 0;
+                }));
+              var cases = [{
+                name: 'first-screen-rendered',
+                passed: !!rendered,
+                message: '首屏没有渲染出可见内容'
+              }];
+              var primaryScript = ${gson.toJson(primaryScript)};
+              if (cases[0].passed && primaryScript) {
+                cases = cases.concat(await new Function(primaryScript)());
+              }
+              return cases;
+            })();
+        """.trimIndent()
+    }
 
     fun qualityGateSuite(
         contract: WebQualityGateContract = WebQualityGateContract(),

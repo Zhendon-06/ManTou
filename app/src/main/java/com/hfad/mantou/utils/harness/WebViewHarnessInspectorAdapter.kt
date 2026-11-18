@@ -291,7 +291,8 @@ class WebViewHarnessInspectorAdapter(
                             GeneratedAppWebViewInspector.prepareProjectHtmlForInspection(html, storageJson)
                         }
                     }
-                }
+                },
+                reportOnly = request.reportOnly
             )
 
             HarnessCheckKind.DEVELOPMENT_BUILD,
@@ -376,7 +377,9 @@ class WebViewHarnessInspectorAdapter(
                 if (timedOut) append("，检查超时")
             }
         }
-        val summary = prefixSummary?.takeIf(String::isNotBlank)?.let { "$it；$reportSummary" }
+        val summary = testCounts?.let {
+            if (passed) it.summary() else "${it.summary()}，测试集有警告"
+        } ?: prefixSummary?.takeIf(String::isNotBlank)?.let { "$it；$reportSummary" }
             ?: reportSummary
         return HarnessCheckResult(
             passed = passed,
@@ -387,7 +390,8 @@ class WebViewHarnessInspectorAdapter(
                     visualEvidence.map(::formatVisualEvidence)
                 ).distinct(),
             artifactPath = artifactPath,
-            durationMs = durationMillis
+            durationMs = durationMillis,
+            testCounts = testCounts
         )
     }
 

@@ -1,7 +1,9 @@
 package com.hfad.mantou.view
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -57,8 +59,21 @@ class SettingsActivity : AppCompatActivity() {
         binding.rowAppearance.setOnClickListener {
             startActivity(Intent(this, AppearanceSettingsActivity::class.java))
         }
+        binding.rowTaskProgressNotifications.setOnClickListener {
+            openTaskProgressNotificationSettings()
+        }
         binding.logpage.setOnClickListener {
             startActivity(Intent(this, RequestLogActivity::class.java))
+        }
+    }
+
+    private fun openTaskProgressNotificationSettings() {
+        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        try {
+            startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            startActivity(intent.setAction(Settings.ACTION_APP_NOTIFICATION_SETTINGS))
         }
     }
 }

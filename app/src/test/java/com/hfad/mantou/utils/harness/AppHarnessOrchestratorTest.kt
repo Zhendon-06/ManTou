@@ -16,6 +16,66 @@ import org.junit.Test
 class AppHarnessOrchestratorTest {
 
     @Test
+    fun shallowAcceptancePublishesPartialSuiteResultsWithoutRepair() = runBlocking {
+        val checks = mutableListOf<HarnessCheckKind>()
+        val modelPurposes = mutableListOf<HarnessModelPurpose>()
+        val events = mutableListOf<GenerateTaskState.HarnessEvent>()
+        val counts = HarnessTestCounts(passed = 180, total = 200)
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair { request ->
+                modelPurposes += request.purpose
+                HarnessModelTurn(content = "ready")
+            },
+            fileTool = HarnessFileTool { error("Unexpected file call") },
+            builder = HarnessBuilder {
+                checks += it.kind
+                HarnessCheckResult(true, "build ok")
+            },
+            inspector = HarnessInspector { error("Basic scenarios already inspect the page") },
+            testRunner = HarnessTestRunner {
+                checks += it.kind
+                if (it.reportOnly) HarnessCheckResult(false, "suite has failures", testCounts = counts)
+                else HarnessCheckResult(true, "basic scenarios ok")
+            }
+        )
+
+        val result = orchestrator.run(newRequest().copy(shallowAcceptance = true)) { events += it }
+
+        assertEquals(counts, (result as HarnessRunResult.Delivered).testCounts)
+        assertEquals(listOf(HarnessModelPurpose.INITIAL), modelPurposes)
+        assertEquals(
+            listOf(HarnessCheckKind.DEVELOPMENT_BUILD, HarnessCheckKind.SELF_TEST, HarnessCheckKind.TEST_SUITE),
+            checks
+        )
+        val shallowIndex = events.indexOfFirst { it.operation == "SHALLOW_ACCEPTANCE" }
+        val suiteIndex = events.indexOfFirst { it.operation == HarnessCheckKind.TEST_SUITE.name }
+        assertTrue(shallowIndex in 0 until suiteIndex)
+        assertEquals(GenerateTaskState.Outcome.WARNING, events.last().outcome)
+        assertTrue(events.last().message.contains("通过 180 个测试用例（共 200 个）"))
+    }
+
+    @Test
+    fun shallowAcceptanceRequiresPassingBasicScenariosEvenWhenSuiteIsAdvisory() = runBlocking {
+        val testKinds = mutableListOf<HarnessCheckKind>()
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair { HarnessModelTurn(content = "ready") },
+            fileTool = HarnessFileTool { error("Unexpected file call") },
+            builder = HarnessBuilder { HarnessCheckResult(true, "build ok") },
+            inspector = HarnessInspector { error("Basic scenarios already inspect the page") },
+            testRunner = HarnessTestRunner {
+                testKinds += it.kind
+                HarnessCheckResult(false, "core scenario failed")
+            },
+            limits = HarnessLimits(maxCodeIterations = 2)
+        )
+
+        val result = orchestrator.run(newRequest().copy(shallowAcceptance = true))
+
+        assertTrue(result is HarnessRunResult.Failed)
+        assertEquals(listOf(HarnessCheckKind.SELF_TEST, HarnessCheckKind.SELF_TEST), testKinds)
+    }
+
+    @Test
     fun strictSelfTestFailureNeverPublishes() = runBlocking {
         var finalSuiteRan = false
         val orchestrator = AppHarnessOrchestrator(

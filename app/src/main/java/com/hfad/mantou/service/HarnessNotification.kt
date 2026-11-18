@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.hfad.mantou.R
 import com.hfad.mantou.view.MainActivity
@@ -48,7 +49,7 @@ internal object HarnessNotification {
         )
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stop_square)
+            .setSmallIcon(R.drawable.ic_appbar_bot)
             .setContentTitle(progress.title.take(MAX_TITLE_CHARS))
             .setContentText(progress.message.take(MAX_MESSAGE_CHARS))
             .setContentIntent(openPendingIntent)
@@ -58,8 +59,9 @@ internal object HarnessNotification {
             .setSilent(true)
             .setShowWhen(false)
 
+        val stage = progress.stage?.takeIf(String::isNotBlank)?.let(::stageLabel)
         val subText = buildList {
-            progress.stage?.takeIf(String::isNotBlank)?.let { add(stageLabel(it)) }
+            stage?.let(::add)
             progress.iteration.takeIf { it > 0 }?.let { add("第 ${it} 轮") }
         }.joinToString(" · ")
         if (subText.isNotBlank()) {
@@ -94,6 +96,19 @@ internal object HarnessNotification {
         } else {
             builder.setProgress(0, 0, false)
         }
+
+        if (progress.isRunning && Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            val style = NotificationCompat.ProgressStyle()
+            if (boundedProgress == null) {
+                style.setProgressIndeterminate(true)
+            } else {
+                style.setProgress(boundedProgress)
+            }
+            builder
+                .setStyle(style)
+                .setRequestPromotedOngoing(true)
+                .setShortCriticalText(stage ?: context.getString(R.string.harness_notification_running))
+        }
         return builder.build()
     }
 
@@ -101,7 +116,8 @@ internal object HarnessNotification {
         return when (stage) {
             "INPUT", "SANITIZING" -> "输入过滤"
             "PROMPT", "PROMPTING", "PREPARING" -> "提示词准备"
-            "MODEL", "REQUESTING_MODEL", "WRITING_INITIAL", "WRITING_DIFF", "REPAIRING" -> "模型生成"
+            "MODEL", "REQUESTING_MODEL", "WRITING_INITIAL", "WRITING_DIFF" -> "模型生成"
+            "REPAIRING" -> "自动修复"
             "TOOL", "APPLYING_DIFF", "APPLYING_TOOL" -> "代码工具"
             "BUILD", "BUILDING" -> "构建检查"
             "INSPECT", "INSPECTING" -> "WebView 检查"

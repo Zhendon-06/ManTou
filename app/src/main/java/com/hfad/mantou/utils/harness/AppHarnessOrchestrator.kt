@@ -727,10 +727,16 @@ class AppHarnessOrchestrator(
                 HarnessCheckKind.TEST_SUITE -> request.testSuiteScript
                 else -> null
             }
+            val reportOnly = request.shallowAcceptance && kind == HarnessCheckKind.TEST_SUITE
+            val runningMessage = when {
+                reportOnly -> "正在运行多样例测试集"
+                request.shallowAcceptance && kind == HarnessCheckKind.SELF_TEST -> "正在检查首屏和核心场景"
+                else -> kind.runningMessage()
+            }
             emit(
                 stage = stage,
                 outcome = GenerateTaskState.Outcome.RUNNING,
-                message = kind.runningMessage(),
+                message = runningMessage,
                 operation = kind.name
             )
             traceLogger.record(
@@ -738,7 +744,7 @@ class AppHarnessOrchestrator(
                 component = "CHECK",
                 operation = kind.name,
                 status = HarnessTraceStatus.STARTED,
-                message = kind.runningMessage(),
+                message = runningMessage,
                 iteration = iteration,
                 details = buildMap {
                     artifactPath?.let { put("artifact", pathLabel(it)) }
@@ -760,7 +766,8 @@ class AppHarnessOrchestrator(
                 acceptanceRequired = kind == HarnessCheckKind.TEST_SUITE &&
                     request.acceptanceRequired,
                 qualityGateContract = request.qualityGateContract,
-                metadata = request.metadata
+                metadata = request.metadata,
+                reportOnly = reportOnly
             )
             val result = try {
                 runner(checkRequest)
@@ -788,6 +795,8 @@ class AppHarnessOrchestrator(
                 stage = stage,
                 outcome = if (result.passed) {
                     GenerateTaskState.Outcome.PASSED
+                } else if (reportOnly) {
+                    GenerateTaskState.Outcome.WARNING
                 } else {
                     GenerateTaskState.Outcome.FAILED
                 },
@@ -852,7 +861,7 @@ class AppHarnessOrchestrator(
                     HarnessGate.DEVELOPMENT_BUILD -> {
                         val result = runCheck(HarnessCheckKind.DEVELOPMENT_BUILD, builder::build)
                         if (result.passed) {
-                            gate = HarnessGate.RUNTIME_INSPECTION
+                            gate = if (request.shallowAcceptance) HarnessGate.SELF_TEST else HarnessGate.RUNTIME_INSPECTION
                             transitionReason = "development_build_passed"
                         } else {
                             runCodingIteration(
@@ -882,7 +891,23 @@ class AppHarnessOrchestrator(
 
                     HarnessGate.SELF_TEST -> {
                         val result = runCheck(HarnessCheckKind.SELF_TEST, testRunner::runTests)
-                        if (result.passed) {
+                        if (request.shallowAcceptance && result.passed) {
+                            emit(
+                                stage = GenerateTaskState.Stage.SELF_TEST,
+                                outcome = GenerateTaskState.Outcome.PASSED,
+                                message = "构建和核心场景已通过，已进入浅验收",
+                                operation = "SHALLOW_ACCEPTANCE"
+                            )
+                            gate = HarnessGate.TEST_SUITE
+                            transitionReason = "shallow_acceptance_passed"
+                        } else if (request.shallowAcceptance) {
+                            runCodingIteration(
+                                purpose = HarnessModelPurpose.REPAIR,
+                                feedback = result.toRepairFeedback(HarnessCheckKind.SELF_TEST)
+                            )
+                            gate = HarnessGate.DEVELOPMENT_BUILD
+                            transitionReason = "basic_scenarios_failed_repaired"
+                        } else if (result.passed) {
                             selfTestFailureCount = 0
                             selfTestBypassed = false
                             gate = HarnessGate.FINAL_BUILD
@@ -941,14 +966,23 @@ class AppHarnessOrchestrator(
 
                     HarnessGate.TEST_SUITE -> {
                         val result = runCheck(HarnessCheckKind.TEST_SUITE, testRunner::runTests)
-                        if (result.passed) {
+                        val testCounts = if (request.shallowAcceptance) {
+                            result.testCounts ?: HarnessTestCounts(passed = 0, total = 0)
+                        } else {
+                            null
+                        }
+                        if (result.passed || request.shallowAcceptance) {
                             emit(
                                 stage = GenerateTaskState.Stage.DELIVER,
-                                outcome = if (selfTestBypassed) GenerateTaskState.Outcome.WARNING else GenerateTaskState.Outcome.PASSED,
-                                message = if (selfTestBypassed) {
-                                    "构建、运行检查和测试均已通过；自测未通过但已按非阻塞策略放行，可以交付"
+                                outcome = if (selfTestBypassed || !result.passed) {
+                                    GenerateTaskState.Outcome.WARNING
                                 } else {
-                                    "构建、运行检查和测试均已通过，可以交付"
+                                    GenerateTaskState.Outcome.PASSED
+                                },
+                                message = when {
+                                    testCounts != null -> "浅验收通过，${testCounts.summary()}，可以发布"
+                                    selfTestBypassed -> "构建、运行检查和测试均已通过；自测未通过但已按非阻塞策略放行，可以交付"
+                                    else -> "构建、运行检查和测试均已通过，可以交付"
                                 }
                             )
                             traceLogger.record(
@@ -972,7 +1006,8 @@ class AppHarnessOrchestrator(
                                 iterations = iteration,
                                 artifactPath = artifactPath,
                                 filteredUserInput = preparedPrompt.filteredUserInput,
-                                selfTestBypassed = selfTestBypassed
+                                selfTestBypassed = selfTestBypassed,
+                                testCounts = testCounts
                             )
                         }
                         runCodingIteration(

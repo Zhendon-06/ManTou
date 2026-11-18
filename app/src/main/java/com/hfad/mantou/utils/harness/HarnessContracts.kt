@@ -23,7 +23,8 @@ data class HarnessRunRequest(
     val qualityGateContract: WebQualityGateContract = WebQualityGateContract(),
     val planPath: String? = null,
     val fileTasks: List<HarnessFileTask> = emptyList(),
-    val metadata: Map<String, String> = emptyMap()
+    val metadata: Map<String, String> = emptyMap(),
+    val shallowAcceptance: Boolean = false
 )
 
 data class HarnessPreparedPrompt(
@@ -138,15 +139,25 @@ data class HarnessCheckRequest(
     val acceptanceContract: WebAppAcceptanceContract? = null,
     val acceptanceRequired: Boolean = false,
     val qualityGateContract: WebQualityGateContract = WebQualityGateContract(),
-    val metadata: Map<String, String> = emptyMap()
+    val metadata: Map<String, String> = emptyMap(),
+    val reportOnly: Boolean = false
 )
+
+data class HarnessTestCounts(val passed: Int, val total: Int) {
+    fun summary(): String = if (total == 0) {
+        "通过 0 个测试用例（未获得用例结果）"
+    } else {
+        "通过 ${passed} 个测试用例（共 ${total} 个）"
+    }
+}
 
 data class HarnessCheckResult(
     val passed: Boolean,
     val summary: String,
     val diagnostics: List<String> = emptyList(),
     val artifactPath: String? = null,
-    val durationMs: Long = 0L
+    val durationMs: Long = 0L,
+    val testCounts: HarnessTestCounts? = null
 )
 
 fun interface HarnessBuilder {
@@ -200,7 +211,8 @@ sealed class HarnessRunResult {
         override val iterations: Int,
         override val artifactPath: String?,
         val filteredUserInput: String,
-        val selfTestBypassed: Boolean = false
+        val selfTestBypassed: Boolean = false,
+        val testCounts: HarnessTestCounts? = null
     ) : HarnessRunResult()
 
     data class Failed(

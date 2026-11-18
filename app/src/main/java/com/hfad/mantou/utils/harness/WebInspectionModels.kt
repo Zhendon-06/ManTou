@@ -303,7 +303,8 @@ data class WebInspectionReport(
     val selfTests: List<WebSelfTestCase> = emptyList(),
     val visualEvidence: List<WebVisualEvidence> = emptyList(),
     val durationMillis: Long,
-    val timedOut: Boolean = false
+    val timedOut: Boolean = false,
+    val testCounts: HarnessTestCounts? = null
 ) {
     val passed: Boolean
         get() = !timedOut &&

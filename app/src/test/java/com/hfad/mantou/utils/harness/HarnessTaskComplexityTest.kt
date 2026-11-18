@@ -40,7 +40,7 @@ class HarnessTaskComplexityTest {
     }
 
     @Test
-    fun validationProfilesKeepCoreGatesAndDoNotControlModelBudgets() {
+    fun validationProfilesChooseCoverageWithoutChangingModelBudgets() {
         val complexity = HarnessTaskComplexity.assess(manifest(screenCount = 1), emptySet())
         val regular = complexity.limits(HarnessValidationProfile.PROJECT)
         val strict = complexity.limits(HarnessValidationProfile.TABLET_ALL)
@@ -48,7 +48,13 @@ class HarnessTaskComplexityTest {
         assertTrue(regular.allowSelfTestBypass)
         assertFalse(strict.allowSelfTestBypass)
 
-        HarnessValidationProfile.entries.forEach { profile ->
+        val regularGate = HarnessValidationProfile.PROJECT.qualityGate(WebQualityGateContract())
+        assertTrue(HarnessValidationProfile.PROJECT.shallowAcceptance)
+        assertEquals(listOf("standard-portrait"), regularGate.requiredViewports.map { it.id })
+        assertFalse(regularGate.requireScreenshotEvidence)
+        assertTrue(regularGate.requireOfflineDependencies)
+
+        HarnessValidationProfile.entries.filterNot { it.shallowAcceptance }.forEach { profile ->
             val gate = profile.qualityGate(WebQualityGateContract())
             assertTrue(gate.requireScreenshotEvidence)
             assertTrue(gate.requireOfflineDependencies)
