@@ -2,9 +2,7 @@
 
 import android.animation.AnimatorInflater
 import android.animation.AnimatorSet
-import android.app.Dialog
 import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.view.LayoutInflater
 import android.view.MotionEvent
@@ -14,7 +12,6 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.widget.ImageView
-import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
 import androidx.recyclerview.widget.DiffUtil
@@ -33,10 +30,11 @@ import com.hfad.mantou.databinding.ItemChatLoadingBinding
 import com.hfad.mantou.databinding.ItemChatUserBinding
 import com.hfad.mantou.tool.impl.WebAppDeviceHost
 import com.hfad.mantou.utils.MantouWebViewRuntime
-import com.hfad.mantou.utils.RichTextFormatter
 import com.hfad.mantou.utils.WebProjectContentServer
 import com.hfad.mantou.utils.project.WebAppProjectResolver
 import com.hfad.mantou.utils.project.WebAppProjectSnapshotKind
+import com.hfad.mantou.view.dialog.ImagePreviewDialog
+import com.hfad.mantou.view.markdown.MarkdownTextView
 import java.io.File
 
 internal class ChatAdapter(
@@ -179,7 +177,8 @@ internal class ChatAdapter(
     override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
         super.onViewRecycled(holder)
         when (holder) {
-            is AssistantMessageViewHolder -> holder.clearWebView()
+            is UserMessageViewHolder -> holder.unbind()
+            is AssistantMessageViewHolder -> holder.unbind()
             is LoadingViewHolder -> holder.unbind()
         }
     }
@@ -204,8 +203,12 @@ internal class ChatAdapter(
         }
 
         fun bind(message: ChatMessage) {
-            bindRichText(binding.tvMessage, message.content, RichTextRole.USER)
+            bindMarkdown(binding.tvMessage, message.content, effectiveTextColor)
             bindImage(binding.ivImage, message.imagePath)
+        }
+
+        fun unbind() {
+            binding.tvMessage.clearMarkdown()
         }
     }
 
@@ -227,7 +230,7 @@ internal class ChatAdapter(
 
         fun bind(message: ChatMessage) {
             binding.tvAssistantStatus.setTextColor(effectiveMutedColor)
-            bindRichText(binding.tvMessage, message.content, RichTextRole.ASSISTANT)
+            bindMarkdown(binding.tvMessage, message.content, effectiveTextColor)
             bindImage(binding.ivImage, message.imagePath)
             bindStatus(message)
 
@@ -310,7 +313,8 @@ internal class ChatAdapter(
             }
         }
 
-        fun clearWebView() {
+        fun unbind() {
+            binding.tvMessage.clearMarkdown()
             statusAnimatorSet?.cancel()
             statusAnimatorSet = null
             clearWebViewOnly()
@@ -329,7 +333,7 @@ internal class ChatAdapter(
         }
 
         fun updateContent(message: ChatMessage) {
-            bindRichText(binding.tvMessage, message.content, RichTextRole.ASSISTANT)
+            bindMarkdown(binding.tvMessage, message.content, effectiveTextColor)
             bindStatus(message)
         }
 
@@ -391,52 +395,28 @@ internal class ChatAdapter(
         fun updateThinking(thinking: String?) {
             if (thinking.isNullOrEmpty()) {
                 binding.thinkingPanel.visibility = View.GONE
+                binding.tvThinking.clearMarkdown()
                 return
             }
             binding.thinkingPanel.visibility = View.VISIBLE
-            bindRichText(binding.tvThinking, thinking, RichTextRole.THINKING)
-            binding.svThinking.post { binding.svThinking.fullScroll(View.FOCUS_DOWN) }
+            val textColor = binding.root.context.getColor(R.color.mt_text_secondary)
+            bindMarkdown(binding.tvThinking, thinking, textColor)
+            binding.svThinking.post {
+                if (!binding.tvThinking.isSelectingText) binding.svThinking.fullScroll(View.FOCUS_DOWN)
+            }
         }
 
         fun unbind() {
+            binding.tvThinking.clearMarkdown()
             animatorSet?.cancel()
             animatorSet = null
         }
     }
 
-    private fun bindRichText(textView: TextView, content: String, role: RichTextRole) {
-        val context = textView.context
-        val palette = when (role) {
-            RichTextRole.USER -> RichTextFormatter.Palette(
-                textColor = effectiveTextColor,
-                secondaryColor = effectiveSecondaryColor,
-                accentColor = effectiveTextColor,
-                codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
-                codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
-            )
-            RichTextRole.ASSISTANT -> RichTextFormatter.Palette(
-                textColor = effectiveTextColor,
-                secondaryColor = effectiveSecondaryColor,
-                accentColor = effectiveTextColor,
-                codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
-                codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
-            )
-            RichTextRole.THINKING -> RichTextFormatter.Palette(
-                textColor = ContextCompat.getColor(context, R.color.mt_text_secondary),
-                secondaryColor = ContextCompat.getColor(context, R.color.mt_text_muted),
-                accentColor = ContextCompat.getColor(context, R.color.mt_primary_dark),
-                codeBackgroundColor = ContextCompat.getColor(context, R.color.mt_code_bg),
-                codeTextColor = ContextCompat.getColor(context, R.color.mt_code_text)
-            )
-        }
-        textView.textSize = appearanceSettings.chatTextSizeSp
-        textView.setTextColor(palette.textColor)
-        textView.setText(
-            RichTextFormatter.format(content, palette),
-            TextView.BufferType.SPANNABLE
-        )
-        textView.setTextIsSelectable(true)
-        textView.isLongClickable = true
+    private fun bindMarkdown(view: MarkdownTextView, content: String, textColor: Int) {
+        view.textSize = appearanceSettings.chatTextSizeSp
+        view.setTextColor(textColor)
+        view.renderMarkdown(content)
     }
 
     private fun bindImage(imageView: ImageView, imagePath: String?) {
@@ -501,32 +481,7 @@ internal class ChatAdapter(
     }
 
     private fun showImagePreview(anchor: ImageView, imagePath: String) {
-        val context = anchor.context
-        val dialog = Dialog(context)
-        val preview = ImageView(context).apply {
-            setBackgroundColor(Color.BLACK)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            adjustViewBounds = true
-            setOnClickListener { dialog.dismiss() }
-        }
-        dialog.setContentView(
-            preview,
-            ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        dialog.window?.setWindowAnimations(R.style.MtDialogAnimation)
-        dialog.show()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.BLACK))
-        dialog.window?.setLayout(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        )
-        Glide.with(context)
-            .load(imagePath)
-            .fitCenter()
-            .into(preview)
+        ImagePreviewDialog(anchor.context, imagePath).show()
     }
 
     private fun dp(view: View, value: Int): Int {
@@ -545,12 +500,6 @@ internal class ChatAdapter(
 
     private val effectiveMutedColor: Int
         get() = ColorUtils.setAlphaComponent(effectiveTextColor, 145)
-
-    private enum class RichTextRole {
-        USER,
-        ASSISTANT,
-        THINKING
-    }
 }
 
 class ChatMessageDiffCallback : DiffUtil.ItemCallback<ChatMessage>() {

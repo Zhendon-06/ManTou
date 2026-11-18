@@ -8,13 +8,14 @@ import android.os.CountDownTimer
 import android.os.SystemClock
 import androidx.activity.result.ActivityResultCaller
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.withResumed
 import com.hfad.mantou.tool.impl.WebAppDevicePage.Request
+import com.hfad.mantou.view.dialog.ManTouDialog
+import com.hfad.mantou.view.dialog.ManTouDialog.Action
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
@@ -26,7 +27,7 @@ internal class WebAppRecording(
 ) {
     private var requested: Request? = null
     private var askingPermission: Request? = null
-    private var dialog: AlertDialog? = null
+    private var dialog: ManTouDialog? = null
     private var recording: Recording? = null
 
     val isRecording: Boolean get() = recording != null
@@ -49,10 +50,12 @@ internal class WebAppRecording(
             return
         }
         requested = request
-        dialog = AlertDialog.Builder(activity)
-            .setTitle("开始录音？")
-            .setMessage("${request.page.displayName} 想使用麦克风。录音最多 5 分钟，可随时保存或取消。")
-            .setPositiveButton("开始录音") { _, _ ->
+        dialog = ManTouDialog(
+            activity,
+            title = "开始录音？",
+            message = "${request.page.displayName} 想使用麦克风。录音最多 5 分钟，可随时保存或取消。",
+            secondary = Action("取消") { cancel() },
+            primary = Action("开始录音") {
                 dialog = null
                 if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
                     start(request)
@@ -65,9 +68,10 @@ internal class WebAppRecording(
                     }
                 }
             }
-            .setNegativeButton("取消") { _, _ -> cancel() }
-            .setOnCancelListener { cancel() }
-            .show()
+        ).apply {
+            setOnCancelListener { cancel() }
+            show()
+        }
     }
 
     fun interrupt(page: WebAppDevicePage? = null, keepPermissionRequest: Boolean = false) {
@@ -104,13 +108,16 @@ internal class WebAppRecording(
             }
             val active = Recording(recorder, file, SystemClock.elapsedRealtime())
             recording = active
-            dialog = AlertDialog.Builder(activity)
-                .setTitle("正在录音")
-                .setMessage("00:00 / 05:00")
-                .setPositiveButton("停止并保存") { _, _ -> finish(save = true) }
-                .setNegativeButton("取消") { _, _ -> cancel() }
-                .setOnCancelListener { cancel() }
-                .show()
+            dialog = ManTouDialog(
+                activity,
+                title = "正在录音",
+                message = "00:00 / 05:00",
+                secondary = Action("取消") { cancel() },
+                primary = Action("停止并保存") { finish(save = true) }
+            ).apply {
+                setOnCancelListener { cancel() }
+                show()
+            }
             active.timer = object : CountDownTimer(MAX_DURATION, 1_000L) {
                 override fun onTick(millisUntilFinished: Long) {
                     val seconds = (SystemClock.elapsedRealtime() - active.startedAt) / 1_000L

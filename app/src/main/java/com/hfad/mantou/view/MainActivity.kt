@@ -13,6 +13,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.doOnNextLayout
 import androidx.drawerlayout.widget.DrawerLayout
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.divider.MaterialDividerItemDecoration
 import com.hfad.mantou.R
 import com.hfad.mantou.service.HarnessForegroundService
 import com.hfad.mantou.view.glass.GlassHandle
@@ -38,6 +40,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         drawerLayout = findViewById(R.id.drawerLayout)
+        drawerLayout.setScrimColor(Color.TRANSPARENT)
 
         // 主内容保持 edge-to-edge，顶部状态栏 inset 由各页面自己的浮层处理。
         val mainView = findViewById<android.view.View>(R.id.main)
@@ -48,8 +51,14 @@ class MainActivity : AppCompatActivity() {
         }
         mainView.post(::dispatchHarnessNotificationIntent)
 
-        // 处理侧边菜单的状态栏 padding
         val drawerMenu = findViewById<android.view.View>(R.id.drawerMenu)
+        val sessionDivider = MaterialDividerItemDecoration(this, RecyclerView.VERTICAL).apply {
+            setDividerColorResource(this@MainActivity, R.color.mt_outline)
+            isLastItemDecorated = false
+        }
+        drawerMenu.findViewById<RecyclerView>(R.id.rvSessions).addItemDecoration(sessionDivider)
+
+        // 处理侧边菜单的状态栏 padding
         val drawerMenuBasePaddingTop = drawerMenu.paddingTop
         val drawerMenuBasePaddingBottom = drawerMenu.paddingBottom
         ViewCompat.setOnApplyWindowInsetsListener(drawerMenu) { v, insets ->

@@ -15,8 +15,10 @@
     <color name="mt_text_muted">#9CA6B8</color>
     <color name="mt_outline">#E2E8F3</color>
     <color name="mt_error">#E65353</color>
-    <color name="mt_dialog_glass">#EFFFFFFF</color>
-    <color name="mt_dialog_glass_stroke">#B8FFFFFF</color>
+    <color name="mt_dialog_control">#F2F5FA</color>
+    <color name="mt_dialog_secondary">#5E6B80</color>
+    <color name="mt_dialog_danger">#B4232A</color>
+    <color name="mt_dialog_danger_soft">#FDEBEC</color>
     <color name="mt_code_bg">#EEF3FA</color>
     <color name="mt_code_text">#35506E</color>
     <color name="input_action_blue">#2C83D8</color>

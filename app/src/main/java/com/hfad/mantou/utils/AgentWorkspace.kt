@@ -2,6 +2,7 @@ package com.hfad.mantou.utils
 
 import android.content.Context
 import com.hfad.mantou.tool.generated.GeneratedMantouToolsDoc
+import com.hfad.mantou.utils.project.ConversationWorkspace
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -80,83 +81,29 @@ object AgentWorkspace {
     fun loadWorkspaceTree(context: Context): List<WorkspaceNode> {
         ensureWorkspace(context)
 
-        val webNode = folderNode(
-            name = WEB_DIR,
-            displayPath = "/workspace/$WEB_DIR",
-            level = 1,
-            defaultExpanded = false,
-            dir = webDir(context)
-        )
-
-        val agentNode = folderNode(
-            name = AGENT_DIR,
-            displayPath = "/workspace/$AGENT_DIR",
-            level = 1,
-            defaultExpanded = true,
-            dir = agentDir(context)
-        )
-
-        val memoryNode = folderNode(
-            name = MEMORY_DIR,
-            displayPath = "/workspace/$MEMORY_DIR",
-            level = 1,
-            defaultExpanded = true,
-            dir = memoryDir(context)
-        )
-
-        val toolDocNode = folderNode(
-            name = TOOL_DOC_DIR,
-            displayPath = "/workspace/$TOOL_DOC_DIR",
-            level = 1,
-            defaultExpanded = false,
-            dir = toolDocDir(context)
-        )
-
-        return listOf(
-            WorkspaceNode(
-                name = "workspace",
-                displayPath = "/workspace",
-                isDirectory = true,
-                level = 0,
-                defaultExpanded = true,
-                children = listOf(webNode, toolDocNode, agentNode, memoryNode)
-            )
-        )
+        val workspace = ConversationWorkspace(context.filesDir)
+        return listOf(folderNode(workspace, context.filesDir, ConversationWorkspace.ROOT_PATH, 0))
     }
 
     private fun folderNode(
-        name: String,
+        workspace: ConversationWorkspace,
+        dir: File,
         displayPath: String,
-        level: Int,
-        defaultExpanded: Boolean,
-        dir: File
-    ): WorkspaceNode {
-        val children = dir.listFiles()
-            ?.sortedWith(compareBy<File> { !it.isDirectory }.thenBy { it.name.lowercase() })
-            ?.map { file ->
-                if (file.isDirectory) {
-                    folderNode(
-                        name = file.name,
-                        displayPath = "$displayPath/${file.name}",
-                        level = level + 1,
-                        defaultExpanded = false,
-                        dir = file
-                    )
-                } else {
-                    fileNode(file, "$displayPath/${file.name}", level + 1)
-                }
-            }
-            .orEmpty()
-
-        return WorkspaceNode(
-            name = name,
-            displayPath = displayPath,
-            isDirectory = true,
-            level = level,
-            defaultExpanded = defaultExpanded,
-            children = children
-        )
-    }
+        level: Int
+    ): WorkspaceNode = WorkspaceNode(
+        name = if (level == 0) "workspace" else dir.name,
+        displayPath = displayPath,
+        isDirectory = true,
+        level = level,
+        defaultExpanded = level == 0 || (level == 1 && dir.name in setOf(
+            AGENT_DIR, MEMORY_DIR, ConversationWorkspace.DIRECTORY
+        )),
+        children = workspace.children(dir).map { file ->
+            val path = "$displayPath/${file.name}"
+            if (file.isDirectory) folderNode(workspace, file, path, level + 1)
+            else fileNode(file, path, level + 1)
+        }
+    )
 
     private fun fileNode(file: File, displayPath: String, level: Int) = WorkspaceNode(
         name = file.name,

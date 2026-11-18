@@ -1,6 +1,5 @@
 package com.hfad.mantou.data.api
 
-import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.hfad.mantou.data.logging.ApiFailureDiagnostics
@@ -18,10 +17,7 @@ import kotlinx.coroutines.flow.flowOn
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okhttp3.MediaType.Companion.toMediaType
 import java.io.InterruptedIOException
 import java.io.IOException
 import java.net.SocketTimeoutException
@@ -30,13 +26,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 object StreamingApiService {
 
-    private const val anthropicVersion = "2023-06-01"
-    private const val jsonMediaType = "application/json; charset=utf-8"
     private const val maxErrorBodyChars = 4_096
     internal const val STREAM_READ_TIMEOUT_SECONDS = 180L
     internal const val STREAM_CALL_TIMEOUT_MINUTES = 30L
-
-    private val gson = Gson()
 
     private val client = createClient()
 
@@ -51,6 +43,7 @@ object StreamingApiService {
             .readTimeout(readTimeoutSeconds, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .callTimeout(callTimeoutSeconds, TimeUnit.SECONDS)
+            .addInterceptor(ChatHttpRequest.parameterCompatibility)
             .addInterceptor(ApiLoggingInterceptor())
             .build()
     }
@@ -64,11 +57,7 @@ object StreamingApiService {
         config: ChatCallConfig,
         request: ChatRequest,
         callFactory: Call.Factory
-    ): Flow<StreamEvent> = if (config.isAnthropic) {
-        streamAnthropic(config, request, callFactory)
-    } else {
-        streamOpenAi(config, request, callFactory)
-    }
+    ): Flow<StreamEvent> = stream(config, request, callFactory)
 
     internal fun isRetryableNetworkFailure(message: String): Boolean {
         return ApiFailureDiagnostics.isRetryable(httpStatus = null, message = message)
@@ -78,80 +67,32 @@ object StreamingApiService {
         return ApiFailureDiagnostics.isRetryable(httpStatus = httpStatus, message = message)
     }
 
-    private fun streamOpenAi(
+    private fun stream(
         config: ChatCallConfig,
         request: ChatRequest,
         callFactory: Call.Factory
     ): Flow<StreamEvent> = callbackFlow {
-        val url = runCatching {
-            ApiEndpointResolver.openAiChatCompletionsUrl(config.baseUrl)
-        }.getOrElse {
-            trySendBlocking(StreamEvent.Error(it.message ?: "Base URL 无效"))
-            close()
-            return@callbackFlow
-        }
         val streamRequest = request.copy(model = config.model, stream = true)
-        val tokenUsage = RequestTokenUsageTracker(streamRequest)
-        val requestBody = gson.toJson(streamRequest)
-            .toRequestBody(jsonMediaType.toMediaType())
-        val trace = ApiRequestTrace.create(request.diagnosticContext)
-
-        val builder = Request.Builder()
-            .url(url)
-            .tag(ApiRequestTrace::class.java, trace)
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Accept", "text/event-stream")
-            .post(requestBody)
-        if (config.apiKey.isNotEmpty()) {
-            builder.addHeader("Authorization", "Bearer ${config.apiKey}")
-        }
-
-        val call = callFactory.newCall(builder.build())
-        call.enqueue(
-            createStreamingCallback(
-                call = call,
-                tokenUsage = tokenUsage,
-                onEachLine = { line -> processOpenAiLine(line, tokenUsage) }
-            )
-        )
-        awaitClose { call.cancel() }
-    }.flowOn(Dispatchers.IO)
-
-    private fun streamAnthropic(
-        config: ChatCallConfig,
-        request: ChatRequest,
-        callFactory: Call.Factory
-    ): Flow<StreamEvent> = callbackFlow {
-        val url = runCatching {
-            ApiEndpointResolver.anthropicMessagesUrl(config.baseUrl)
+        val httpRequest = runCatching {
+            ChatHttpRequest.build(config, streamRequest)
         }.getOrElse {
             trySendBlocking(StreamEvent.Error(it.message ?: "Base URL 无效"))
             close()
             return@callbackFlow
         }
-        val requestBody = buildAnthropicBody(config.model, request)
-            .toString()
-            .toRequestBody(jsonMediaType.toMediaType())
-        val tokenUsage = RequestTokenUsageTracker(request)
-        val trace = ApiRequestTrace.create(request.diagnosticContext)
-
-        val builder = Request.Builder()
-            .url(url)
-            .tag(ApiRequestTrace::class.java, trace)
-            .addHeader("anthropic-version", anthropicVersion)
-            .addHeader("Content-Type", "application/json")
-            .addHeader("Accept", "text/event-stream")
-            .post(requestBody)
-        if (config.apiKey.isNotEmpty()) {
-            builder.addHeader("x-api-key", config.apiKey)
-        }
-
-        val call = callFactory.newCall(builder.build())
+        val tokenUsage = RequestTokenUsageTracker(streamRequest)
+        val call = callFactory.newCall(httpRequest)
         call.enqueue(
             createStreamingCallback(
                 call = call,
                 tokenUsage = tokenUsage,
-                onEachLine = { line -> listOfNotNull(processAnthropicLine(line, tokenUsage)) }
+                onEachLine = { line ->
+                    if (config.isAnthropic) {
+                        listOfNotNull(processAnthropicLine(line, tokenUsage))
+                    } else {
+                        processOpenAiLine(line, tokenUsage)
+                    }
+                }
             )
         )
         awaitClose { call.cancel() }
@@ -424,99 +365,6 @@ object StreamingApiService {
                 preview.append(buffer, 0, read)
             }
             preview.toString()
-        }
-    }
-
-    private fun buildAnthropicBody(model: String, request: ChatRequest): JsonObject {
-        val root = JsonObject()
-        root.addProperty("model", model)
-        root.addProperty("max_tokens", request.maxTokens)
-        root.addProperty("temperature", request.temperature)
-        root.addProperty("stream", true)
-
-        val systemTexts = mutableListOf<String>()
-        val messagesArr = com.google.gson.JsonArray()
-
-        request.messages.forEach { msg ->
-            when (msg.role) {
-                "system" -> {
-                    extractText(msg.content)?.let { systemTexts.add(it) }
-                }
-
-                "user", "assistant" -> {
-                    messagesArr.add(convertAnthropicMessage(msg))
-                }
-            }
-        }
-        if (systemTexts.isNotEmpty()) {
-            root.addProperty("system", systemTexts.joinToString("\n\n"))
-        }
-        root.add("messages", messagesArr)
-        return root
-    }
-
-    private fun convertAnthropicMessage(msg: ApiMessage): JsonObject {
-        val obj = JsonObject()
-        obj.addProperty("role", msg.role)
-        val content = msg.content
-        if (content is String) {
-            obj.addProperty("content", content)
-        } else if (content is List<*>) {
-            val blocks = com.google.gson.JsonArray()
-            content.forEach { part ->
-                if (part is ContentPart) {
-                    when (part.type) {
-                        "text" -> {
-                            val block = JsonObject()
-                            block.addProperty("type", "text")
-                            block.addProperty("text", part.text.orEmpty())
-                            blocks.add(block)
-                        }
-
-                        "image_url" -> {
-                            val rawUrl = part.imageUrl?.url.orEmpty()
-                            val block = anthropicImageBlock(rawUrl)
-                            if (block != null) {
-                                blocks.add(block)
-                            }
-                        }
-                    }
-                }
-            }
-            obj.add("content", blocks)
-        } else {
-            obj.addProperty("content", content.toString())
-        }
-        return obj
-    }
-
-    private fun anthropicImageBlock(rawUrl: String): JsonObject? {
-        if (!rawUrl.startsWith("data:")) return null
-        val commaIndex = rawUrl.indexOf(',')
-        if (commaIndex <= 5) return null
-        val meta = rawUrl.substring(5, commaIndex)
-        val mediaType = meta.substringBefore(';').ifEmpty { "image/jpeg" }
-        val data = rawUrl.substring(commaIndex + 1)
-        val block = JsonObject()
-        block.addProperty("type", "image")
-        val source = JsonObject()
-        source.addProperty("type", "base64")
-        source.addProperty("media_type", mediaType)
-        source.addProperty("data", data)
-        block.add("source", source)
-        return block
-    }
-
-    private fun extractText(content: Any?): String? {
-        return when (content) {
-            is String -> content
-            is List<*> -> content
-                .filterIsInstance<ContentPart>()
-                .mapNotNull { it.text }
-                .joinToString("\n")
-                .ifEmpty { null }
-
-            else -> null
         }
     }
 

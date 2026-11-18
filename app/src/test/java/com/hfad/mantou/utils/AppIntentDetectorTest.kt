@@ -9,6 +9,15 @@ import org.junit.Test
 class AppIntentDetectorTest {
 
     @Test
+    fun routesExplicitWorkspaceEditsSeparatelyFromAppGeneration() {
+        assertTrue(AppIntentDetector.isWorkspaceFileRequest("把人格改成先说结论，语气直接"))
+        assertTrue(AppIntentDetector.isWorkspaceFileRequest("在 README.md 里写一个网页应用使用教程"))
+        assertTrue(AppIntentDetector.isWorkspaceFileRequest("用 diff 修改配置文件"))
+        assertFalse(AppIntentDetector.isWorkspaceFileRequest("做一个能上传文件的网页应用"))
+        assertFalse(AppIntentDetector.isWorkspaceFileRequest("把页面标题改成相册"))
+    }
+
+    @Test
     fun localGateTreatsQuestionAsChat() {
         val result = AppIntentDetector.shouldUseLlmFallbackForTest(
             "你说模型有的漆上错了，是不是可以用洗笔液擦掉"

@@ -22,8 +22,6 @@ import java.util.concurrent.atomic.AtomicLong
 class StreamingHarnessModelRepair(
     private val config: ChatCallConfig,
     private val maxTokens: Int = ApiConfig.MAX_TOKENS,
-    private val temperature: Double = DEFAULT_TEMPERATURE,
-    private val topP: Double = ApiConfig.TOP_P,
     private val onThinking: suspend (String) -> Unit = {},
     private val onProgress: suspend (HarnessModelStreamProgress) -> Unit = {},
     private val traceLogger: HarnessTraceLogger = HarnessTraceLogger {},
@@ -36,8 +34,6 @@ class StreamingHarnessModelRepair(
 
     init {
         require(maxTokens > 0) { "maxTokens must be positive" }
-        require(temperature in 0.0..2.0) { "temperature must be between 0 and 2" }
-        require(topP in 0.0..1.0) { "topP must be between 0 and 1" }
     }
 
     override suspend fun requestTurn(request: HarnessModelRequest): HarnessModelTurn {
@@ -48,8 +44,6 @@ class StreamingHarnessModelRepair(
             messages = HarnessSingleActionProtocol.toApiMessages(request.messages),
             stream = true,
             maxTokens = maxTokens,
-            temperature = temperature,
-            topP = topP,
             reasoningEffort = config.webProjectReasoningEffort.takeUnless { reasoningEffortRejected.get() },
             diagnosticContext = ApiDiagnosticContext(
                 runId = request.runId,
@@ -387,7 +381,6 @@ class StreamingHarnessModelRepair(
     }
 
     private companion object {
-        const val DEFAULT_TEMPERATURE = 0.1
         const val MAX_CALL_ID_RUN_CHARS = 48
         val UNSAFE_CALL_ID_CHARS = Regex("[^A-Za-z0-9._-]+")
     }
@@ -633,7 +626,7 @@ internal object HarnessSingleActionProtocol {
         )
     }
 
-    private fun decodeAndValidatePath(rawPath: String, allowWorkspaceRoot: Boolean): String {
+    fun decodeAndValidatePath(rawPath: String, allowWorkspaceRoot: Boolean): String {
         if (rawPath.any { it == '<' || it == '>' || it.code == 0 || it.isISOControl() }) {
             throw HarnessModelProtocolException("workspace path 包含非法字符")
         }

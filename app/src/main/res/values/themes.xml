@@ -21,45 +21,60 @@
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
         <item name="android:windowBackground">@color/mt_background</item>
-        <item name="android:alertDialogTheme">@style/ThemeOverlay.ManTou.GlassAlertDialog</item>
-        <item name="alertDialogTheme">@style/ThemeOverlay.ManTou.GlassAlertDialog</item>
-        <item name="materialAlertDialogTheme">@style/ThemeOverlay.ManTou.GlassAlertDialog</item>
     </style>
 
     <style name="Theme.ManTou" parent="Base.Theme.ManTou" />
 
-    <style name="Theme.ManTou.CodeViewer" parent="Theme.Material3.Dark.NoActionBar">
-        <item name="android:windowBackground">@color/mt_generate_surface</item>
-        <item name="android:colorBackground">@color/mt_generate_surface</item>
-        <item name="android:statusBarColor">@color/mt_generate_surface</item>
-        <item name="android:navigationBarColor">@color/mt_generate_surface</item>
+    <style name="Theme.ManTou.Modal" parent="Base.Theme.ManTou">
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.42</item>
+        <item name="android:windowAnimationStyle">@style/MtDialogAnimation</item>
+    </style>
+
+    <style name="Theme.ManTou.BottomSheet" parent="Theme.Material3.Light.BottomSheetDialog">
+        <item name="bottomSheetStyle">@style/Widget.ManTou.BottomSheet</item>
+    </style>
+
+    <style name="Widget.ManTou.BottomSheet" parent="Widget.Material3.BottomSheet.Modal">
+        <item name="backgroundTint">@color/mt_surface</item>
+        <item name="shapeAppearanceOverlay">@style/ShapeAppearance.ManTou.Sheet</item>
+        <item name="shouldRemoveExpandedCorners">false</item>
+        <item name="android:maxWidth">640dp</item>
+    </style>
+
+    <style name="ShapeAppearance.ManTou.Sheet" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSizeTopLeft">24dp</item>
+        <item name="cornerSizeTopRight">24dp</item>
+        <item name="cornerSizeBottomLeft">0dp</item>
+        <item name="cornerSizeBottomRight">0dp</item>
+    </style>
+
+    <style name="Widget.ManTou.SheetButton" parent="Widget.Material3.Button">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:paddingHorizontal">4dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="cornerRadius">13dp</item>
+    </style>
+
+    <style name="Theme.ManTou.FullscreenDialog" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowFullscreen">false</item>
-    </style>
-
-    <style name="ShapeAppearance.ManTou.Dialog" parent="">
-        <item name="cornerFamily">rounded</item>
-        <item name="cornerSize">24dp</item>
-    </style>
-
-    <style name="ThemeOverlay.ManTou.GlassAlertDialog.Base" parent="ThemeOverlay.Material3.MaterialAlertDialog">
-        <item name="android:windowBackground">@drawable/bg_dialog_glass</item>
-        <item name="android:colorBackgroundFloating">@color/mt_dialog_glass</item>
-        <item name="android:backgroundDimEnabled">true</item>
-        <item name="android:backgroundDimAmount">0.28</item>
-        <item name="backgroundTint">@android:color/transparent</item>
-        <item name="backgroundInsetStart">24dp</item>
-        <item name="backgroundInsetEnd">24dp</item>
-        <item name="backgroundInsetTop">24dp</item>
-        <item name="backgroundInsetBottom">24dp</item>
-        <item name="colorSurface">@color/mt_dialog_glass</item>
-        <item name="shapeAppearanceOverlay">@style/ShapeAppearance.ManTou.Dialog</item>
         <item name="android:windowAnimationStyle">@style/MtDialogAnimation</item>
     </style>
-
-    <style name="ThemeOverlay.ManTou.GlassAlertDialog" parent="ThemeOverlay.ManTou.GlassAlertDialog.Base" />
 
     <style name="MtDialogAnimation" parent="">
         <item name="android:windowEnterAnimation">@anim/dialog_fade_in</item>

@@ -2,6 +2,7 @@ package com.hfad.mantou.utils
 
 import android.content.Context
 import com.hfad.mantou.R
+import com.hfad.mantou.utils.project.ConversationWorkspace
 import com.hfad.mantou.utils.project.WebAppProjectSnapshot
 import com.hfad.mantou.utils.project.WebAppProjectWorkspace
 import java.io.File
@@ -31,7 +32,20 @@ object DesktopAppScanner {
 
     fun loadDesktopApps(context: Context): List<DesktopAppItem> {
         AgentWorkspace.ensureWorkspace(context)
-        return scanWebDirectory(File(context.filesDir, AgentWorkspace.WEB_DIR))
+        val workspace = ConversationWorkspace(context.filesDir)
+        return scanWorkspace(workspace, workspace.directory(null))
+            .sortedBy { it.displayName.lowercase(Locale.US) }
+    }
+
+    private fun scanWorkspace(workspace: ConversationWorkspace, directory: File): List<DesktopAppItem> {
+        if (WebAppProjectWorkspace.metadataDirectory(directory).exists()) {
+            return listOfNotNull(scanManagedProject(directory)?.item)
+        }
+        if (directory.parentFile?.name == AgentWorkspace.WEB_DIR) {
+            scanProjectDirectory(directory)?.let { return listOf(it.item) }
+        }
+        return workspace.children(directory).filter(File::isDirectory)
+            .flatMap { scanWorkspace(workspace, it) }
     }
 
     internal fun scanWebDirectory(webDir: File): List<DesktopAppItem> {

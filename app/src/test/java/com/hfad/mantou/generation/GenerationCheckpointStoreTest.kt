@@ -16,6 +16,28 @@ class GenerationCheckpointStoreTest {
     @get:Rule val temporaryFolder = TemporaryFolder()
 
     @Test
+    fun checkpointsForOneSessionAreIndependentAcrossWorkspaces() {
+        val directory = temporaryFolder.newFolder("checkpoints")
+        val store = GenerationCheckpointStore(directory)
+        store.begin(GenerationCheckpoint(1, "default", "original"))
+        store.begin(GenerationCheckpoint(1, "first", "first task", workspaceName = "设计"))
+        store.begin(GenerationCheckpoint(1, "second", "second task", workspaceName = "相册"))
+        val draft = temporaryFolder.newFolder("draft")
+        store.attachDraft(1, "first", draft, "设计")
+
+        val restored = GenerationCheckpointStore(directory)
+        assertEquals("default", restored.read(1)?.runId)
+        assertEquals(draft.absolutePath, restored.read(1, "设计")?.draftPath)
+        assertEquals("second", restored.read(1, "相册")?.runId)
+        assertNull(restored.read(1, "相册")?.draftPath)
+
+        restored.remove(1)
+        assertNull(store.read(1))
+        assertNull(store.read(1, "设计"))
+        assertNull(store.read(1, "相册"))
+    }
+
+    @Test
     fun newStoreRestoresRequirementDraftCodeAndHistoryAfterRestart() {
         val directory = temporaryFolder.newFolder("checkpoints")
         val store = GenerationCheckpointStore(directory)

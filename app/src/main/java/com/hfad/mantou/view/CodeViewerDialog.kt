@@ -1,16 +1,8 @@
 package com.hfad.mantou.view
 
 import android.content.Context
-import android.graphics.drawable.ColorDrawable
-import android.os.Build
 import android.view.LayoutInflater
-import android.view.ViewGroup
-import android.view.Window
-import androidx.activity.ComponentDialog
 import androidx.activity.OnBackPressedCallback
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isInvisible
 import androidx.core.view.isVisible
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -23,6 +15,8 @@ import com.hfad.mantou.utils.project.WebAppProjectResolver
 import com.hfad.mantou.utils.project.WebAppProjectSnapshotKind
 import com.hfad.mantou.utils.project.WebProjectFileTool
 import com.hfad.mantou.utils.project.WebProjectFileToolPolicy
+import com.hfad.mantou.view.dialog.ManTouFullscreenDialog
+import com.hfad.mantou.view.dialog.dialogRipple
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,7 +29,7 @@ internal class CodeViewerDialog(
     context: Context,
     private val scope: CoroutineScope,
     val sessionId: Long? = null
-) : ComponentDialog(context, R.style.Theme_ManTou_CodeViewer) {
+) : ManTouFullscreenDialog(context, R.color.mt_generate_surface) {
     private val binding = DialogGenerateCodeEditorBinding.inflate(LayoutInflater.from(this.context))
     private val fileAdapter = WorkspaceFileAdapter(onFileClick = { selectFile(it.displayPath) })
     private val closeFilePanel = object : OnBackPressedCallback(false) {
@@ -47,9 +41,14 @@ internal class CodeViewerDialog(
     private var readJob: Job? = null
 
     init {
-        requestWindowFeature(Window.FEATURE_NO_TITLE)
-        setContentView(binding.root)
+        setFullscreenContent(binding.root)
         onBackPressedDispatcher.addCallback(closeFilePanel)
+        binding.btnCloseCodeEditor.background = context.dialogRipple(
+            R.color.mt_generate_surface_soft, 13, onDark = true
+        )
+        binding.btnCodeEditorFiles.background = context.dialogRipple(
+            R.color.mt_generate_surface_soft, 13, onDark = true
+        )
         binding.tvCodeEditorLines.bindTo(binding.tvCodeEditorContent)
         binding.btnCloseCodeEditor.setOnClickListener { dismiss() }
         binding.btnCodeEditorFiles.setOnClickListener { showFiles(!closeFilePanel.isEnabled) }
@@ -64,33 +63,6 @@ internal class CodeViewerDialog(
             adapter = fileAdapter
             itemAnimator = null
         }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        val window = window ?: return
-        val surface = context.getColor(R.color.mt_generate_surface)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        window.setBackgroundDrawable(ColorDrawable(surface))
-        window.statusBarColor = surface
-        window.navigationBarColor = surface
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            window.isStatusBarContrastEnforced = false
-            window.isNavigationBarContrastEnforced = false
-        }
-        WindowCompat.getInsetsController(window, window.decorView).apply {
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
-        }
-        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
-            val safe = insets.getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
-            )
-            view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
-            insets
-        }
-        ViewCompat.requestApplyInsets(binding.root)
     }
 
     override fun onStop() {

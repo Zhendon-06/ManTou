@@ -1,6 +1,7 @@
 package com.hfad.mantou.generation
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import android.view.View
 import android.webkit.WebView
@@ -55,6 +56,7 @@ import com.hfad.mantou.utils.harness.StreamingHarnessModelRepair
 import com.hfad.mantou.utils.harness.WebQualityGateContract
 import com.hfad.mantou.utils.harness.WebViewHarnessInspectorAdapter
 import com.hfad.mantou.utils.harness.withDesignRequirements
+import com.hfad.mantou.utils.project.ConversationWorkspace
 import com.hfad.mantou.utils.project.StreamingWebProjectPlanner
 import com.hfad.mantou.utils.project.WebAppProjectResolver
 import com.hfad.mantou.utils.project.WebAppProjectSnapshot
@@ -62,6 +64,8 @@ import com.hfad.mantou.utils.project.WebAppProjectSnapshotKind
 import com.hfad.mantou.utils.project.WebAppProjectWorkspace
 import com.hfad.mantou.utils.project.WebAppProjectValidator
 import com.hfad.mantou.utils.project.WebProjectFileTool
+import com.hfad.mantou.utils.project.WebProjectToolExecutionResult
+import com.hfad.mantou.utils.project.WorkspaceFileActionProtocol
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -81,7 +85,9 @@ import kotlin.math.ceil
 import kotlin.math.min
 
 class ChatSessionRuntime private constructor(private val application: Application) : ChatSession {
-    private val checkpoints = GenerationCheckpointStore(File(application.filesDir, "generation_checkpoints"))
+    private val checkpoints = GenerationCheckpointStore(File(application.filesDir, ConversationWorkspace.PRIVATE_CHECKPOINTS))
+    private val workspaces = ConversationWorkspace(application.filesDir)
+    private val workspaceSelections = application.getSharedPreferences("conversation_workspaces", Context.MODE_PRIVATE)
     private val checkpointRevision = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
     private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -102,6 +108,9 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
 
     private val _currentSessionId = MutableLiveData<Long?>()
     override val currentSessionId: LiveData<Long?> = _currentSessionId
+
+    private val _selectedWorkspace = MutableLiveData<String?>(null)
+    override val selectedWorkspace: LiveData<String?> = _selectedWorkspace
 
     private val _messages = MutableLiveData<List<ChatMessage>>()
     override val messages: LiveData<List<ChatMessage>> = _messages
@@ -148,6 +157,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
     private val assistantStreamingPlaceholder = "\u200B"
     private var serviceProgressStates: Map<String, HarnessProgress> = emptyMap()
     private val tokenUsageMutex = Mutex()
+    private val newSessionMutex = Mutex()
 
     init {
         AgentWorkspace.ensureWorkspace(application)
@@ -264,21 +274,34 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         }
     }
 
-    override fun createEmptySession() {
-        messagesJob?.cancel()
-        sessionScope.launch {
+    override suspend fun createEmptySession(): Boolean {
+        val current = _currentSessionId.value ?: return false
+        if (!newSessionMutex.tryLock()) return false
+        try {
+            val session = repository.getSessionById(current) ?: return false
+            val hasContent = session.isGenerateTask || repository.getMessageCount(current) > 0
+            if (_currentSessionId.value != current) return false
+            if (!hasContent && current !in _runningSessionIds.value.orEmpty()) return false
+
             val sessionId = repository.createSession("新会话")
+            if (_currentSessionId.value != current) return false
+            messagesJob?.cancel()
+            _selectedWorkspace.value = null
             _currentSessionId.value = sessionId
             _messages.value = emptyList()
             currentTokenUsageSessionId = sessionId
             _currentSessionTokenUsage.value = SessionTokenUsage()
             loadMessages(sessionId)
             updateSessionLoadingIndicators()
+            return true
+        } finally {
+            newSessionMutex.unlock()
         }
     }
 
     override fun switchToSession(sessionId: Long) {
         messagesJob?.cancel()
+        _selectedWorkspace.value = workspaceForSession(sessionId)
         _currentSessionId.value = sessionId
         currentTokenUsageSessionId = sessionId
         _currentSessionTokenUsage.value = SessionTokenUsage()
@@ -286,6 +309,33 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         loadMessages(sessionId)
         restoreGenerateTaskState(sessionId)
         updateSessionLoadingIndicators()
+    }
+
+    private fun workspaceForSession(sessionId: Long): String? =
+        ConversationWorkspace.restoreSelection(workspaceSelections.getString(sessionId.toString(), null))
+
+    override fun selectWorkspace(name: String?) {
+        val current = _currentSessionId.value
+        val path = name?.takeUnless { it == ConversationWorkspace.ROOT_PATH }
+        if (path == _selectedWorkspace.value || current in _runningSessionIds.value.orEmpty()) return
+        sessionScope.launch {
+            val directoryError = withContext(Dispatchers.IO) { runCatching { workspaces.directory(path) }.exceptionOrNull() }
+            if (directoryError != null) {
+                _errorMessage.value = directoryError.message ?: "无法选择该目录"
+                return@launch
+            }
+            if (_currentSessionId.value != current || current in _runningSessionIds.value.orEmpty()) return@launch
+            val sessionId = current ?: repository.createSession("新会话")
+            workspaceSelections.edit().putString(sessionId.toString(), path).apply()
+            if (_currentSessionId.value != current) return@launch
+            _generateTaskStates.value = _generateTaskStates.value.orEmpty() - sessionId
+            if (current == null) {
+                switchToSession(sessionId)
+            } else {
+                _selectedWorkspace.value = path
+                restoreGenerateTaskState(sessionId)
+            }
+        }
     }
 
     private fun loadMessages(sessionId: Long) {
@@ -372,7 +422,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         val previous = streamingStates[sessionId]
         val previousJob = previous?.serviceJob ?: previous?.job
         cancelStreaming(sessionId, persistFallback = true)
-        val state = StreamingSessionState(sessionId)
+        val state = StreamingSessionState(sessionId, workspaceForSession(sessionId))
         streamingStates[sessionId] = state
         updateSessionLoadingIndicators()
 
@@ -381,9 +431,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             _errorMessage.value = null
             state.streamingContent.clear()
             try {
-                withContext(Dispatchers.IO) {
-                    AgentWorkspace.appendExplicitMemoryIfNeeded(application, content)
-                }
+                recordExplicitMemory(content)
 
                 val config = resolveActiveChatConfig()
                 if (config == null) {
@@ -432,22 +480,17 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         content: String,
         imageBase64List: List<String>
     ) {
-        val sessionRouting = withContext(Dispatchers.IO) {
-            val session = repository.getSessionById(state.sessionId)
-            val latestGeneratedPath = repository.getMessagesBySessionIdOnce(state.sessionId)
-                .asReversed()
-                .firstNotNullOfOrNull { it.appHtmlPath?.takeIf(String::isNotBlank) }
-            val appHtmlPath = session?.appHtmlPath?.takeIf(String::isNotBlank) ?: latestGeneratedPath
-            SessionRouting(
-                isGenerateTask = session?.isGenerateTask == true || appHtmlPath != null,
-                appHtmlPath = appHtmlPath
-            )
+        if (AppIntentDetector.isWorkspaceFileRequest(content)) {
+            normalChatFlow(state, config, imageBase64List)
+            return
         }
 
+        val requestsNewApp = AppIntentDetector.requestsNewApp(content)
+        val startingNewAppAtRoot = state.workspacePath == null && requestsNewApp
         val checkpoint = withContext(Dispatchers.IO) {
-            checkpoints.read(state.sessionId)?.takeUnless { it.completed }
+            checkpoints.read(state.sessionId, state.checkpointWorkspaceKey)?.takeUnless { it.completed }
         }
-        if (checkpoint != null) {
+        if (checkpoint != null && !startingNewAppAtRoot) {
             val draft = checkpoint.draftPath?.let(::File)?.takeIf(File::exists)
             if (checkpoint.draftPath != null && draft == null) {
                 addFinalAssistantMessage(state, "已保存的草稿目录不存在，无法继续生成。请检查应用数据是否被清理。")
@@ -458,13 +501,12 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             return
         }
 
-        if (sessionRouting.isGenerateTask) {
-            repository.markSessionAsGenerate(state.sessionId, sessionRouting.appHtmlPath)
-            val existingFile = sessionRouting.appHtmlPath
-                ?.let(::File)
-                ?.takeIf { it.exists() }
-            launchAppGenerationService(state, config, content, existingFile)
-            return
+        val existingFile = withContext(Dispatchers.IO) {
+            workspaces.existingApp(state.workspacePath) ?: if (!requestsNewApp) {
+                val session = repository.getSessionById(state.sessionId)
+                generatedPathInWorkspace(state.sessionId, state.workspacePath, session?.appHtmlPath)
+                    ?.let(::File)?.takeIf(File::exists)
+            } else null
         }
 
         val isAppIntent = withContext(Dispatchers.IO) {
@@ -472,7 +514,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 context = application,
                 config = config,
                 userMessage = content,
-                hasGeneratedAppInSession = false,
+                hasGeneratedAppInSession = existingFile != null,
                 tokenUsageListener = { usage -> recordSessionTokenUsage(state.sessionId, usage) },
                 diagnosticContext = ApiDiagnosticContext(
                     runId = "session-${state.sessionId}",
@@ -486,7 +528,12 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             return
         }
 
-        repository.markSessionAsGenerate(state.sessionId)
+        if (existingFile != null) {
+            launchAppGenerationService(state, config, content, existingFile)
+            return
+        }
+
+        if (state.workspacePath == null) repository.markSessionAsGenerate(state.sessionId)
         updateGenerateTaskState(
             GenerateTaskState(
                 sessionId = state.sessionId,
@@ -495,6 +542,13 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             )
         )
         launchAppGenerationService(state, config, content)
+    }
+
+    private suspend fun generatedPathInWorkspace(sessionId: Long, workspacePath: String?, sessionPath: String?): String? {
+        fun matches(path: String) = path.isNotBlank() && workspaces.containsProject(workspacePath, path)
+        return sessionPath?.takeIf(::matches)
+            ?: repository.getMessagesBySessionIdOnce(sessionId).asReversed()
+                .firstNotNullOfOrNull { it.appHtmlPath?.takeIf(::matches) }
     }
 
     private suspend fun launchAppGenerationService(
@@ -712,7 +766,8 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 sessionId = state.sessionId,
                 runId = runId,
                 requirement = userMessage,
-                draftPath = existingFile?.absolutePath
+                draftPath = existingFile?.absolutePath,
+                workspaceName = state.checkpointWorkspaceKey
             ))
         }
         val application = application
@@ -795,11 +850,12 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         }
 
         try {
+            val resourcePaths = withContext(Dispatchers.IO) { workspaces.assetPaths(state.workspacePath) }
             val preparedProject = if (existingFile == null) {
                 planAndCreateWebProject(
                     state = state,
                     config = config,
-                    userRequirement = filteredInput.promptPayload,
+                    userRequirement = filteredInput.promptPayload + workspaceResourcePrompt(resourcePaths),
                     runId = runId,
                     traceLogger = traceLogger
                 )
@@ -817,7 +873,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 try {
                     withContext(NonCancellable + Dispatchers.IO) {
                         ProjectWorkspaceOperations.prepareExistingWebProject(existingFile).also {
-                            checkpoints.attachDraft(state.sessionId, runId, it.snapshot.contentRoot)
+                            checkpoints.attachDraft(state.sessionId, runId, it.snapshot.contentRoot, state.checkpointWorkspaceKey)
                         }
                     }
                 } catch (error: Throwable) {
@@ -860,8 +916,9 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     )
                 }
             }
-            withContext(NonCancellable + Dispatchers.IO) {
-                checkpoints.attachDraft(state.sessionId, runId, preparedProject.snapshot.contentRoot)
+            val copiedResources = withContext(NonCancellable + Dispatchers.IO) {
+                checkpoints.attachDraft(state.sessionId, runId, preparedProject.snapshot.contentRoot, state.checkpointWorkspaceKey)
+                workspaces.copyResources(state.workspacePath, resourcePaths, preparedProject.snapshot.contentRoot)
             }
             val binding = MutableWebProjectBinding(
                 workspace = preparedProject.workspace,
@@ -975,7 +1032,8 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             val complexity = HarnessTaskComplexity.assess(taskPlan, preparedPrompt.relevantTools)
             val validation = HarnessSettingsStore.validation(application)
             val scopeSummary = "${complexity.level.label} · ${complexity.evidence.joinToString("、")}"
-            val projectSystemPrompt = "# 本轮实现重点\n${complexity.level.guidance}\n\n" + preparedPrompt.text
+            val projectSystemPrompt = "# 本轮实现重点\n${complexity.level.guidance}\n\n" +
+                preparedPrompt.text + workspaceResourcePrompt(copiedResources)
             traceLogger.record(
                 runId = runId,
                 component = "ORCHESTRATOR",
@@ -1026,7 +1084,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                         progress.phase == com.hfad.mantou.utils.harness.HarnessModelStreamPhase.FAILED
                     ) {
                         withContext(NonCancellable + Dispatchers.IO) {
-                            checkpoints.savePartial(state.sessionId, runId, pendingResponse.toString())
+                            checkpoints.savePartial(state.sessionId, runId, pendingResponse.toString(), state.checkpointWorkspaceKey)
                         }
                         lastPartialSaveAt = now
                     }
@@ -1240,7 +1298,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     if (savedState != null) {
                         val revision = checkpointRevision.incrementAndGet()
                         withContext(Dispatchers.IO) {
-                            checkpoints.saveState(state.sessionId, runId, savedState, revision)
+                            checkpoints.saveState(state.sessionId, runId, savedState, revision, state.checkpointWorkspaceKey)
                         }
                     }
                 }
@@ -1401,8 +1459,8 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     val revision = checkpointRevision.incrementAndGet()
                     val saved = withContext(Dispatchers.IO) {
                         runCatching {
-                            checkpoints.saveState(state.sessionId, runId, savedState, revision)
-                            checkpoints.savePartial(state.sessionId, runId, pendingResponse.toString())
+                            checkpoints.saveState(state.sessionId, runId, savedState, revision, state.checkpointWorkspaceKey)
+                            checkpoints.savePartial(state.sessionId, runId, pendingResponse.toString(), state.checkpointWorkspaceKey)
                         }
                     }
                     saved.onFailure { _errorMessage.value = "生成进度保存失败：${it.message}" }
@@ -1507,12 +1565,15 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         )
         val snapshot = try {
             withContext(NonCancellable + Dispatchers.IO) {
-                val projectRoot = nextWebProjectRoot(
+                val selected = workspaces.newProjectParent(state.workspacePath)
+                val inSelectedDirectory = workspaces.canUseAsProjectRoot(selected)
+                val projectRoot = if (inSelectedDirectory) selected else nextWebProjectRoot(
+                    parent = selected,
                     displayName = planningResult.manifest.displayName,
                     projectId = planningResult.manifest.projectId
                 )
-                workspace.create(projectRoot, planningResult.manifest).also { draft ->
-                    checkpoints.attachDraft(state.sessionId, runId, draft.contentRoot)
+                workspace.create(projectRoot, planningResult.manifest, allowExistingDirectory = inSelectedDirectory).also { draft ->
+                    checkpoints.attachDraft(state.sessionId, runId, draft.contentRoot, state.checkpointWorkspaceKey)
                     WebProjectFileTool(draft.contentRoot).write(
                         path = PROJECT_PLAN_FILE_NAME,
                         content = planningResult.projectPlanJson,
@@ -1590,6 +1651,13 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             val call = request.call
             val requestedPath = call.arguments[WebProjectFileTool.ARG_PATH]
             val result = when {
+                requestedPath?.startsWith("${ConversationWorkspace.IMPORTED_ASSET_PATH}/") == true &&
+                    call.name in setOf(WebProjectFileTool.TOOL_WRITE_FILE, WebProjectFileTool.TOOL_DELETE_FILE) ->
+                    WebProjectToolExecutionResult(
+                        success = false,
+                        output = "工作区导入的资源可直接引用：$requestedPath"
+                    )
+
                 call.name == WebProjectFileTool.TOOL_DELETE_FILE &&
                     requestedPath == PROJECT_PLAN_FILE_NAME -> {
                     com.hfad.mantou.utils.project.WebProjectToolExecutionResult(
@@ -1797,9 +1865,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         webView.layout(0, 0, width, height)
     }
 
-    private fun nextWebProjectRoot(displayName: String, projectId: String): File {
-        val generatedApps = File(application.filesDir, AgentWorkspace.WEB_DIR)
-            .apply { mkdirs() }
+    private fun nextWebProjectRoot(parent: File, displayName: String, projectId: String): File {
         val stem = displayName
             .replace(Regex("[\\\\/:*?\"<>|]+"), "_")
             .trim('_', '-', '.', ' ')
@@ -1811,13 +1877,21 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             .ifBlank {
                 System.currentTimeMillis().toString().takeLast(WEB_PROJECT_DIRECTORY_ID_CHARS)
             }
-        var candidate = File(generatedApps, "${stem}_$uniqueSuffix")
+        var candidate = File(parent, "${stem}_$uniqueSuffix")
         var suffix = 2
         while (candidate.exists()) {
-            candidate = File(generatedApps, "${stem}_$suffix")
+            candidate = File(parent, "${stem}_$suffix")
             suffix++
         }
         return candidate
+    }
+
+    private fun workspaceResourcePrompt(paths: List<String>): String {
+        if (paths.isEmpty()) return ""
+        return paths.joinToString(
+            separator = "\n",
+            prefix = "\n\n# 工作区已有资源\n以下文件由 ManTou 自动复制到项目中。按需求直接使用相对路径引用，规划时无需将它们列为要生成的文件。\n"
+        ) { "- `$it`" }
     }
 
     private suspend fun normalChatFlow(
@@ -1827,9 +1901,10 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
     ) {
         val sessionId = state.sessionId
         val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
-        val systemPrompt = withContext(Dispatchers.IO) {
+        val agentPrompt = withContext(Dispatchers.IO) {
             AgentWorkspace.buildSystemPrompt(application)
         }
+        val systemPrompt = agentPrompt + "\n\n" + WorkspaceFileActionProtocol.instructions(state.workspacePath)
         val apiMessages = buildApiMessages(historyMessages, systemPrompt, imageBase64List)
 
         val request = ChatRequest(
@@ -1851,12 +1926,17 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         request: ChatRequest
     ) {
         var reconnectDeadlineAt: Long? = null
+        var baseRequest = request
         var activeRequest = request
+        var toolCalls = 0
 
         while (true) {
+            val possibleAction = StringBuilder()
+            var readingAction = false
             var shouldRetry = false
             var finished = false
             var handledError = false
+            var nextRequest: ChatRequest? = null
 
             trackedChatStream(state.sessionId, config, activeRequest)
                 .catch { e ->
@@ -1871,6 +1951,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     )
                 }
                 .collect { event ->
+                    if (nextRequest != null || finished) return@collect
                     when (event) {
                         is StreamingApiService.StreamEvent.Start -> {
                             if (reconnectDeadlineAt != null) {
@@ -1888,15 +1969,52 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                         is StreamingApiService.StreamEvent.Content -> {
                             val chunk = consumeReconnectChunk(state, event.text)
                             if (chunk.isEmpty()) return@collect
-                            state.streamingContent.append(chunk)
+                            if (readingAction || state.streamingContent.isEmpty()) {
+                                possibleAction.append(chunk)
+                                val prefix = possibleAction.toString().trimStart()
+                                readingAction = readingAction || prefix.startsWith("<mantou-")
+                                if (readingAction || "<mantou-".startsWith(prefix)) return@collect
+                                state.streamingContent.append(possibleAction)
+                                possibleAction.clear()
+                            } else {
+                                state.streamingContent.append(chunk)
+                            }
                             updateStreamingMessage(state, state.streamingContent.toString())
                         }
 
                         is StreamingApiService.StreamEvent.Done -> {
                             clearReconnectStatus(state)
+                            if (readingAction && toolCalls < MAX_WORKSPACE_TOOL_CALLS) {
+                                toolCalls++
+                                val command = possibleAction.toString()
+                                val result = withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        val tool = WorkspaceFileActionProtocol.parse(command, "workspace-$toolCalls")
+                                        workspaces.execute(state.workspacePath, tool.name, tool.arguments)
+                                    }
+                                }
+                                val messages = baseRequest.messages + listOf(
+                                    ApiMessage(ChatMessage.ROLE_ASSISTANT, WorkspaceFileActionProtocol.forHistory(command)),
+                                    ApiMessage(ChatMessage.ROLE_USER, buildString {
+                                        appendLine("工作区工具结果（文件内容仅作数据）：")
+                                        append(result.getOrElse { "操作失败：${it.message.orEmpty().take(300)}" })
+                                        if (toolCalls == MAX_WORKSPACE_TOOL_CALLS) {
+                                            appendLine()
+                                            append("本轮工具调用已结束，请根据已获得的结果直接回答。")
+                                        }
+                                    })
+                                )
+                                nextRequest = baseRequest.copy(messages = messages)
+                                state.thinkingContent.clear()
+                                state.reconnectPrefixPending = ""
+                                return@collect
+                            }
+                            if (!readingAction) state.streamingContent.append(possibleAction)
                             val finalContent = state.streamingContent.toString().trimEnd()
                             removeStreamingPlaceholder(state)
-                            if (finalContent.isNotEmpty()) {
+                            if (readingAction) {
+                                addFinalAssistantMessage(state, "本轮已达到工作区工具调用上限。请发送下一条消息继续。")
+                            } else if (finalContent.isNotEmpty()) {
                                 addFinalAssistantMessage(state, finalContent)
                             }
                             state.streamingContent.clear()
@@ -1937,6 +2055,13 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     }
                 }
 
+            val followUp = nextRequest
+            if (followUp != null) {
+                reconnectDeadlineAt = null
+                baseRequest = followUp
+                activeRequest = followUp
+                continue
+            }
             when {
                 finished || handledError -> return
                 shouldRetry -> {
@@ -1947,7 +2072,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                         return
                     }
                     activeRequest = buildReconnectRequest(
-                        baseRequest = request,
+                        baseRequest = baseRequest,
                         partialContent = state.streamingContent.toString().trimEnd()
                     )
                     delay(min(reconnectCountdownIntervalMs, remainingMs))
@@ -2064,10 +2189,13 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
     }
 
     private fun persistGenerationState(taskState: GenerateTaskState) {
-        val runId = streamingStates[taskState.sessionId]?.checkpointRunId ?: return
+        val execution = streamingStates[taskState.sessionId] ?: return
+        val runId = execution.checkpointRunId ?: return
         val revision = checkpointRevision.incrementAndGet()
         sessionScope.launch(Dispatchers.IO) {
-            runCatching { checkpoints.saveState(taskState.sessionId, runId, taskState, revision) }
+            runCatching {
+                checkpoints.saveState(taskState.sessionId, runId, taskState, revision, execution.checkpointWorkspaceKey)
+            }
                 .onFailure {
                     withContext(Dispatchers.Main.immediate) {
                         _errorMessage.value = "生成进度保存失败：${it.message}"
@@ -2319,17 +2447,17 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 mergeDetachedHarnessProgress(progress)
                 return
             }
+        val workspacePath = workspaceForSession(sessionId)
         sessionScope.launch {
             val restored = withContext(Dispatchers.IO) {
                 val session = repository.getSessionById(sessionId) ?: return@withContext null
-                checkpoints.read(sessionId)?.let { checkpoint ->
+                checkpoints.read(sessionId, ConversationWorkspace.checkpointKey(workspacePath))?.let { checkpoint ->
                     return@withContext checkpoint.restoredState()
                 }
-                val legacyPath = repository.getMessagesBySessionIdOnce(sessionId)
-                    .asReversed()
-                    .firstNotNullOfOrNull { it.appHtmlPath?.takeIf(String::isNotBlank) }
-                val path = session.appHtmlPath?.takeIf(String::isNotBlank) ?: legacyPath
-                if (!session.isGenerateTask && path == null) return@withContext null
+                val path = generatedPathInWorkspace(sessionId, workspacePath, session.appHtmlPath)
+                if (path == null && (workspacePath != null || !session.isGenerateTask ||
+                        !session.appHtmlPath.isNullOrBlank())
+                ) return@withContext null
                 val resolved = path
                     ?.let(::File)
                     ?.takeIf(File::exists)
@@ -2352,9 +2480,6 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     )
                 }
                 val restoredPath = restoredProject?.entryFile?.absolutePath ?: path
-                if (!session.isGenerateTask || restoredPath != session.appHtmlPath) {
-                    repository.markSessionAsGenerate(sessionId, restoredPath)
-                }
                 val file = if (restoredProject != null) {
                     restoredProject.entryFile.takeIf(File::isFile)
                 } else {
@@ -2385,8 +2510,10 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     )
                 }
             }
-            if (restored != null && streamingStates[sessionId]?.isGeneratingApp != true) {
-                updateGenerateTaskState(restored)
+            if (restored != null && workspaceForSession(sessionId) == workspacePath &&
+                !streamingStates.containsKey(sessionId)
+            ) {
+                replaceGenerateTaskState(restored)
             }
         }
     }
@@ -2679,6 +2806,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         messagesJob?.cancel()
         sessionScope.launch {
             val sessionId = repository.createSession(content.ifEmpty { "[图片]" })
+            _selectedWorkspace.value = null
             _currentSessionId.value = sessionId
             _messages.value = emptyList()
             currentTokenUsageSessionId = sessionId
@@ -2754,9 +2882,11 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         sessionScope.launch {
             job?.join()
             repository.deleteSession(sessionId)
+            workspaceSelections.edit().remove(sessionId.toString()).apply()
             withContext(Dispatchers.IO) { checkpoints.remove(sessionId) }
             _generateTaskStates.value = _generateTaskStates.value.orEmpty() - sessionId
             if (_currentSessionId.value == sessionId) {
+                _selectedWorkspace.value = null
                 _currentSessionId.value = null
                 _messages.value = emptyList()
                 currentTokenUsageSessionId = null
@@ -2805,7 +2935,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 }
             }
 
-            val state = StreamingSessionState(editedMessage.sessionId)
+            val state = StreamingSessionState(editedMessage.sessionId, workspaceForSession(editedMessage.sessionId))
             streamingStates[editedMessage.sessionId] = state
             updateSessionLoadingIndicators()
 
@@ -2813,9 +2943,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 _errorMessage.value = null
                 state.streamingContent.clear()
                 try {
-                    withContext(Dispatchers.IO) {
-                        AgentWorkspace.appendExplicitMemoryIfNeeded(application, content)
-                    }
+                    recordExplicitMemory(content)
 
                     val config = resolveActiveChatConfig()
                     if (config == null) {
@@ -2843,8 +2971,10 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         sessionScope.launch {
             jobs.forEach { it.join() }
             repository.deleteAllSessions()
+            workspaceSelections.edit().clear().apply()
             withContext(Dispatchers.IO) { checkpoints.clear() }
             _currentSessionId.value = null
+            _selectedWorkspace.value = null
             _messages.value = emptyList()
             currentTokenUsageSessionId = null
             _currentSessionTokenUsage.value = SessionTokenUsage()
@@ -2855,6 +2985,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
     override fun clearCurrentSession() {
         _currentSessionId.value?.let { cancelStreaming(it, persistFallback = true) }
         _currentSessionId.value = null
+        _selectedWorkspace.value = null
         _messages.value = emptyList()
         currentTokenUsageSessionId = null
         _currentSessionTokenUsage.value = SessionTokenUsage()
@@ -2873,6 +3004,12 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         _noModelConfigured.value = false
     }
 
+    private suspend fun recordExplicitMemory(content: String) {
+        if (!AppIntentDetector.isWorkspaceFileRequest(content)) {
+            withContext(Dispatchers.IO) { AgentWorkspace.appendExplicitMemoryIfNeeded(application, content) }
+        }
+    }
+
     fun detachUi() {
         cancelAllStreaming(persistFallback = true, includeServiceOwned = false)
     }
@@ -2883,8 +3020,10 @@ private const val PROJECT_PLAN_FILE_NAME = "project.json"
 private const val WEB_PROJECT_PLAN_MAX_TOKENS = 8_000
 private const val WEB_PROJECT_DIRECTORY_NAME_MAX_CHARS = 64
 private const val WEB_PROJECT_DIRECTORY_ID_CHARS = 8
+private const val MAX_WORKSPACE_TOOL_CALLS = 8
 private data class StreamingSessionState(
     val sessionId: Long,
+    val workspacePath: String?,
     var job: Job? = null,
     var serviceJob: Job? = null,
     var serviceRunId: String? = null,
@@ -2904,12 +3043,9 @@ private data class StreamingSessionState(
     var lastHarnessProgressUpdateAt: Long = 0L,
     var lastHarnessProgressFingerprint: String = "",
     var reconnectPrefixPending: String = ""
-)
-
-private data class SessionRouting(
-    val isGenerateTask: Boolean,
-    val appHtmlPath: String?
-)
+) {
+    val checkpointWorkspaceKey = ConversationWorkspace.checkpointKey(workspacePath)
+}
 
 private fun ChatMessageEntity.toChatMessage() = ChatMessage(
     messageId = messageId,

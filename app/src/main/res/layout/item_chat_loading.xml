@@ -96,13 +96,12 @@
                 android:requiresFadingEdge="vertical"
                 android:scrollbars="none">
 
-                <TextView
+                <com.hfad.mantou.view.markdown.MarkdownTextView
                     android:id="@+id/tvThinking"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:lineSpacingExtra="3dp"
                     android:textColor="@color/mt_text_secondary"
-                    android:textIsSelectable="true"
                     android:textSize="13sp"
                     tools:text="正在规划页面结构、生成样式和交互逻辑..." />
 

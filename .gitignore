@@ -9,6 +9,12 @@ local.properties
 *.apk
 *.aab
 *.keystore
+*.jks
+*.p12
+*.pfx
+*.pem
+*.key
+*.dpapi
 .externalNativeBuild/
 
 # OS 文件
@@ -17,6 +23,9 @@ Thumbs.db
 
 # Log
 *.log
+*.db
+*.sqlite
+*.sqlite3
 
 # 其他
 .cxx/
@@ -24,8 +33,27 @@ leetcode/
 __pycache__/
 *.pyc
 
-# Local build, tool and personal working files
+# 本机配置、测试产物和个人资料
 /.kotlin/
+/.venv*/
 /.claude/settings.local.json
-/tmp/pdfs/
-/output/pdf/
+/tmp/
+/output/
+.env
+.env.*
+credentials.json
+secrets.properties
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*简历*
+resume.*
+Resume.*
+
+# 可在本地重新导出的模型资产
+/app/src/main/assets/embedding/m3e-small/model.onnx
+/app/src/main/assets/embedding/m3e-small/vocab.txt

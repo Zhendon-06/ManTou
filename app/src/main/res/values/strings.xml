@@ -1,4 +1,8 @@
 <resources>
+    <string name="chat_markdown_cannot_open_link">没有可打开此链接的应用</string>
+    <string name="chat_markdown_select_source">选取 Markdown 原文</string>
+    <string name="dialog_close">关闭</string>
+    <string name="dialog_image_preview">图片预览</string>
     <string name="app_name">ManTou</string>
     <!-- TODO: Remove or change this placeholder text -->
     <string name="hello_blank_fragment">Hello blank fragment</string>

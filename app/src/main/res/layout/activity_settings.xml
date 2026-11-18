@@ -57,32 +57,6 @@
             </LinearLayout>
 
             <LinearLayout
-                android:id="@+id/rowHarnessValidation"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:minHeight="72dp"
-                android:paddingVertical="12dp"
-                android:clickable="true"
-                android:focusable="true"
-                android:foreground="?attr/selectableItemBackground"
-                android:orientation="vertical">
-                <TextView
-                    android:id="@+id/tvHarnessValidation"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="验收策略"
-                    android:textColor="@color/mt_text_primary"
-                    android:textSize="15sp" />
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="生成按任务复杂度自动编排。此处设置验收设备范围和页面自测要求，新任务生效。"
-                    android:textColor="@color/mt_text_secondary"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <LinearLayout
                 android:id="@+id/rowModelConfig"
                 android:layout_width="match_parent"
                 android:layout_height="66dp"

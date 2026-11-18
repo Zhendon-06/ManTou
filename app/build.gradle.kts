@@ -1,4 +1,3 @@
-import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -21,18 +20,6 @@ android {
         versionName = "2.0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        
-        // 从 local.properties 读取 API Key 并注入到 BuildConfig
-        val localProperties = Properties()
-        val localPropertiesFile = rootProject.file("local.properties")
-        if (localPropertiesFile.exists()) {
-            localPropertiesFile.inputStream().use { stream ->
-                localProperties.load(stream)
-            }
-        }
-        
-        val apiKey = localProperties.getProperty("SILICONFLOW_API_KEY", "")
-        buildConfigField("String", "SILICONFLOW_API_KEY", "\"$apiKey\"")
     }
 
     buildTypes {
@@ -55,7 +42,6 @@ android {
     }
     buildFeatures {
         viewBinding = true
-        buildConfig = true  // 启用 BuildConfig
         compose = true
     }
     androidResources {
@@ -74,12 +60,21 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.backdrop)
+    constraints {
+        implementation(libs.androidx.graphics.path) {
+            because("Use the updated Graphics Path native library for 16 KB page size compatibility")
+        }
+    }
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.navigation.fragment.ktx)
     implementation(libs.androidx.navigation.ui.ktx)
     implementation(libs.androidx.viewpager2)
     implementation(libs.androidx.cardview)
     implementation(libs.glide)
+    implementation(libs.markwon.core)
+    implementation(libs.markwon.strikethrough)
+    implementation(libs.markwon.tasklist)
+    implementation(libs.commonmark.tables)
     
     // Room
     implementation(libs.androidx.room.runtime)

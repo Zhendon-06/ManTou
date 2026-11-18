@@ -2,6 +2,7 @@ package com.hfad.mantou.view
 
 import android.Manifest
 import android.app.Dialog
+import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.Intent
@@ -23,10 +24,10 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.view.Window
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.webkit.WebView
+import android.webkit.MimeTypeMap
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
@@ -45,7 +46,6 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsAnimationCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.doOnNextLayout
 import androidx.core.view.updatePadding
 import androidx.core.widget.TextViewCompat
 import androidx.fragment.app.Fragment
@@ -54,8 +54,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
-import com.google.android.material.bottomsheet.BottomSheetDialog
-import com.google.android.material.chip.Chip
+import com.bumptech.glide.Glide
 import com.google.android.material.slider.Slider
 import com.hfad.mantou.R
 import com.hfad.mantou.adapter.ChatAdapter
@@ -71,16 +70,17 @@ import com.hfad.mantou.data.api.VoiceTranscriptionApiService
 import com.hfad.mantou.data.api.WavAudioRecorder
 import com.hfad.mantou.data.database.AppDatabase
 import com.hfad.mantou.data.database.ChatSessionEntity
-import com.hfad.mantou.data.database.ProviderEntity
 import com.hfad.mantou.data.preferences.AppearanceSettingsStore
 import com.hfad.mantou.data.preferences.ActiveModelStore
 import com.hfad.mantou.data.preferences.ContextLimitStore
+import com.hfad.mantou.data.preferences.HarnessSettingsStore
 import com.hfad.mantou.data.preferences.VoiceInputModelStore
 import com.hfad.mantou.data.preferences.WallpaperStore
 import com.hfad.mantou.databinding.FragmentMainBinding
 import com.hfad.mantou.databinding.LayoutChatPageBinding
 import com.hfad.mantou.databinding.LayoutDesktopPageBinding
 import com.hfad.mantou.databinding.LayoutWorkspacePageBinding
+import com.hfad.mantou.databinding.SheetWorkspacePickerBinding
 import com.hfad.mantou.data.repository.ProviderRepository
 import com.hfad.mantou.tool.impl.CameraPhotoBridge
 import com.hfad.mantou.tool.impl.WebAppDeviceHost
@@ -90,7 +90,18 @@ import com.hfad.mantou.utils.AutoContrastColor
 import com.hfad.mantou.utils.ContextTokenCounter
 import com.hfad.mantou.utils.DesktopAppScanner
 import com.hfad.mantou.utils.WorkspaceNode
+import com.hfad.mantou.utils.harness.HarnessValidationProfile
+import com.hfad.mantou.utils.project.ConversationWorkspace
+import com.hfad.mantou.utils.project.WorkspaceResourceDocuments
+import com.hfad.mantou.view.dialog.ManTouDialog
+import com.hfad.mantou.view.dialog.ManTouDialog.Action
+import com.hfad.mantou.view.dialog.ManTouDialog.Option
+import com.hfad.mantou.view.dialog.ManTouSheet
+import com.hfad.mantou.view.dialog.dialogField
+import com.hfad.mantou.view.dialog.dialogRipple
+import com.hfad.mantou.view.dialog.dialogShape
 import com.hfad.mantou.view.glass.LiquidGlass
+import com.hfad.mantou.view.markdown.MarkdownTextView
 import com.hfad.mantou.viewmodel.ChatViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -107,6 +118,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         const val PAGE_DESKTOP = 0
         const val PAGE_CHAT = 1
         const val PAGE_WORKSPACE = 2
+        const val PENDING_RESOURCE_WORKSPACE = "pending_resource_workspace"
     }
 
     private var _binding: FragmentMainBinding? = null
@@ -173,9 +185,27 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var currentGenerateTaskState: GenerateTaskState? = null
     private var codeEditorDialog: CodeViewerDialog? = null
     private var actionMenuDialog: Dialog? = null
+    private var modelPickerDialog: ManTouSheet? = null
     private var drawerSearchQuery: String = ""
     private var showArchivedSessions: Boolean = false
     private var adaptiveTextColor: Int = Color.rgb(32, 37, 53)
+    private var pendingResourceWorkspace: String? = null
+
+    private val workspaceResourcePicker = registerForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        val workspace = pendingResourceWorkspace
+        pendingResourceWorkspace = null
+        if (workspace != null && uris.isNotEmpty()) importWorkspaceResources(workspace, uris)
+    }
+
+    private val workspaceResourceFolderPicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        val workspace = pendingResourceWorkspace
+        pendingResourceWorkspace = null
+        if (workspace != null && uri != null) importWorkspaceResourceFolder(workspace, uri)
+    }
 
     private val imagePickerLauncher = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -209,6 +239,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingResourceWorkspace = savedInstanceState?.getString(PENDING_RESOURCE_WORKSPACE)
         webAppDeviceHost = WebAppDeviceHost(requireActivity(), this, this)
         cameraPhotoHost = CameraPhotoHost(
             activity = requireActivity(),
@@ -216,6 +247,11 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             requestPermissionLauncher = requestCameraPermissionLauncher,
             webViewProvider = { activeAppWebView }
         )
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(PENDING_RESOURCE_WORKSPACE, pendingResourceWorkspace)
     }
 
     override fun onCreateView(
@@ -268,6 +304,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         chatBinding.ivAdd.setOnClickListener {
             openImagePicker()
+        }
+
+        chatBinding.workspaceSelector.setOnClickListener {
+            showWorkspaceDirectoryPicker()
         }
 
         chatBinding.ivContextLimit.setOnClickListener {
@@ -333,6 +373,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
+        renderSelectedImagePreviews()
         updateCurrentContextTokens()
         updateSendButtonState(false)
         updateVoiceInputButtonState()
@@ -501,6 +542,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun scrollChatByRemainingDistanceToBottom() {
+        if (isSelectingChatText()) return
         val rvChat = chatBinding.rvChat
         val distanceToBottom = rvChat.computeVerticalScrollRange() -
                 rvChat.computeVerticalScrollOffset() -
@@ -541,6 +583,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 pendingMessagesWhileScrolling = messages
                 return@submitList
             }
+            if (isSelectingChatText()) return@submitList
             when {
                 messages.isNotEmpty() && followNewMessages -> scrollChatToBottom()
                 anchor != null -> restoreChatViewportAnchor(anchor)
@@ -548,6 +591,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
         updateCurrentContextTokens(messages)
     }
+
+    private fun isSelectingChatText(): Boolean =
+        (chatBinding.rvChat.findFocus() as? MarkdownTextView)?.isSelectingText == true
 
     private fun buildDisplayMessages(messages: List<ChatMessage>): List<ChatMessage> {
         val taskState = currentGenerateTaskState ?: return messages
@@ -678,6 +724,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 updateAppBarAction(position)
                 if (position == PAGE_DESKTOP) {
                     refreshDesktopApps()
+                } else if (position == PAGE_WORKSPACE && ::workspaceFileAdapter.isInitialized) {
+                    refreshWorkspaceTree()
                 }
             }
         }
@@ -747,6 +795,158 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         refreshWorkspaceTree()
     }
 
+    private fun showWorkspaceDirectoryPicker() {
+        val context = requireContext()
+        val workspaces = ConversationWorkspace(context.filesDir)
+        val picker = SheetWorkspacePickerBinding.inflate(layoutInflater)
+        val dialog = ManTouSheet(context, picker.root, expandedHeightFraction = 0.82f)
+        val running = viewModel.currentSessionId.value in runningSessionIds
+        var path = viewModel.selectedWorkspace.value ?: ConversationWorkspace.ROOT_PATH
+        val adapter = WorkspaceFileAdapter(
+            onFileClick = ::handleWorkspaceFileClick,
+            onDirectoryClick = { node ->
+                path = node.displayPath
+                picker.tvDirectoryPath.text = path
+                (picker.rvDirectoryTree.adapter as WorkspaceFileAdapter).selectFile(path)
+            }
+        )
+        picker.rvDirectoryTree.layoutManager = LinearLayoutManager(context)
+        picker.rvDirectoryTree.adapter = adapter
+        adapter.updateTextColor(ContextCompat.getColor(context, R.color.mt_text_primary))
+        fun focusDirectory() {
+            picker.tvDirectoryPath.text = path
+            adapter.selectFile(path)
+            val position = adapter.expandDirectory(path)
+            if (position >= 0) picker.rvDirectoryTree.scrollToPosition(position)
+        }
+        fun reloadTree() {
+            viewLifecycleOwner.lifecycleScope.launch {
+                val nodes = withContext(Dispatchers.IO) { AgentWorkspace.loadWorkspaceTree(context) }
+                adapter.submitNodes(nodes)
+                focusDirectory()
+            }
+        }
+        picker.btnUseDirectory.isEnabled = !running
+        picker.btnUseDirectory.setOnClickListener {
+            if (runCatching { workspaces.directory(path) }.isSuccess) {
+                viewModel.selectWorkspace(path)
+                dialog.dismiss()
+            } else {
+                Toast.makeText(context, "该目录由应用管理", Toast.LENGTH_SHORT).show()
+            }
+        }
+        picker.btnNewDirectory.setOnClickListener {
+            showCreateWorkspaceDialog(workspaces, path) { created ->
+                path = created
+                reloadTree()
+                refreshWorkspaceTree()
+            }
+        }
+        picker.btnAddResource.setOnClickListener {
+            ManTouDialog(
+                context,
+                title = "导入资源",
+                message = "选择要添加到当前工作区的内容",
+                options = listOf(
+                    Option("选择文件", "可一次选择多个文件", R.drawable.ic_file_outline) {
+                        pendingResourceWorkspace = path
+                        dialog.dismiss()
+                        workspaceResourcePicker.launch(arrayOf("*/*"))
+                    },
+                    Option("选择文件夹", "导入整个文件夹及其中的文件", R.drawable.ic_folder_outline) {
+                        pendingResourceWorkspace = path
+                        dialog.dismiss()
+                        workspaceResourceFolderPicker.launch(null)
+                    }
+                ),
+                secondary = Action("取消")
+            ).show()
+        }
+        actionMenuDialog?.dismiss()
+        actionMenuDialog = dialog
+        dialog.setOnDismissListener { if (actionMenuDialog === dialog) actionMenuDialog = null }
+        dialog.show()
+        picker.tvDirectoryPath.text = path
+        reloadTree()
+    }
+
+    private fun showCreateWorkspaceDialog(
+        workspaces: ConversationWorkspace,
+        parentPath: String,
+        onCreated: (String) -> Unit
+    ) {
+        val context = requireContext()
+        val nameInput = context.dialogField("目录名称")
+        ManTouDialog(
+            context,
+            title = "新建文件夹",
+            message = parentPath,
+            content = nameInput,
+            secondary = Action("取消"),
+            primary = Action("创建", dismissOnClick = false) { dialog ->
+                runCatching { workspaces.create(parentPath, nameInput.text.toString()) }
+                    .onSuccess { path ->
+                        onCreated(path)
+                        dialog.dismiss()
+                    }
+                    .onFailure { dialog.showFieldError(it.message ?: "无法创建工作区") }
+            }
+        ).show()
+    }
+
+    private fun importWorkspaceResources(workspace: String, uris: List<Uri>) {
+        val context = requireContext().applicationContext
+        val resolver = context.contentResolver
+        val workspaces = ConversationWorkspace(context.filesDir)
+        viewLifecycleOwner.lifecycleScope.launch {
+            val results = withContext(Dispatchers.IO) {
+                uris.map { uri ->
+                    runCatching {
+                        val name = queryDisplayName(uri, context)
+                        val extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(resolver.getType(uri))
+                        val fileName = if ('.' !in name && extension != null) "$name.$extension" else name
+                        workspaces.importResource(workspace, fileName) {
+                            resolver.openInputStream(uri) ?: error("无法读取“$fileName”")
+                        }
+                    }
+                }
+            }
+            refreshWorkspaceTree()
+            val imported = results.count { it.isSuccess }
+            val failures = results.size - imported
+            val message = if (failures == 0) {
+                "已导入 $imported 个资源到 $workspace"
+            } else {
+                "已导入 $imported 个资源，$failures 个失败。 " +
+                    results.firstNotNullOfOrNull { it.exceptionOrNull()?.message }.orEmpty()
+            }
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun importWorkspaceResourceFolder(workspace: String, uri: Uri) {
+        val context = requireContext().applicationContext
+        viewLifecycleOwner.lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val folder = WorkspaceResourceDocuments(context.contentResolver, uri).readFolder()
+                    ConversationWorkspace(context.filesDir).importResourceFolder(workspace, folder)
+                }
+            }
+            val message = result.fold(
+                onSuccess = { imported ->
+                    refreshWorkspaceTree()
+                    val name = imported.path.substringAfterLast('/')
+                    val summary = "已导入「$name」，共 ${imported.importedCount} 个资源"
+                    if (imported.skippedCount == 0) summary
+                    else "$summary，跳过 ${imported.skippedCount} 个不支持或隐藏的条目"
+                },
+                onFailure = { "文件夹导入失败：${it.message ?: "无法读取文件夹"}" }
+            )
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun handleWorkspaceFileClick(node: WorkspaceNode) {
         val file = node.absolutePath?.let(::File) ?: return
         if (!file.exists()) {
@@ -770,8 +970,26 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 startActivity(intent)
             }
             WorkspaceFileOpenMode.TEXT -> openTextFileEditor(file)
+            WorkspaceFileOpenMode.IMAGE -> showWorkspaceImage(file)
             WorkspaceFileOpenMode.UNSUPPORTED -> showUnsupportedWorkspaceFile(file)
         }
+    }
+
+    private fun showWorkspaceImage(file: File) = showImagePreview(file, file.name)
+
+    private fun showImagePreview(source: Any, title: String) {
+        val image = ImageView(requireContext()).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            contentDescription = title
+        }
+        val preview = FrameLayout(requireContext()).apply {
+            val height = (resources.configuration.screenHeightDp / 2).coerceAtMost(320)
+            addView(image, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(height)))
+        }
+        val dialog = ManTouDialog(requireContext(), title = title, content = preview, primary = Action("关闭"))
+        dialog.show()
+        Glide.with(this).load(source).error(R.drawable.ic_input_image).into(image)
+        dialog.setOnDismissListener { Glide.with(image).clear(image) }
     }
 
     private fun openWorkspaceCodeViewer(file: File) {
@@ -796,164 +1014,54 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun openTextFileEditor(file: File) {
-        lifecycleScope.launch {
-            val contentResult = withContext(Dispatchers.IO) {
-                runCatching { file.readText() }
-            }
-            val content = contentResult.getOrElse {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val content = withContext(Dispatchers.IO) { runCatching { file.readText() } }.getOrElse {
                 Toast.makeText(requireContext(), "读取失败: ${it.message}", Toast.LENGTH_SHORT).show()
                 return@launch
             }
-
-            val dialogRoot = FrameLayout(requireContext()).apply {
-                background = glassDialogSurface(26f)
+            val context = requireContext()
+            val editor = context.dialogField(
+                hint = "文件内容",
+                value = content,
+                input = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                    InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+                multiline = true
+            ).apply {
+                typeface = Typeface.MONOSPACE
+                maxHeight = dp((resources.configuration.screenHeightDp * 0.46f).toInt().coerceIn(120, 420))
+                minLines = 4
             }
-            val contentLayout = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.VERTICAL
-                isFocusableInTouchMode = true
-                setPadding(0, dp(8), 0, dp(10))
-            }
-            dialogRoot.addView(
-                contentLayout,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                )
-            )
-
-            val header = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(24), dp(14), dp(20), dp(14))
-            }
-            header.addView(
-                TextView(requireContext()).apply {
-                    text = file.name
-                    textSize = 21f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_text_primary))
-                    maxLines = 1
-                    ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
-                    includeFontPadding = false
-                },
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            )
-            header.addView(
-                TextView(requireContext()).apply {
-                    text = file.extension.ifBlank { "TEXT" }.uppercase(Locale.getDefault())
-                    textSize = 11f
-                    typeface = Typeface.DEFAULT_BOLD
-                    gravity = Gravity.CENTER
-                    setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_primary_dark))
-                    background = roundedBackground(Color.argb(150, 226, 239, 255), 12f)
-                },
-                LinearLayout.LayoutParams(dp(46), dp(25)).apply {
-                    marginStart = dp(14)
-                }
-            )
-            contentLayout.addView(header)
-
-            val editor = EditText(requireContext()).apply {
-                setText(content)
-                setSelection(text?.length ?: 0)
-                gravity = Gravity.TOP or Gravity.START
-                inputType = InputType.TYPE_CLASS_TEXT or
-                        InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                        InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                setHorizontallyScrolling(false)
-                overScrollMode = View.OVER_SCROLL_NEVER
-                textSize = 14f
-                setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_text_primary))
-                setPadding(dp(16), dp(14), dp(16), dp(14))
-                background = roundedStrokeBackground(
-                    fillColor = Color.argb(190, 247, 250, 255),
-                    strokeColor = Color.argb(180, 218, 228, 242),
-                    radius = 18f
-                )
-            }
-            val editorHeight = (resources.displayMetrics.heightPixels * 0.42f)
-                .roundToInt()
-                .coerceIn(dp(260), dp(420))
-            contentLayout.addView(
-                editor,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    editorHeight
-                ).apply {
-                    marginStart = dp(20)
-                    marginEnd = dp(20)
-                }
-            )
-
-            val actions = LinearLayout(requireContext()).apply {
-                gravity = Gravity.CENTER_VERTICAL or Gravity.END
-                setPadding(dp(20), dp(12), dp(20), 0)
-            }
-            val cancelButton = TextView(requireContext()).apply {
-                text = "取消"
-                textSize = 15f
-                gravity = Gravity.CENTER
-                setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_text_secondary))
-                background = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
-            }
-            val saveButton = TextView(requireContext()).apply {
-                text = "保存"
-                textSize = 15f
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
-                setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_primary_dark))
-                background = roundedStrokeBackground(
-                    fillColor = Color.argb(170, 223, 239, 255),
-                    strokeColor = Color.argb(190, 177, 211, 252),
-                    radius = 16f
-                )
-            }
-            actions.addView(cancelButton, LinearLayout.LayoutParams(dp(72), dp(44)))
-            actions.addView(
-                saveButton,
-                LinearLayout.LayoutParams(dp(84), dp(44)).apply {
-                    marginStart = dp(8)
-                }
-            )
-            contentLayout.addView(actions)
-
-            val dialog = Dialog(requireContext())
-            dialog.setContentView(dialogRoot)
-            cancelButton.setOnClickListener { dialog.dismiss() }
-            saveButton.setOnClickListener {
-                lifecycleScope.launch {
-                    val saveResult = withContext(Dispatchers.IO) {
-                        runCatching { file.writeText(editor.text.toString()) }
-                    }
-                    saveResult
-                        .onSuccess {
-                            Toast.makeText(requireContext(), "已保存", Toast.LENGTH_SHORT).show()
+            ManTouDialog(
+                context,
+                title = file.name,
+                content = editor,
+                wide = true,
+                secondary = Action("取消"),
+                primary = Action("保存", dismissOnClick = false) { dialog ->
+                    val button = checkNotNull(dialog.primaryButton)
+                    val text = editor.text.toString()
+                    button.isEnabled = false
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        val saveResult = withContext(Dispatchers.IO) { runCatching { file.writeText(text) } }
+                        button.isEnabled = true
+                        saveResult.onSuccess {
+                            Toast.makeText(context, "已保存", Toast.LENGTH_SHORT).show()
                             refreshWorkspaceTree()
                             dialog.dismiss()
+                        }.onFailure {
+                            Toast.makeText(context, "保存失败: ${it.message}", Toast.LENGTH_SHORT).show()
                         }
-                        .onFailure { error ->
-                            Toast.makeText(requireContext(), "保存失败: ${error.message}", Toast.LENGTH_SHORT).show()
-                        }
+                    }
                 }
-            }
-            contentLayout.requestFocus()
-            dialog.show()
-            configureFloatingGlassWindow(
-                dialog = dialog,
-                width = (resources.displayMetrics.widthPixels * 0.9f).roundToInt(),
-                height = editorHeight + dp(142),
-                blurRadiusDp = 14,
-                dimAmount = 0.16f
-            )
-            dialog.window?.setSoftInputMode(
-                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
-                        WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
-            )
+            ).show()
         }
     }
 
     private fun handleWorkspaceFileLongClick(node: WorkspaceNode): Boolean {
-        if (!node.displayPath.startsWith("/workspace/${AgentWorkspace.WEB_DIR}/")) {
+        val resourceMarker = "/${ConversationWorkspace.IMPORTED_ASSET_PATH}/"
+        val resourceWorkspace = node.displayPath.takeIf { resourceMarker in it }
+            ?.substringBeforeLast(resourceMarker)
+        if (resourceWorkspace == null && !WorkspaceFileOpenPolicy.isGeneratedAppPath(node.displayPath)) {
             return false
         }
         val file = node.absolutePath?.let(::File) ?: return false
@@ -963,12 +1071,18 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             return true
         }
 
+        if (resourceWorkspace != null) {
+            val workspaces = ConversationWorkspace(requireContext().filesDir)
+            confirmDeleteWorkspaceFile(file) { workspaces.deleteResource(resourceWorkspace, file) }
+            return true
+        }
+
         showActionMenu(
             listOf(
-                ActionMenuItem("改名", R.drawable.ic_edit_outline) {
+                Option("改名", icon = R.drawable.ic_edit_outline) {
                     showRenameWorkspaceFileDialog(file)
                 },
-                ActionMenuItem("删除", R.drawable.ic_delete_outline) {
+                Option("删除", icon = R.drawable.ic_delete_outline, destructive = true) {
                     confirmDeleteWorkspaceFile(file)
                 }
             )
@@ -977,66 +1091,41 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     private fun showRenameWorkspaceFileDialog(file: File) {
-        val editor = EditText(requireContext()).apply {
-            tag = "glass:input"
-            setText(file.name)
+        val context = requireContext()
+        val editor = context.dialogField(
+            hint = "文件名",
+            value = file.name,
+            input = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        ).apply {
             setSelection(0, file.nameWithoutExtension.length.coerceAtMost(file.name.length))
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            textSize = 15f
         }
-
-        val paddingHorizontal = (16 * resources.displayMetrics.density).toInt()
-        val paddingTop = (8 * resources.displayMetrics.density).toInt()
-        val editorContainer = FrameLayout(requireContext()).apply {
-            setPadding(paddingHorizontal, paddingTop, paddingHorizontal, 0)
-            addView(
-                editor,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT
-                )
-            )
-        }
-
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle("改名文件")
-            .setView(editorContainer)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
-            .create()
-
-        dialog.setOnShowListener {
-            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
-                .setOnClickListener {
-                    val newName = normalizeWorkspaceFileName(
-                        editor.text.toString(),
-                        file.extension
-                    )
-                    if (newName == null) {
-                        Toast.makeText(requireContext(), "文件名不能为空", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    if (newName == file.name) {
-                        dialog.dismiss()
-                        return@setOnClickListener
-                    }
-                    val target = File(file.parentFile, newName)
-                    if (target.exists()) {
-                        Toast.makeText(requireContext(), "已存在同名文件", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    if (file.renameTo(target)) {
-                        Toast.makeText(requireContext(), "已改名", Toast.LENGTH_SHORT).show()
+        ManTouDialog(
+            context,
+            title = "改名文件",
+            content = editor,
+            secondary = Action("取消"),
+            primary = Action("保存", dismissOnClick = false) { dialog ->
+                val newName = normalizeWorkspaceFileName(editor.text.toString(), file.extension)
+                if (newName == null) {
+                    dialog.showFieldError("文件名不能为空")
+                    return@Action
+                }
+                if (newName == file.name) {
+                    dialog.dismiss()
+                    return@Action
+                }
+                val target = File(file.parentFile, newName)
+                when {
+                    target.exists() -> dialog.showFieldError("已存在同名文件")
+                    file.renameTo(target) -> {
+                        Toast.makeText(context, "已改名", Toast.LENGTH_SHORT).show()
                         refreshWorkspaceTree()
                         dialog.dismiss()
-                    } else {
-                        Toast.makeText(requireContext(), "改名失败", Toast.LENGTH_SHORT).show()
                     }
+                    else -> dialog.showFieldError("改名失败")
                 }
-        }
-        dialog.show()
-        decorateAlertDialog(dialog)
+            }
+        ).show()
     }
 
     private fun normalizeWorkspaceFileName(input: String, originalExtension: String): String? {
@@ -1053,23 +1142,18 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             ?: sanitized
     }
 
-    private fun confirmDeleteWorkspaceFile(file: File) {
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle("删除文件")
-            .setMessage("确定要删除「${file.name}」吗？")
-            .setPositiveButton("删除") { _, _ ->
-                val deleted = file.delete()
-                if (deleted) {
-                    Toast.makeText(requireContext(), "已删除", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(requireContext(), "删除失败", Toast.LENGTH_SHORT).show()
-                }
+    private fun confirmDeleteWorkspaceFile(file: File, delete: () -> Boolean = file::delete) {
+        ManTouDialog(
+            requireContext(),
+            title = "删除文件",
+            message = "确定要删除「${file.name}」吗？",
+            secondary = Action("取消"),
+            primary = Action("删除", destructive = true) {
+                val deleted = runCatching(delete).getOrDefault(false)
+                Toast.makeText(requireContext(), if (deleted) "已删除" else "删除失败", Toast.LENGTH_SHORT).show()
                 refreshWorkspaceTree()
             }
-            .setNegativeButton("取消", null)
-            .create()
-        dialog.show()
-        decorateAlertDialog(dialog)
+        ).show()
     }
 
     private fun updateAppBarTitleSlide(position: Int, positionOffset: Float) {
@@ -1143,49 +1227,15 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         if (::chatAdapter.isInitialized) {
             chatAdapter.updateAppearance(appearanceSettings)
         }
-        val defaultBackground = ContextCompat.getColor(requireContext(), R.color.mt_background)
-        if (wallpaperUri == null) {
-            binding.wallpaperBackground.visibility = View.GONE
-            binding.wallpaperBackground.setImageDrawable(null)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                binding.wallpaperBackground.setRenderEffect(null)
-            }
-            binding.wallpaperMask.visibility = View.GONE
-            mainPager.setBackgroundColor(defaultBackground)
-            chatBinding.root.setBackgroundColor(defaultBackground)
-            workspaceBinding.root.setBackgroundColor(defaultBackground)
-            desktopBinding.root.setBackgroundColor(defaultBackground)
-            updateNewChatAppearance()
-            val analysis = AutoContrastColor.analyze(requireContext(), appearanceSettings, null)
-            dispatchAutoTextColor(appearanceSettings, analysis)
-            return
-        }
-
-        binding.wallpaperBackground.visibility = View.VISIBLE
-        val wallpaperLoaded = runCatching {
-            binding.wallpaperBackground.setImageURI(wallpaperUri)
-        }.isSuccess
-        if (!wallpaperLoaded) {
+        val wallpaperBackground = binding.wallpaperBackground
+        wallpaperBackground.visibility = View.VISIBLE
+        if (!wallpaperBackground.showWallpaper(wallpaperUri) && wallpaperUri != null) {
             WallpaperStore.clearWallpaper(requireContext())
-            binding.wallpaperBackground.visibility = View.GONE
-            binding.wallpaperBackground.setImageDrawable(null)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                binding.wallpaperBackground.setRenderEffect(null)
-            }
-            binding.wallpaperMask.visibility = View.GONE
-            mainPager.setBackgroundColor(defaultBackground)
-            chatBinding.root.setBackgroundColor(defaultBackground)
-            workspaceBinding.root.setBackgroundColor(defaultBackground)
-            desktopBinding.root.setBackgroundColor(defaultBackground)
-            updateNewChatAppearance()
-            val analysis = AutoContrastColor.analyze(requireContext(), appearanceSettings, null)
-            dispatchAutoTextColor(appearanceSettings, analysis)
-            Toast.makeText(requireContext(), "壁纸读取失败，已恢复默认背景", Toast.LENGTH_SHORT).show()
-            return
+            Toast.makeText(requireContext(), "壁纸读取失败，已恢复默认壁纸", Toast.LENGTH_SHORT).show()
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val blur = appearanceSettings.backgroundBlur
-            binding.wallpaperBackground.setRenderEffect(
+            wallpaperBackground.setRenderEffect(
                 if (blur > 0f) {
                     RenderEffect.createBlurEffect(blur, blur, Shader.TileMode.CLAMP)
                 } else {
@@ -1196,7 +1246,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val analysis = AutoContrastColor.analyze(
             requireContext(),
             appearanceSettings,
-            binding.wallpaperBackground.drawable
+            wallpaperBackground.drawable
         )
         binding.wallpaperMask.visibility =
             if (Color.alpha(analysis.maskColor) > 0) View.VISIBLE else View.GONE
@@ -1243,23 +1293,23 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun applyAdaptiveForeground(color: Int) {
         val secondaryColor = ColorUtils.setAlphaComponent(color, 184)
-        val hintColor = ColorUtils.setAlphaComponent(color, 145)
+        chatBinding.etInput.setTextColor(color)
+        chatBinding.etInput.setHintTextColor(secondaryColor)
+        chatBinding.tvActiveModel.setTextColor(color)
+        chatBinding.ivAdd.imageTintList = ColorStateList.valueOf(color)
+        chatBinding.ivContextLimit.setForegroundColor(color)
+        updateVoiceInputButtonState()
         chatBinding.tvGreeting.setTextColor(color)
         chatBinding.chipStartTask.setTextColor(color)
         chatBinding.chipLongTermMemory.setTextColor(color)
-        chatBinding.etInput.setTextColor(color)
-        chatBinding.etInput.setHintTextColor(hintColor)
+        chatBinding.tvConversationWorkspace.setTextColor(color)
+        chatBinding.ivConversationWorkspace.imageTintList = ColorStateList.valueOf(secondaryColor)
+        chatBinding.ivConversationWorkspaceChevron.imageTintList = ColorStateList.valueOf(secondaryColor)
         desktopBinding.tvDesktopEmpty.setTextColor(secondaryColor)
         workspaceBinding.tvWorkspacePath.setTextColor(color)
         workspaceBinding.ivWorkspacePathIcon.imageTintList = ColorStateList.valueOf(secondaryColor)
         binding.ivMenu.imageTintList = ColorStateList.valueOf(secondaryColor)
         updateAppBarTabTint(currentPagerPage)
-
-        for (index in 0 until chatBinding.selectedImageChipGroup.childCount) {
-            val chip = chatBinding.selectedImageChipGroup.getChildAt(index) as? Chip ?: continue
-            chip.setTextColor(color)
-            chip.closeIconTint = ColorStateList.valueOf(secondaryColor)
-        }
     }
 
     private fun applySystemBarContrast(statusBarColor: Int, navigationBarColor: Int) {
@@ -1300,33 +1350,29 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
      * 显示清空历史确认对话框
      */
     private fun showClearHistoryDialog() {
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle("清空所有会话")
-            .setMessage("确定要删除所有历史会话吗？此操作不可恢复。")
-            .setPositiveButton("确定") { _, _ ->
+        ManTouDialog(
+            requireContext(),
+            title = "清空所有会话",
+            message = "确定要删除所有历史会话吗？此操作不可恢复。",
+            secondary = Action("取消"),
+            primary = Action("清空", destructive = true) {
                 viewModel.deleteAllSessions()
                 Toast.makeText(requireContext(), "已清空所有会话", Toast.LENGTH_SHORT).show()
                 (activity as? MainActivity)?.closeDrawer()
             }
-            .setNegativeButton("取消", null)
-            .create()
-        dialog.show()
-        decorateAlertDialog(dialog)
+        ).show()
     }
 
     /**
      * 创建新会话
      */
     private fun createNewSession() {
-        // 通过 ViewModel 创建空会话
-        viewModel.createEmptySession()
-        
-        // 清空输入框
-        chatBinding.etInput.text?.clear()
-        
-        clearSelectedImages()
-        
-        Toast.makeText(requireContext(), "已创建新会话", Toast.LENGTH_SHORT).show()
+        viewLifecycleOwner.lifecycleScope.launch {
+            if (!viewModel.createEmptySession()) return@launch
+            chatBinding.etInput.text?.clear()
+            clearSelectedImages()
+            Toast.makeText(requireContext(), "已创建新会话", Toast.LENGTH_SHORT).show()
+        }
     }
 
     /**
@@ -1398,15 +1444,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         archiveButton?.contentDescription = if (showArchivedSessions) "返回最近对话" else "查看归档"
 
         sessionAdapter.setRunningSessionIds(runningSessionIds)
-        val shouldRefreshGlass = sessionAdapter.currentList != visibleSessions
-        sessionAdapter.submitList(visibleSessions) {
-            if (!shouldRefreshGlass) return@submitList
-            val drawerRoot = drawerMenu ?: return@submitList
-            val sessionsView = drawerRoot.findViewById<RecyclerView>(R.id.rvSessions)
-            sessionsView.doOnNextLayout {
-                LiquidGlass.refresh(drawerRoot)
-            }
-        }
+        sessionAdapter.submitList(visibleSessions)
     }
 
     /**
@@ -1416,7 +1454,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val archiveLabel = if (session.isArchived) "取消归档" else "归档"
         showActionMenu(
             listOf(
-                ActionMenuItem(archiveLabel, R.drawable.ic_archive_outline) {
+                Option(archiveLabel, icon = R.drawable.ic_archive_outline) {
                     val nextArchived = !session.isArchived
                     viewModel.setSessionArchived(session.sessionId, nextArchived)
                     Toast.makeText(
@@ -1425,7 +1463,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                         Toast.LENGTH_SHORT
                     ).show()
                 },
-                ActionMenuItem("删除", R.drawable.ic_delete_outline) {
+                Option("删除", icon = R.drawable.ic_delete_outline, destructive = true) {
                     showDeleteSessionDialog(session)
                 }
             )
@@ -1436,34 +1474,33 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
      * 显示删除会话确认对话框
      */
     private fun showDeleteSessionDialog(session: ChatSessionEntity) {
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle("删除会话")
-            .setMessage("确定要删除会话「${session.title}」吗？")
-            .setPositiveButton("删除") { _, _ ->
+        ManTouDialog(
+            requireContext(),
+            title = "删除会话",
+            message = "确定要删除会话「${session.title}」吗？",
+            secondary = Action("取消"),
+            primary = Action("删除", destructive = true) {
                 viewModel.deleteSession(session.sessionId)
                 Toast.makeText(requireContext(), "已删除会话", Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("取消", null)
-            .create()
-        dialog.show()
-        decorateAlertDialog(dialog)
+        ).show()
     }
 
     private fun showMessageActions(message: ChatMessage) {
-        val items = mutableListOf<ActionMenuItem>()
+        val items = mutableListOf<Option>()
 
         if (message.role != ChatMessage.ROLE_USER) {
-            items += ActionMenuItem("选字复制", R.drawable.ic_select_text) {
+            items += Option(getString(R.string.chat_markdown_select_source), icon = R.drawable.ic_select_text) {
                 showSelectableMessageText(message)
             }
         }
 
-        items += ActionMenuItem("删除", R.drawable.ic_delete_outline) {
+        items += Option("删除", icon = R.drawable.ic_delete_outline, destructive = true) {
             confirmDeleteMessage(message)
         }
 
         if (message.role == ChatMessage.ROLE_USER) {
-            items += ActionMenuItem("修改", R.drawable.ic_edit_outline) {
+            items += Option("修改", icon = R.drawable.ic_edit_outline) {
                 showEditMessageDialog(message)
             }
         }
@@ -1478,34 +1515,20 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             return
         }
 
-        val textView = TextView(requireContext()).apply {
+        val context = requireContext()
+        val textView = TextView(context).apply {
             this.text = text
             setTextIsSelectable(true)
             textSize = 15f
-            setTextColor(Color.rgb(31, 41, 55))
-            setLineSpacing(2f * resources.displayMetrics.density, 1f)
+            setTextColor(context.getColor(R.color.mt_text_primary))
+            setLineSpacing(dp(3).toFloat(), 1f)
         }
-        val paddingHorizontal = (18 * resources.displayMetrics.density).toInt()
-        val paddingVertical = (10 * resources.displayMetrics.density).toInt()
-        val container = FrameLayout(requireContext()).apply {
-            tag = "glass:panel"
-            setPadding(paddingHorizontal, paddingVertical, paddingHorizontal, 0)
-            addView(
-                textView,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT
-                )
-            )
-        }
-
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle("选字复制")
-            .setView(container)
-            .setPositiveButton("关闭", null)
-            .create()
-        dialog.show()
-        decorateAlertDialog(dialog)
+        ManTouDialog(
+            context,
+            title = getString(R.string.chat_markdown_select_source),
+            content = textView,
+            primary = Action("关闭")
+        ).show()
     }
 
     private fun confirmDeleteMessage(message: ChatMessage) {
@@ -1513,17 +1536,16 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             Toast.makeText(requireContext(), "该消息无法删除", Toast.LENGTH_SHORT).show()
             return
         }
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle("删除消息")
-            .setMessage("确定要删除这条消息吗？")
-            .setPositiveButton("删除") { _, _ ->
+        ManTouDialog(
+            requireContext(),
+            title = "删除消息",
+            message = "确定要删除这条消息吗？",
+            secondary = Action("取消"),
+            primary = Action("删除", destructive = true) {
                 viewModel.deleteMessage(message.messageId)
                 Toast.makeText(requireContext(), "已删除", Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("取消", null)
-            .create()
-        dialog.show()
-        decorateAlertDialog(dialog)
+        ).show()
     }
 
     private fun showEditMessageDialog(message: ChatMessage) {
@@ -1536,195 +1558,43 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             return
         }
 
-        val editor = EditText(requireContext()).apply {
-            tag = "glass:input"
-            setText(message.content)
-            setSelection(text?.length ?: 0)
+        val context = requireContext()
+        val editor = context.dialogField(
+            hint = "消息内容",
+            value = message.content,
+            input = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+            multiline = true
+        ).apply {
             minLines = 4
             maxLines = 12
-            inputType = InputType.TYPE_CLASS_TEXT or
-                    InputType.TYPE_TEXT_FLAG_MULTI_LINE or
-                    InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            setHorizontallyScrolling(false)
-            textSize = 15f
         }
-
-        val paddingHorizontal = (16 * resources.displayMetrics.density).toInt()
-        val paddingTop = (8 * resources.displayMetrics.density).toInt()
-        val editorContainer = FrameLayout(requireContext()).apply {
-            setPadding(paddingHorizontal, paddingTop, paddingHorizontal, 0)
-            addView(
-                editor,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT
-                )
-            )
-        }
-
-        val dialog = androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle("修改消息")
-            .setView(editorContainer)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("重新发送", null)
-            .create()
-
-        dialog.setOnShowListener {
-            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
-                .setOnClickListener {
-                    val newContent = editor.text.toString().trim()
-                    if (newContent.isBlank()) {
-                        Toast.makeText(requireContext(), "消息不能为空", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
+        ManTouDialog(
+            context,
+            title = "修改消息",
+            content = editor,
+            secondary = Action("取消"),
+            primary = Action("重新发送", dismissOnClick = false) { dialog ->
+                val newContent = editor.text.toString().trim()
+                if (newContent.isBlank()) {
+                    dialog.showFieldError("消息不能为空")
+                } else {
                     viewModel.editUserMessageAndRegenerate(message.messageId, newContent)
-                    Toast.makeText(requireContext(), "已重新发送", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "已重新发送", Toast.LENGTH_SHORT).show()
                     dialog.dismiss()
                 }
-        }
-        dialog.show()
-        decorateAlertDialog(dialog)
+            }
+        ).show()
     }
 
-    private fun showActionMenu(items: List<ActionMenuItem>) {
+    private fun showActionMenu(items: List<Option>) {
         if (items.isEmpty()) return
-
         val hostActivity = activity?.takeUnless { it.isFinishing || it.isDestroyed } ?: return
         actionMenuDialog?.dismiss()
-
-        val dialog = Dialog(hostActivity).apply {
-            requestWindowFeature(Window.FEATURE_NO_TITLE)
-            setCanceledOnTouchOutside(true)
-        }
-        val density = resources.displayMetrics.density
-        val menu = LinearLayout(hostActivity).apply {
-            orientation = LinearLayout.VERTICAL
-            background = ContextCompat.getDrawable(hostActivity, R.drawable.bg_action_menu)
-        }
-
-        items.forEachIndexed { index, item ->
-            val row = LinearLayout(hostActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(24), 0, dp(24), 0)
-                minimumHeight = dp(72)
-                foreground = ContextCompat.getDrawable(hostActivity, selectableItemBackgroundRes())
-                setOnClickListener {
-                    dialog.dismiss()
-                    item.onClick()
-                }
-            }
-
-            val icon = ImageView(hostActivity).apply {
-                setImageResource(item.iconRes)
-                colorFilter = android.graphics.PorterDuffColorFilter(
-                    Color.rgb(17, 24, 39),
-                    android.graphics.PorterDuff.Mode.SRC_IN
-                )
-            }
-            row.addView(
-                icon,
-                LinearLayout.LayoutParams(dp(30), dp(30))
-            )
-
-            val label = TextView(hostActivity).apply {
-                text = item.label
-                textSize = 22f
-                setTextColor(Color.rgb(17, 24, 39))
-                includeFontPadding = false
-            }
-            row.addView(
-                label,
-                LinearLayout.LayoutParams(
-                    0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    1f
-                ).apply {
-                    marginStart = dp(24)
-                }
-            )
-
-            menu.addView(
-                row,
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    dp(72)
-                )
-            )
-
-            if (index != items.lastIndex) {
-                menu.addView(
-                    View(hostActivity).apply {
-                        background = ContextCompat.getDrawable(hostActivity, R.drawable.bg_action_menu_divider)
-                    },
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        (1 * density).toInt().coerceAtLeast(1)
-                    )
-                )
-            }
-        }
-
-        dialog.setContentView(menu)
-        dialog.setOnDismissListener {
-            if (actionMenuDialog === dialog) {
-                actionMenuDialog = null
-            }
-        }
+        val dialog = ManTouDialog(hostActivity, options = items)
         actionMenuDialog = dialog
+        dialog.setOnDismissListener { if (actionMenuDialog === dialog) actionMenuDialog = null }
         dialog.show()
-        configureFloatingGlassWindow(
-            dialog = dialog,
-            width = (resources.displayMetrics.widthPixels * 0.72f).toInt(),
-            height = ViewGroup.LayoutParams.WRAP_CONTENT,
-            blurRadiusDp = 14,
-            dimAmount = 0.16f
-        )
-    }
-
-    private fun decorateAlertDialog(dialog: androidx.appcompat.app.AlertDialog) {
-        dialog.window?.setWindowAnimations(R.style.MtDialogAnimation)
-    }
-
-    private fun glassDialogSurface(radiusDp: Float): GradientDrawable {
-        return GradientDrawable(
-            GradientDrawable.Orientation.TL_BR,
-            intArrayOf(
-                Color.argb(248, 255, 255, 255),
-                Color.argb(238, 244, 249, 255)
-            )
-        ).apply {
-            cornerRadius = dp(radiusDp).toFloat()
-            setStroke(dp(1f), Color.argb(220, 255, 255, 255))
-        }
-    }
-
-    private fun configureFloatingGlassWindow(
-        dialog: Dialog,
-        width: Int,
-        height: Int,
-        gravity: Int = Gravity.CENTER,
-        y: Int = 0,
-        blurRadiusDp: Int = 14,
-        dimAmount: Float = 0.16f
-    ) {
-        dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            setWindowAnimations(R.style.MtDialogAnimation)
-            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && blurRadiusDp > 0) {
-                addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
-            }
-            attributes = attributes.apply {
-                this.gravity = gravity
-                this.y = y
-                this.dimAmount = dimAmount
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    blurBehindRadius = dp(blurRadiusDp)
-                }
-            }
-            setLayout(width, height)
-        }
     }
 
     private fun dp(value: Int): Int {
@@ -1733,16 +1603,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
     private fun dp(value: Float): Int {
         return (value * resources.displayMetrics.density).roundToInt()
-    }
-
-    private fun selectableItemBackgroundRes(): Int {
-        val typedValue = TypedValue()
-        requireContext().theme.resolveAttribute(
-            android.R.attr.selectableItemBackground,
-            typedValue,
-            true
-        )
-        return typedValue.resourceId
     }
 
     /**
@@ -1892,12 +1752,28 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             // 可以在这里更新 UI，显示当前会话信息
         }
 
+        viewModel.selectedWorkspace.observe(viewLifecycleOwner) { path ->
+            chatBinding.tvConversationWorkspace.text =
+                "工作区 · ${path?.substringAfterLast('/') ?: "根目录"}"
+            chatBinding.workspaceSelector.contentDescription = path ?: ConversationWorkspace.ROOT_PATH
+        }
+
         // 观察当前活跃模型名称
         viewModel.activeModelName.observe(viewLifecycleOwner) { modelName ->
-            chatBinding.etInput.hint = modelName
-                ?.takeIf { it.isNotBlank() }
-                ?.let { "当前使用${it}模型提供服务" }
-                ?: "请先配置模型"
+            val name = modelName?.takeIf { it.isNotBlank() }
+            chatBinding.etInput.hint = if (name == null) "请先配置模型" else "输入消息"
+            renderActiveModel(name)
+            val providerId = ActiveModelStore.getActiveProviderId(requireContext())
+            if (providerId != null && name != null) {
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val provider = providerRepository.getProviderById(providerId)
+                    if (ActiveModelStore.getActiveProviderId(requireContext()) == providerId &&
+                        ActiveModelStore.getActiveModelName(requireContext()) == name
+                    ) {
+                        renderActiveModel(name, provider?.name.orEmpty())
+                    }
+                }
+            }
             binding.chatTab.contentDescription = modelName
                 ?.let { "聊天机器人，当前模型 $it" }
                 ?: "聊天机器人，请配置模型"
@@ -2022,7 +1898,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
                 selectedImageUris.add(uri)
             }
         }
-        renderSelectedImageChips()
+        renderSelectedImagePreviews()
         updateCurrentContextTokens()
     }
 
@@ -2035,599 +1911,141 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
     }
 
-    private fun renderSelectedImageChips() {
-        chatBinding.selectedImageChipGroup.removeAllViews()
-        chatBinding.selectedImageChipScroll.visibility =
+    private fun renderSelectedImagePreviews() {
+        val imageStrip = chatBinding.selectedImageStrip
+        val loader = Glide.with(this)
+        for (index in 0 until imageStrip.childCount) {
+            val thumbnail = (imageStrip.getChildAt(index) as FrameLayout).getChildAt(0) as ImageView
+            loader.clear(thumbnail)
+        }
+        imageStrip.removeAllViews()
+        chatBinding.selectedImageScroll.visibility =
             if (selectedImageUris.isEmpty()) View.GONE else View.VISIBLE
 
-        selectedImageUris.forEach { uri ->
-            val chip = Chip(requireContext()).apply {
-                tag = "glass:capsule"
-                text = queryDisplayName(uri)
-                isCloseIconVisible = true
-                isClickable = true
-                isCheckable = false
-                setTextColor(adaptiveTextColor)
-                textSize = 13f
-                chipBackgroundColor = android.content.res.ColorStateList.valueOf(Color.TRANSPARENT)
-                chipStrokeColor = android.content.res.ColorStateList.valueOf(Color.argb(120, 255, 255, 255))
-                chipStrokeWidth = dp(1).toFloat()
-                closeIconTint = android.content.res.ColorStateList.valueOf(
-                    ColorUtils.setAlphaComponent(adaptiveTextColor, 184)
-                )
-                setOnCloseIconClickListener {
+        val context = requireContext()
+        selectedImageUris.forEachIndexed { index, uri ->
+            val card = FrameLayout(context).apply {
+                background = context.dialogShape(R.color.mt_dialog_control, 14)
+                clipToOutline = true
+            }
+            val thumbnail = ImageView(context).apply {
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                contentDescription = "预览第 ${index + 1} 张图片"
+                isFocusable = true
+                setOnClickListener { showImagePreview(uri, queryDisplayName(uri)) }
+            }
+            card.addView(thumbnail, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+            val remove = ImageButton(context).apply {
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(0xCC202535.toInt())
+                }
+                setImageResource(R.drawable.ic_dialog_close)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+                contentDescription = "移除第 ${index + 1} 张图片"
+                setOnClickListener {
                     selectedImageUris.remove(uri)
-                    renderSelectedImageChips()
+                    renderSelectedImagePreviews()
                     updateCurrentContextTokens()
                 }
             }
-            chatBinding.selectedImageChipGroup.addView(chip)
+            card.addView(remove, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(4)
+                marginEnd = dp(4)
+            })
+            imageStrip.addView(card, LinearLayout.LayoutParams(dp(64), dp(64)).apply {
+                if (index < selectedImageUris.lastIndex) marginEnd = dp(8)
+            })
+            loader.load(uri).centerCrop().error(R.drawable.ic_input_image).into(thumbnail)
         }
-        LiquidGlass.refresh(binding.root)
     }
 
     private fun clearSelectedImages() {
         selectedImageUris.clear()
-        renderSelectedImageChips()
+        renderSelectedImagePreviews()
         updateCurrentContextTokens()
     }
 
+    private fun renderActiveModel(modelName: String?, providerName: String = "") {
+        chatBinding.tvActiveModel.text = modelName ?: "选择模型"
+        chatBinding.ivActiveModelIcon.setImageResource(chatModelIcon(modelName.orEmpty(), providerName))
+        chatBinding.ivModelPicker.contentDescription =
+            modelName?.let { "选择模型，当前模型 $it" } ?: "选择模型"
+    }
+
     private fun showModelPickerPanel() {
-        showModelPickerPanel(
-            activeProviderId = ActiveModelStore.getActiveProviderId(requireContext()),
-            activeModelName = ActiveModelStore.getActiveModelName(requireContext()),
-            providerFilter = { true },
-            onSelected = { provider, modelName ->
-                ActiveModelStore.setActive(requireContext(), provider.providerId, modelName)
+        if (modelPickerDialog?.isShowing == true) return
+        hideKeyboard()
+        chatBinding.etInput.clearFocus()
+
+        val context = requireContext()
+        val picker = ChatModelPicker(
+            context,
+            activeProviderId = ActiveModelStore.getActiveProviderId(context),
+            activeModelName = ActiveModelStore.getActiveModelName(context),
+            onConfigure = { startActivity(Intent(context, ModelSettingActivity::class.java)) },
+            onSelected = { option ->
+                ActiveModelStore.setActive(context, option.providerId, option.modelName)
+                renderActiveModel(option.modelName, option.providerName)
                 viewModel.refreshActiveModel()
-                Toast.makeText(requireContext(), "已切换到 $modelName", Toast.LENGTH_SHORT).show()
             }
         )
+        modelPickerDialog = picker.dialog
+        picker.dialog.setOnDismissListener {
+            if (modelPickerDialog === picker.dialog) modelPickerDialog = null
+        }
+        picker.dialog.show()
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            val models = withContext(Dispatchers.IO) {
+                providerRepository.getAllProvidersOnce().flatMap { provider ->
+                    providerRepository.getModelsForProviderOnce(provider.providerId).map { model ->
+                        ChatModelOption(provider.providerId, provider.name, model.modelName)
+                    }
+                }
+            }
+            if (picker.dialog.isShowing) picker.showModels(models)
+        }
     }
 
     private fun showMimoVoiceKeyDialog(startAfterActivation: Boolean) {
-        val dialog = Dialog(requireContext())
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        dialog.setContentView(buildMimoVoiceKeyContent(dialog, startAfterActivation))
-        dialog.setCanceledOnTouchOutside(true)
-        dialog.show()
-        configureFloatingGlassWindow(
-            dialog = dialog,
-            width = (resources.displayMetrics.widthPixels - dp(40)).coerceAtLeast(dp(300)),
-            height = ViewGroup.LayoutParams.WRAP_CONTENT,
-            blurRadiusDp = 14,
-            dimAmount = 0.16f
-        )
-    }
-
-    private fun buildMimoVoiceKeyContent(dialog: Dialog, startAfterActivation: Boolean): View {
-        val currentApiKey = VoiceInputModelStore.getActiveApiKey(requireContext())
-        val root = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            background = glassDialogSurface(24f)
-            setPadding(dp(22), dp(22), dp(22), dp(20))
-        }
-
-        root.addView(
-            TextView(requireContext()).apply {
-                text = "MiMo 语音输入"
-                textSize = 18f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.rgb(45, 52, 68))
-                includeFontPadding = false
-            },
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        root.addView(
-            TextView(requireContext()).apply {
-                text = "输入可用的 MiMo API Key，校验通过后会激活 ${VoiceTranscriptionApiService.MIMO_ASR_MODEL}。"
-                textSize = 13f
-                setTextColor(Color.rgb(112, 124, 145))
-                setPadding(0, dp(8), 0, 0)
-            },
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        val apiKeyInput = buildVoiceConfigInput(
+        val context = requireContext()
+        val apiKeyInput = context.dialogField(
             hint = "MiMo API Key",
-            text = currentApiKey,
-            inputTypeValue = InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_VARIATION_PASSWORD or
+            value = VoiceInputModelStore.getActiveApiKey(context),
+            input = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         )
-
-        root.addView(apiKeyInput, voiceConfigInputLayoutParams(topMargin = dp(16)))
-
-        val buttonRow = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        buttonRow.addView(
-            TextView(requireContext()).apply {
-                text = "取消"
-                textSize = 15f
-                gravity = Gravity.CENTER
-                setTextColor(Color.rgb(97, 113, 137))
-                background = roundedStrokeBackground(
-                    fillColor = Color.argb(140, 248, 251, 255),
-                    strokeColor = Color.argb(180, 218, 228, 244),
-                    radius = 14f
-                )
-                foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
-                setOnClickListener { dialog.dismiss() }
-            },
-            LinearLayout.LayoutParams(0, dp(46), 1f)
-        )
-        buttonRow.addView(
-            TextView(requireContext()).apply {
-                text = "激活"
-                textSize = 15f
-                typeface = Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
-                setTextColor(Color.WHITE)
-                background = roundedStrokeBackground(
-                    fillColor = Color.rgb(44, 131, 216),
-                    strokeColor = Color.rgb(44, 131, 216),
-                    radius = 14f
-                )
-                foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
-                setOnClickListener {
-                    val apiKey = apiKeyInput.text?.toString().orEmpty()
-                    val button = this
-                    button.isEnabled = false
-                    button.alpha = 0.65f
-                    button.text = "校验中..."
-                    viewLifecycleOwner.lifecycleScope.launch {
-                        val result = VoiceTranscriptionApiService.activateMimoAsr(apiKey)
-                        if (!dialog.isShowing) return@launch
-                        button.isEnabled = true
-                        button.alpha = 1f
-                        button.text = "激活"
-                        result.onSuccess { config ->
-                            VoiceInputModelStore.setActive(requireContext(), config)
-                            Toast.makeText(requireContext(), "MiMo 语音输入已激活", Toast.LENGTH_SHORT).show()
-                            dialog.dismiss()
-                            if (startAfterActivation) {
-                                startVoiceInputWithConfiguredModel()
-                            }
-                        }.onFailure { error ->
-                            Toast.makeText(
-                                requireContext(),
-                                error.message ?: "MiMo API Key 校验失败",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
-                    }
-                }
-            },
-            LinearLayout.LayoutParams(0, dp(46), 1f).apply {
-                marginStart = dp(12)
-            }
-        )
-        root.addView(
-            buttonRow,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = dp(16)
-            }
-        )
-
-        return root
-    }
-
-    private fun buildVoiceConfigInput(
-        hint: String,
-        text: String,
-        inputTypeValue: Int
-    ): EditText {
-        return EditText(requireContext()).apply {
-            this.hint = hint
-            setText(text)
-            textSize = 14f
-            setSingleLine(true)
-            setTextColor(Color.rgb(45, 52, 68))
-            setHintTextColor(Color.rgb(150, 162, 182))
-            inputType = inputTypeValue
-            background = roundedStrokeBackground(
-                fillColor = Color.argb(235, 247, 250, 255),
-                strokeColor = Color.argb(220, 216, 226, 240),
-                radius = 14f
-            )
-            setPadding(dp(14), 0, dp(14), 0)
-        }
-    }
-
-    private fun voiceConfigInputLayoutParams(topMargin: Int): LinearLayout.LayoutParams {
-        return LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(50)
-        ).apply {
-            this.topMargin = topMargin
-        }
-    }
-
-    private fun showModelPickerPanel(
-        activeProviderId: Long?,
-        activeModelName: String?,
-        providerFilter: (ProviderEntity) -> Boolean,
-        onSelected: (ProviderEntity, String) -> Unit
-    ) {
-        val dialog = Dialog(requireContext())
-        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        val loadingView = buildModelPickerLoadingView()
-        dialog.setContentView(loadingView)
-        dialog.setCanceledOnTouchOutside(true)
-        dialog.show()
-        configureModelPickerWindow(dialog)
-
-        viewLifecycleOwner.lifecycleScope.launch {
-            val groups = withContext(Dispatchers.IO) {
-                loadModelPickerGroups(providerFilter)
-            }
-            if (!dialog.isShowing) return@launch
-            dialog.setContentView(
-                buildModelPickerContent(
-                    dialog = dialog,
-                    groups = groups,
-                    activeProviderId = activeProviderId,
-                    activeModelName = activeModelName,
-                    onSelected = onSelected
-                )
-            )
-            configureModelPickerWindow(dialog)
-        }
-    }
-
-    private suspend fun loadModelPickerGroups(
-        providerFilter: (ProviderEntity) -> Boolean
-    ): List<ModelProviderGroup> {
-        val providers = providerRepository.getAllProvidersOnce()
-        return providers.filter(providerFilter).map { provider ->
-            ModelProviderGroup(
-                provider = provider,
-                models = providerRepository.getModelsForProviderOnce(provider.providerId)
-                    .map { it.modelName }
-            )
-        }
-    }
-
-    private fun configureModelPickerWindow(dialog: Dialog) {
-        configureFloatingGlassWindow(
-            dialog = dialog,
-            width = (resources.displayMetrics.widthPixels - dp(32)).coerceAtLeast(dp(300)),
-            height = ViewGroup.LayoutParams.WRAP_CONTENT,
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
-            y = chatBinding.inputContainer.height + dp(10),
-            blurRadiusDp = 12,
-            dimAmount = 0.08f
-        )
-    }
-
-    private fun buildModelPickerLoadingView(): View {
-        return LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            background = glassDialogSurface(26f)
-            setPadding(dp(24), dp(34), dp(24), dp(34))
-            minimumHeight = modelPickerPanelHeight()
-            addView(
-                TextView(requireContext()).apply {
-                    text = "正在加载模型..."
-                    textSize = 16f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(Color.rgb(112, 124, 145))
-                }
-            )
-        }
-    }
-
-    private fun buildModelPickerContent(
-        dialog: Dialog,
-        groups: List<ModelProviderGroup>,
-        activeProviderId: Long?,
-        activeModelName: String?,
-        onSelected: (ProviderEntity, String) -> Unit
-    ): View {
-        val expandedProviderIds = groups.map { it.provider.providerId }.toMutableSet()
-
-        val root = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            background = glassDialogSurface(26f)
-            setPadding(dp(16), dp(16), dp(16), dp(14))
-        }
-
-        root.addView(
-            TextView(requireContext()).apply {
-                text = "选择模型"
-                textSize = 20f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(ContextCompat.getColor(requireContext(), R.color.mt_text_primary))
-                includeFontPadding = false
-            },
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                bottomMargin = dp(14)
-                marginStart = dp(4)
-            }
-        )
-
-        val searchInput = EditText(requireContext()).apply {
-            hint = "搜索模型 ID"
-            textSize = 15f
-            setSingleLine(true)
-            setTextColor(Color.rgb(45, 52, 68))
-            setHintTextColor(Color.rgb(160, 170, 188))
-            background = roundedStrokeBackground(
-                fillColor = Color.argb(235, 247, 250, 255),
-                strokeColor = Color.argb(220, 216, 226, 240),
-                radius = 16f
-            )
-            setPadding(dp(14), 0, dp(14), 0)
-            compoundDrawablePadding = dp(10)
-            setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_search_outline, 0, 0, 0)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        }
-        root.addView(
-            searchInput,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(54)
-            )
-        )
-
-        val listContainer = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        val scroll = ScrollView(requireContext()).apply {
-            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
-            addView(
-                listContainer,
-                ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-            )
-        }
-        root.addView(
-            scroll,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                modelPickerListHeight()
-            ).apply {
-                topMargin = dp(12)
-            }
-        )
-
-        fun render(query: String) {
-            listContainer.removeAllViews()
-            val normalizedQuery = query.trim().lowercase(Locale.getDefault())
-            val filteredGroups = groups.map { group ->
-                if (normalizedQuery.isBlank()) {
-                    group
-                } else {
-                    group.copy(
-                        models = group.models.filter {
-                            it.lowercase(Locale.getDefault()).contains(normalizedQuery)
-                        }
-                    )
-                }
-            }.filter { normalizedQuery.isBlank() || it.models.isNotEmpty() }
-
-            if (filteredGroups.isEmpty()) {
-                listContainer.addView(buildModelPickerEmptyView())
-                return
-            }
-
-            filteredGroups.forEach { group ->
-                val isExpanded = group.provider.providerId in expandedProviderIds
-                listContainer.addView(
-                    buildModelProviderHeader(group, isExpanded) {
-                        val providerId = group.provider.providerId
-                        if (providerId in expandedProviderIds) {
-                            expandedProviderIds.remove(providerId)
-                        } else {
-                            expandedProviderIds.add(providerId)
-                        }
-                        render(searchInput.text?.toString().orEmpty())
-                    }
-                )
-
-                if (isExpanded) {
-                    if (group.models.isEmpty()) {
-                        listContainer.addView(buildEmptyProviderModelsRow())
-                    } else {
-                        group.models.forEach { modelName ->
-                            val selected = activeProviderId == group.provider.providerId &&
-                                activeModelName == modelName
-                            listContainer.addView(
-                                buildModelPickerModelRow(
-                                    modelName = modelName,
-                                    selected = selected
-                                ) {
-                                    onSelected(group.provider, modelName)
-                                    dialog.dismiss()
-                                }
-                            )
-                        }
+        ManTouDialog(
+            context,
+            title = "MiMo 语音输入",
+            message = "输入可用的 MiMo API Key，校验通过后会激活 ${VoiceTranscriptionApiService.MIMO_ASR_MODEL}。",
+            content = apiKeyInput,
+            secondary = Action("取消"),
+            primary = Action("激活", dismissOnClick = false) { dialog ->
+                val apiKey = apiKeyInput.text?.toString().orEmpty()
+                val button = checkNotNull(dialog.primaryButton)
+                button.isEnabled = false
+                button.text = "校验中…"
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val result = VoiceTranscriptionApiService.activateMimoAsr(apiKey)
+                    if (!dialog.isShowing) return@launch
+                    button.isEnabled = true
+                    button.text = "激活"
+                    result.onSuccess { config ->
+                        VoiceInputModelStore.setActive(context, config)
+                        Toast.makeText(context, "MiMo 语音输入已激活", Toast.LENGTH_SHORT).show()
+                        dialog.dismiss()
+                        if (startAfterActivation) startVoiceInputWithConfiguredModel()
+                    }.onFailure { error ->
+                        Toast.makeText(context, error.message ?: "MiMo API Key 校验失败", Toast.LENGTH_LONG).show()
                     }
                 }
             }
-        }
-
-        searchInput.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                render(s?.toString().orEmpty())
-            }
-            override fun afterTextChanged(s: Editable?) = Unit
-        })
-        render("")
-
-        return root
-    }
-
-    private fun buildModelProviderHeader(
-        group: ModelProviderGroup,
-        expanded: Boolean,
-        onClick: () -> Unit
-    ): View {
-        val row = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(14), dp(8), dp(10))
-            foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
-            setOnClickListener { onClick() }
-        }
-
-        row.addView(
-            TextView(requireContext()).apply {
-                text = group.provider.name
-                textSize = 17f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.rgb(97, 113, 137))
-                includeFontPadding = false
-            },
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        )
-
-        row.addView(
-            TextView(requireContext()).apply {
-                text = group.models.size.toString()
-                textSize = 17f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.rgb(150, 162, 182))
-                includeFontPadding = false
-                gravity = Gravity.CENTER
-            },
-            LinearLayout.LayoutParams(dp(42), LinearLayout.LayoutParams.WRAP_CONTENT)
-        )
-
-        row.addView(
-            ImageView(requireContext()).apply {
-                setImageResource(if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down)
-                imageTintList = ColorStateList.valueOf(Color.rgb(150, 162, 182))
-            },
-            LinearLayout.LayoutParams(dp(24), dp(24))
-        )
-
-        return row
-    }
-
-    private fun buildModelPickerModelRow(
-        modelName: String,
-        selected: Boolean,
-        onClick: () -> Unit
-    ): View {
-        val row = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(18), 0, dp(12), 0)
-            foreground = ContextCompat.getDrawable(requireContext(), selectableItemBackgroundRes())
-            background = if (selected) {
-                roundedStrokeBackground(
-                    fillColor = Color.argb(110, 229, 241, 255),
-                    strokeColor = Color.argb(150, 83, 146, 236),
-                    radius = 14f
-                )
-            } else {
-                ColorDrawable(Color.TRANSPARENT)
-            }
-            setOnClickListener { onClick() }
-        }
-
-        row.addView(
-            TextView(requireContext()).apply {
-                text = modelName
-                textSize = 15f
-                setTextColor(if (selected) Color.rgb(36, 101, 196) else Color.rgb(92, 108, 132))
-                typeface = if (selected) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                maxLines = 1
-                ellipsize = android.text.TextUtils.TruncateAt.END
-                includeFontPadding = false
-            },
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        )
-
-        if (selected) {
-            row.addView(
-                ImageView(requireContext()).apply {
-                    setImageResource(R.drawable.ic_check_blue)
-                    imageTintList = ColorStateList.valueOf(Color.rgb(44, 131, 216))
-                },
-                LinearLayout.LayoutParams(dp(22), dp(22)).apply {
-                    marginStart = dp(10)
-                }
-            )
-        }
-
-        return FrameLayout(requireContext()).apply {
-            setPadding(0, dp(2), 0, dp(2))
-            addView(
-                row,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    dp(46)
-                )
-            )
-        }
-    }
-
-    private fun modelPickerListHeight(): Int {
-        return (resources.displayMetrics.heightPixels * 0.46f).toInt().coerceAtLeast(dp(260))
-    }
-
-    private fun modelPickerPanelHeight(): Int {
-        return dp(14) + dp(54) + dp(12) + modelPickerListHeight() + dp(12)
-    }
-
-    private fun buildEmptyProviderModelsRow(): View {
-        return TextView(requireContext()).apply {
-            text = "该 Provider 暂无可选模型"
-            textSize = 15f
-            gravity = Gravity.CENTER
-            setTextColor(Color.rgb(160, 170, 188))
-            setPadding(0, dp(12), 0, dp(18))
-        }
-    }
-
-    private fun buildModelPickerEmptyView(): View {
-        return LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(12), dp(42), dp(12), dp(42))
-            addView(
-                ImageView(requireContext()).apply {
-                    setImageResource(R.drawable.ic_package_empty)
-                    alpha = 0.55f
-                },
-                LinearLayout.LayoutParams(dp(54), dp(54))
-            )
-            addView(
-                TextView(requireContext()).apply {
-                    text = "没有找到可选模型"
-                    textSize = 15f
-                    typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(Color.rgb(150, 162, 182))
-                },
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    topMargin = dp(12)
-                }
-            )
-        }
+        ).show()
     }
 
     private fun onVoiceInputClicked() {
@@ -2779,24 +2197,14 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             else -> {
                 button.isEnabled = true
                 button.alpha = 1f
-                button.imageTintList = ColorStateList.valueOf(Color.rgb(44, 131, 216))
+                button.imageTintList = ColorStateList.valueOf(adaptiveTextColor)
                 button.contentDescription = "语音输入"
             }
         }
     }
 
     private fun showContextLimitDialog() {
-        val dialog = BottomSheetDialog(requireContext())
-        val content = buildContextLimitSheet()
-        dialog.setContentView(content)
-        dialog.setOnShowListener {
-            val sheet = dialog.findViewById<FrameLayout>(
-                com.google.android.material.R.id.design_bottom_sheet
-            )
-            sheet?.background = ColorDrawable(Color.TRANSPARENT)
-        }
-        dialog.show()
-        LiquidGlass.install(requireActivity(), content)
+        ManTouSheet(requireContext(), buildContextLimitSheet()).show()
     }
 
     private fun buildContextLimitSheet(): View {
@@ -2805,14 +2213,12 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         lateinit var saveLimitAction: (Int, Boolean) -> Unit
 
         val scroll = ScrollView(requireContext()).apply {
-            background = glassDialogSurface(26f)
             isFillViewport = false
             overScrollMode = View.OVER_SCROLL_NEVER
         }
         val container = LinearLayout(requireContext()).apply {
             orientation = LinearLayout.VERTICAL
-            background = ColorDrawable(Color.TRANSPARENT)
-            setPadding(dp(22), dp(12), dp(22), dp(22))
+            setPadding(dp(20), dp(10), dp(20), dp(22))
         }
         scroll.addView(
             container,
@@ -2823,30 +2229,20 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         )
 
         container.addView(
-            View(requireContext()).apply {
-                background = roundedBackground(Color.rgb(220, 226, 238), 2.5f)
-            },
-            LinearLayout.LayoutParams(dp(46), dp(5)).apply {
-                gravity = Gravity.CENTER_HORIZONTAL
-                bottomMargin = dp(26)
-            }
-        )
-
-        container.addView(
             TextView(requireContext()).apply {
-                text = "调整上下文阈值"
-                textSize = 26f
-                typeface = Typeface.DEFAULT_BOLD
-                setTextColor(Color.rgb(45, 52, 68))
-                includeFontPadding = false
+                text = "上下文控制"
+                textSize = 20f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(context.getColor(R.color.mt_text_primary))
+                ViewCompat.setAccessibilityHeading(this, true)
             }
         )
 
         container.addView(
             TextView(requireContext()).apply {
                 text = "当前上下文是下一次请求的预计占用；累计消耗会叠加本会话的每次模型请求。"
-                textSize = 15f
-                setTextColor(Color.rgb(111, 119, 137))
+                textSize = 14f
+                setTextColor(context.getColor(R.color.mt_dialog_secondary))
                 setLineSpacing(dp(3).toFloat(), 1f)
             },
             LinearLayout.LayoutParams(
@@ -2866,10 +2262,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         })
 
         val statsRow = LinearLayout(requireContext()).apply {
-            tag = "glass:card"
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(14), dp(12), dp(14))
+            background = context.dialogShape(R.color.mt_dialog_control, 14)
+            setPadding(dp(4), dp(14), dp(4), dp(14))
         }
         val currentValue = createStatValue(formatNumber(currentContextTokens), Color.rgb(45, 52, 68))
         val consumedValue = createStatValue(formatConsumedTokens(), Color.rgb(190, 112, 46))
@@ -2883,6 +2279,11 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         statsRow.addView(verticalDivider())
         statsRow.addView(createStatColumn("占用比例", percentValue), statColumnParams())
         container.addView(statsRow)
+        container.addView(buildValidationStrategyRow(), LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            topMargin = dp(12)
+        })
 
         container.addView(divider(), LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2906,7 +2307,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val optionButtons = mutableMapOf<Int, TextView>()
         ContextLimitStore.TOKEN_OPTIONS.forEach { option ->
             val button = TextView(requireContext()).apply {
-                tag = "glass:button"
                 text = formatCompactToken(option)
                 gravity = Gravity.CENTER
                 textSize = 16f
@@ -2920,9 +2320,10 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             optionsGrid.addView(
                 button,
                 GridLayout.LayoutParams().apply {
-                    width = dp(70)
+                    columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                    width = 0
                     height = dp(48)
-                    setMargins(0, 0, dp(10), dp(10))
+                    setMargins(dp(3), 0, dp(3), dp(8))
                 }
             )
         }
@@ -2951,27 +2352,18 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             }
         )
 
-        val exactInput = EditText(requireContext()).apply {
-            tag = "glass:input"
-            inputType = InputType.TYPE_CLASS_NUMBER
-            setSingleLine(true)
-            textSize = 22f
-            setTextColor(Color.rgb(45, 52, 68))
-            setText(currentLimit.toString())
-            setPadding(dp(18), 0, dp(18), 0)
-            background = roundedStrokeBackground(
-                fillColor = Color.rgb(244, 247, 255),
-                strokeColor = Color.rgb(225, 231, 243),
-                radius = 16f
-            )
-        }
+        val exactInput = requireContext().dialogField(
+            hint = "精确阈值",
+            value = currentLimit.toString(),
+            input = InputType.TYPE_CLASS_NUMBER
+        )
         container.addView(
             exactInput,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(64)
+                LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = dp(4)
+                topMargin = dp(6)
             }
         )
 
@@ -2998,17 +2390,12 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
         savedRow.addView(
             TextView(requireContext()).apply {
-                tag = "glass:circle"
                 text = "✓"
                 gravity = Gravity.CENTER
                 textSize = 17f
                 typeface = Typeface.DEFAULT_BOLD
                 setTextColor(Color.rgb(112, 124, 145))
-                background = roundedStrokeBackground(
-                    fillColor = Color.TRANSPARENT,
-                    strokeColor = Color.rgb(112, 124, 145),
-                    radius = 13f
-                )
+                background = context.dialogShape(R.color.mt_dialog_control, 13)
             },
             LinearLayout.LayoutParams(dp(27), dp(27))
         )
@@ -3047,16 +2434,17 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             percentValue.text = formatPercent(currentContextTokens, clamped)
             optionButtons.forEach { (option, button) ->
                 val selected = option == clamped
-                button.tag = if (selected) "glass:accent" else "glass:button"
-                button.setTextColor(if (selected) Color.WHITE else Color.rgb(122, 133, 153))
-                button.background = roundedStrokeBackground(
-                    fillColor = if (selected) Color.rgb(58, 132, 226) else Color.rgb(245, 247, 252),
-                    strokeColor = if (selected) Color.rgb(58, 132, 226) else Color.rgb(228, 233, 243),
-                    radius = 24f
+                button.isSelected = selected
+                button.setTextColor(requireContext().getColor(
+                    if (selected) R.color.mt_on_primary else R.color.mt_dialog_secondary
+                ))
+                button.background = requireContext().dialogRipple(
+                    if (selected) R.color.mt_primary_dark else R.color.mt_dialog_control,
+                    13,
+                    onDark = selected
                 )
             }
             updateContextProgressIndicator()
-            LiquidGlass.refresh(scroll)
         }
 
         saveLimitAction = { limit, updateInput ->
@@ -3098,6 +2486,41 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         return scroll
     }
 
+    private fun buildValidationStrategyRow(): View {
+        val context = requireContext()
+        return TextView(context).apply {
+            fun updateLabel() {
+                text = "验收策略 · ${HarnessSettingsStore.validation(context).label}"
+            }
+
+            updateLabel()
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(52)
+            textSize = 15f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setTextColor(context.getColor(R.color.mt_text_primary))
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, R.drawable.ic_chevron_right, 0)
+            compoundDrawablePadding = dp(8)
+            background = context.dialogRipple(R.color.mt_dialog_control, 14)
+            isFocusable = true
+            setOnClickListener {
+                val current = HarnessSettingsStore.validation(context)
+                ManTouDialog(
+                    context,
+                    title = "验收策略",
+                    message = "设置新任务的验收设备范围和页面自测要求。",
+                    options = HarnessValidationProfile.entries.map { option ->
+                        Option(option.label, option.description, checked = current == option) {
+                            HarnessSettingsStore.setValidation(context, option)
+                            updateLabel()
+                        }
+                    }
+                ).show()
+            }
+        }
+    }
+
     private fun updateCurrentContextTokens(messages: List<ChatMessage>? = null) {
         val sourceMessages = messages ?: viewModel.messages.value.orEmpty()
         currentContextTokens = ContextTokenCounter.estimateChatMessages(
@@ -3114,7 +2537,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val fraction = if (limit <= 0) 0f else currentContextTokens.toFloat() / limit.toFloat()
         chatBinding.ivContextLimit.setProgressFraction(fraction)
         chatBinding.ivContextLimit.contentDescription =
-            "上下文限制，预计占用 ${formatNumber(currentContextTokens)} / ${formatNumber(limit)}，" +
+            "上下文控制，预计占用 ${formatNumber(currentContextTokens)} / ${formatNumber(limit)}，" +
                 "本会话累计消耗 ${formatConsumedTokens()} token"
     }
 
@@ -3177,26 +2600,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
     }
 
-    private fun roundedBackground(color: Int, radius: Float = 0f, topLeft: Float = radius, topRight: Float = radius): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(color)
-            cornerRadii = floatArrayOf(
-                dp(topLeft).toFloat(), dp(topLeft).toFloat(),
-                dp(topRight).toFloat(), dp(topRight).toFloat(),
-                0f, 0f,
-                0f, 0f
-            )
-        }
-    }
-
-    private fun roundedStrokeBackground(fillColor: Int, strokeColor: Int, radius: Float): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(fillColor)
-            setCornerRadius(dp(radius).toFloat())
-            setStroke(dp(1), strokeColor)
-        }
-    }
-
     private fun formatNumber(value: Int): String {
         return String.format(Locale.US, "%,d", value)
     }
@@ -3223,9 +2626,9 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         }
     }
 
-    private fun queryDisplayName(uri: Uri): String {
+    private fun queryDisplayName(uri: Uri, context: Context = requireContext()): String {
         return runCatching {
-            requireContext().contentResolver
+            context.contentResolver
                 .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
                 ?.use { cursor ->
                     if (cursor.moveToFirst()) {
@@ -3295,7 +2698,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private fun updateSendButtonState(taskRunning: Boolean) {
         isTaskRunning = taskRunning
         val backgroundColor = Color.rgb(44, 131, 216)
-        val iconRes = if (taskRunning) R.drawable.ic_stop_square else R.drawable.ic_send_up
+        val iconRes = if (taskRunning) R.drawable.ic_composer_stop else R.drawable.ic_send_up
 
         chatBinding.ivSend.isEnabled = true
         chatBinding.ivSend.isClickable = true
@@ -3356,6 +2759,8 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     }
 
     override fun onDestroyView() {
+        modelPickerDialog?.dismiss()
+        modelPickerDialog = null
         actionMenuDialog?.dismiss()
         actionMenuDialog = null
         codeEditorDialog?.dismiss()
@@ -3405,11 +2810,6 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val topOffset: Int
     )
 
-    private data class ModelProviderGroup(
-        val provider: ProviderEntity,
-        val models: List<String>
-    )
-
     private class StaticPagerAdapter(
         private val pages: List<View>
     ) : RecyclerView.Adapter<StaticPagerAdapter.PageViewHolder>() {
@@ -3441,10 +2841,4 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
 
         class PageViewHolder(val container: FrameLayout) : RecyclerView.ViewHolder(container)
     }
-
-    private data class ActionMenuItem(
-        val label: String,
-        val iconRes: Int,
-        val onClick: () -> Unit
-    )
 }

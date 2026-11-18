@@ -11,11 +11,13 @@ import com.hfad.mantou.R
 import com.hfad.mantou.databinding.ItemWorkspaceNodeBinding
 import com.hfad.mantou.utils.AgentWorkspace
 import com.hfad.mantou.utils.WorkspaceNode
+import com.hfad.mantou.utils.project.ConversationWorkspace
 import java.util.Locale
 
 class WorkspaceFileAdapter(
     private val onFileClick: (WorkspaceNode) -> Unit,
-    private val onFileLongClick: (WorkspaceNode) -> Boolean = { false }
+    private val onFileLongClick: (WorkspaceNode) -> Boolean = { false },
+    private val onDirectoryClick: ((WorkspaceNode) -> Unit)? = null
 ) : RecyclerView.Adapter<WorkspaceFileAdapter.WorkspaceNodeViewHolder>() {
 
     private val roots = mutableListOf<WorkspaceNode>()
@@ -44,17 +46,21 @@ class WorkspaceFileAdapter(
         if (previous == path) return
         selectedFilePath = path
         visibleNodes.forEachIndexed { index, node ->
-            if (!node.isDirectory && (node.displayPath == previous || node.displayPath == path)) {
+            if (node.displayPath == previous || node.displayPath == path) {
                 notifyItemChanged(index)
             }
         }
     }
 
     fun expandToFile(path: String) {
+        expandDirectory(path.substringBeforeLast('/'))
+    }
+
+    fun expandDirectory(path: String): Int {
         val parents = generateSequence(path) { it.substringBeforeLast('/', "").takeIf(String::isNotEmpty) }
-            .drop(1)
             .toList()
         if (expandedPaths.addAll(parents)) rebuildVisibleNodes()
+        return visibleNodes.indexOfFirst { it.displayPath == path }
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): WorkspaceNodeViewHolder {
@@ -118,12 +124,18 @@ class WorkspaceFileAdapter(
 
         fun bind(node: WorkspaceNode) {
             binding.tvNodeName.text = node.name
-            val isSelected = !node.isDirectory && node.displayPath == selectedFilePath
+            val isSelected = node.displayPath == selectedFilePath
             binding.root.isSelected = isSelected
-            binding.root.setBackgroundColor(
-                if (isSelected) binding.root.context.getColor(R.color.mt_generate_surface_soft)
-                else Color.TRANSPARENT
-            )
+            if (onDirectoryClick != null) {
+                binding.root.setBackgroundResource(
+                    if (isSelected) R.drawable.bg_workspace_directory_selected else 0
+                )
+            } else {
+                binding.root.setBackgroundColor(
+                    if (isSelected) binding.root.context.getColor(R.color.mt_generate_surface_soft)
+                    else Color.TRANSPARENT
+                )
+            }
             applyTextColor()
             binding.ivNodeIcon.setImageResource(
                 if (node.isDirectory) R.drawable.ic_folder_outline else R.drawable.ic_file_markdown
@@ -142,13 +154,19 @@ class WorkspaceFileAdapter(
                     R.drawable.ic_chevron_down
                 }
                 binding.ivNodeChevron.setImageResource(chevron)
+                binding.ivNodeChevron.contentDescription =
+                    if (expandedPaths.contains(node.displayPath)) "折叠 ${node.name}" else "展开 ${node.name}"
             }
+            binding.ivNodeChevron.setOnClickListener(
+                if (canExpand && onDirectoryClick != null) View.OnClickListener { toggleNode(node) } else null
+            )
+            binding.ivNodeChevron.isClickable = canExpand && onDirectoryClick != null
 
             binding.tvNodeBadge.visibility = if (node.isDirectory) View.GONE else View.VISIBLE
             binding.tvNodeBadge.text = fileTypeLabel(node.name)
             binding.root.setOnClickListener {
                 if (node.isDirectory) {
-                    toggleNode(node)
+                    onDirectoryClick?.invoke(node) ?: toggleNode(node)
                 } else {
                     onFileClick(node)
                 }
@@ -180,6 +198,7 @@ internal enum class WorkspaceFileOpenMode {
     WEB_APP,
     JSON,
     TEXT,
+    IMAGE,
     UNSUPPORTED
 }
 
@@ -206,14 +225,25 @@ internal object WorkspaceFileOpenPolicy {
 
     fun modeForWorkspacePath(displayPath: String, fileName: String): WorkspaceFileOpenMode {
         val defaultMode = modeFor(fileName)
-        val generatedAppPrefix = "/workspace/${AgentWorkspace.WEB_DIR}/"
         return when {
+            displayPath.startsWith("${ConversationWorkspace.ROOT_PATH}/") &&
+                extensionOf(fileName) in imageExtensions -> WorkspaceFileOpenMode.IMAGE
             defaultMode == WorkspaceFileOpenMode.WEB_APP -> WorkspaceFileOpenMode.CODE_VIEWER
             defaultMode == WorkspaceFileOpenMode.JSON -> WorkspaceFileOpenMode.CODE_VIEWER
-            displayPath.startsWith(generatedAppPrefix) &&
+            isGeneratedAppPath(displayPath) &&
                 defaultMode == WorkspaceFileOpenMode.TEXT -> WorkspaceFileOpenMode.CODE_VIEWER
             else -> defaultMode
         }
+    }
+
+    private val imageExtensions = setOf("png", "jpg", "jpeg", "gif", "webp", "avif", "ico")
+
+    fun isGeneratedAppPath(displayPath: String): Boolean {
+        val segments = displayPath.trimStart('/').split('/')
+        return segments.firstOrNull() == "workspace" &&
+            (segments.getOrNull(1) == AgentWorkspace.WEB_DIR ||
+                (segments.getOrNull(1) == ConversationWorkspace.DIRECTORY &&
+                    segments.getOrNull(3) == ConversationWorkspace.COMPILED_PROJECTS))
     }
 
     fun badgeLabel(fileName: String): String {

@@ -42,7 +42,7 @@
             android:layout_height="wrap_content"
             android:padding="10dp">
 
-            <TextView
+            <com.hfad.mantou.view.markdown.MarkdownTextView
                 android:id="@+id/tvMessage"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -51,7 +51,6 @@
                 android:textAlignment="viewStart"
                 android:textColor="@color/mt_text_primary"
                 android:textDirection="ltr"
-                android:textIsSelectable="true"
                 android:textSize="16sp"
                 tools:text="你看看" />
         </FrameLayout>

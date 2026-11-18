@@ -2,12 +2,12 @@ package com.hfad.mantou.view
 
 import android.content.Context
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.util.AttributeSet
 import androidx.appcompat.widget.AppCompatImageButton
-import kotlin.math.min
+import androidx.core.graphics.ColorUtils
+import com.hfad.mantou.R
 
 class ContextProgressButton @JvmOverloads constructor(
     context: Context,
@@ -19,18 +19,18 @@ class ContextProgressButton @JvmOverloads constructor(
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeWidth = dp(2.4f)
-        color = Color.rgb(221, 230, 243)
+        color = ColorUtils.setAlphaComponent(context.getColor(R.color.mt_text_primary), 72)
     }
     private val progressPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeWidth = dp(2.4f)
-        color = Color.rgb(44, 131, 216)
+        color = context.getColor(R.color.input_action_blue)
     }
     private val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = dp(1.6f)
-        color = Color.rgb(44, 131, 216)
+        color = context.getColor(R.color.mt_text_primary)
     }
     private val arcBounds = RectF()
     private var progressFraction = 0f
@@ -47,17 +47,21 @@ class ContextProgressButton @JvmOverloads constructor(
         invalidate()
     }
 
+    fun setForegroundColor(color: Int) {
+        trackPaint.color = ColorUtils.setAlphaComponent(color, 72)
+        innerPaint.color = color
+        invalidate()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        val size = min(width - paddingLeft - paddingRight, height - paddingTop - paddingBottom)
-            .coerceAtLeast(0)
-            .toFloat()
+        val size = minOf(width.toFloat(), height.toFloat(), dp(21f))
         if (size <= 0f) return
 
         val strokeInset = trackPaint.strokeWidth / 2f
-        val left = paddingLeft + (width - paddingLeft - paddingRight - size) / 2f + strokeInset
-        val top = paddingTop + (height - paddingTop - paddingBottom - size) / 2f + strokeInset
+        val left = (width - size) / 2f + strokeInset
+        val top = (height - size) / 2f + strokeInset
         arcBounds.set(left, top, left + size - strokeInset * 2f, top + size - strokeInset * 2f)
 
         canvas.drawOval(arcBounds, trackPaint)

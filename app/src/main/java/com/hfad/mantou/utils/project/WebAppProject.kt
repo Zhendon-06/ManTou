@@ -165,13 +165,17 @@ object WebAppProjectManifestCodec {
 class WebAppProjectWorkspace(
     private val validator: WebAppProjectValidator = WebAppProjectValidator()
 ) {
-    fun create(projectRoot: File, manifest: WebAppProjectManifest): WebAppProjectSnapshot =
+    fun create(
+        projectRoot: File,
+        manifest: WebAppProjectManifest,
+        allowExistingDirectory: Boolean = false
+    ): WebAppProjectSnapshot =
         synchronized(WORKSPACE_LOCK) {
             val root = projectRoot.absoluteFile
             if (metadataDirectory(root).exists()) {
                 throw WebAppProjectException("Project workspace already exists: ${root.path}")
             }
-            if (root.isDirectory && root.listFiles().orEmpty().isNotEmpty()) {
+            if (root.isDirectory && !allowExistingDirectory && root.listFiles().orEmpty().isNotEmpty()) {
                 throw WebAppProjectException(
                     "Project root is not empty; resolve and adopt it as a legacy project instead"
                 )
@@ -181,6 +185,9 @@ class WebAppProjectWorkspace(
             }
             if (!root.isDirectory) {
                 throw WebAppProjectException("Project root must be a directory: ${root.path}")
+            }
+            check(!draftsDirectory(root).exists() && !releasesDirectory(root).exists()) {
+                "目录中已有 drafts 或 releases，请选择其他目录"
             }
             try {
                 metadataDirectory(root).mkdirsOrThrow()

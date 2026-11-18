@@ -2,24 +2,22 @@ package com.hfad.mantou.utils
 
 import com.google.gson.Gson
 import com.google.gson.JsonParser
-import com.hfad.mantou.data.api.ApiEndpointResolver
+import com.hfad.mantou.data.api.ApiMessage
 import com.hfad.mantou.data.api.ChatCallConfig
+import com.hfad.mantou.data.api.ChatHttpRequest
+import com.hfad.mantou.data.api.ChatRequest
 import com.hfad.mantou.data.api.ModelTokenUsage
 import com.hfad.mantou.data.api.ModelTokenUsageResolver
 import com.hfad.mantou.data.logging.ApiDiagnosticContext
 import com.hfad.mantou.data.logging.ApiLoggingInterceptor
-import com.hfad.mantou.data.logging.ApiRequestTrace
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
 object ErrorAnalyzer {
 
-    private const val ANTHROPIC_VERSION = "2023-06-01"
     private const val SYSTEM_PROMPT = """你是馒头 App 的错误诊断助手。下面是用户调用大模型时出现的原始报错信息。
 请用中文向普通用户解释，严格按下面两段格式输出，不要 markdown 代码块、不要多余前后缀：
 
@@ -31,6 +29,7 @@ object ErrorAnalyzer {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
+        .addInterceptor(ChatHttpRequest.parameterCompatibility)
         .addInterceptor(ApiLoggingInterceptor())
         .build()
 
@@ -43,7 +42,7 @@ object ErrorAnalyzer {
     ): String? = withContext(Dispatchers.IO) {
         try {
             val userMessage = "场景：$scene\n原始报错：\n$rawError"
-            val request = buildRequest(config, userMessage, diagnosticContext).build()
+            val request = buildRequest(config, userMessage, diagnosticContext)
             client.newCall(request).execute().use { response ->
                 val body = response.body?.string() ?: return@withContext null
                 if (!response.isSuccessful) return@withContext null
@@ -69,52 +68,15 @@ object ErrorAnalyzer {
         config: ChatCallConfig,
         userMessage: String,
         diagnosticContext: ApiDiagnosticContext?
-    ): Request.Builder {
-        val requestJson = if (config.isAnthropic) {
-            gson.toJson(mapOf(
-                "model" to config.model,
-                "system" to SYSTEM_PROMPT,
-                "messages" to listOf(
-                    mapOf("role" to "user", "content" to userMessage)
-                ),
-                "stream" to false,
-                "max_tokens" to 600
-            ))
-        } else {
-            gson.toJson(mapOf(
-                "model" to config.model,
-                "messages" to listOf(
-                    mapOf("role" to "system", "content" to SYSTEM_PROMPT),
-                    mapOf("role" to "user", "content" to userMessage)
-                ),
-                "stream" to false,
-                "max_tokens" to 600
-            ))
-        }
-
-        val requestBody = requestJson.toRequestBody("application/json; charset=utf-8".toMediaType())
-        val builder = Request.Builder()
-            .tag(ApiRequestTrace::class.java, ApiRequestTrace.create(diagnosticContext))
-            .url(
-                if (config.isAnthropic) {
-                    ApiEndpointResolver.anthropicMessagesUrl(config.baseUrl)
-                } else {
-                    ApiEndpointResolver.openAiChatCompletionsUrl(config.baseUrl)
-                }
-            )
-            .addHeader("Content-Type", "application/json")
-            .post(requestBody)
-
-        if (config.isAnthropic) {
-            builder.addHeader("anthropic-version", ANTHROPIC_VERSION)
-            if (config.apiKey.isNotEmpty()) {
-                builder.addHeader("x-api-key", config.apiKey)
-            }
-        } else if (config.apiKey.isNotEmpty()) {
-            builder.addHeader("Authorization", "Bearer ${config.apiKey}")
-        }
-        return builder
-    }
+    ): Request = ChatHttpRequest.build(
+        config,
+        ChatRequest(
+            model = config.model,
+            messages = listOf(ApiMessage("system", SYSTEM_PROMPT), ApiMessage("user", userMessage)),
+            maxTokens = 600,
+            diagnosticContext = diagnosticContext
+        )
+    )
 
     private fun parseContent(responseBody: String, isAnthropic: Boolean): String? {
         if (!isAnthropic) {

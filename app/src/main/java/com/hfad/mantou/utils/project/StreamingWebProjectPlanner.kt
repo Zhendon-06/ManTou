@@ -469,8 +469,6 @@ class StreamingWebProjectPlanner(
             maxTokens = maxTokens,
             responseFormat = if (openAiFormat) mapOf("type" to "json_object") else null,
             reasoningEffort = config.webProjectReasoningEffort,
-            temperature = 0.2,
-            topP = 0.9,
             diagnosticContext = ApiDiagnosticContext(
                 runId = diagnosticRunId,
                 operation = "harness.plan",

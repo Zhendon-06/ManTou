@@ -71,14 +71,13 @@
             android:visibility="gone"
             tools:visibility="gone" />
 
-        <TextView
+        <com.hfad.mantou.view.markdown.MarkdownTextView
             android:id="@+id/tvMessage"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:lineSpacingExtra="4dp"
             android:lineSpacingMultiplier="1.04"
             android:textColor="@color/mt_text_primary"
-            android:textIsSelectable="true"
             android:textSize="16sp"
             tools:text="我已经查看了工作区的结构。" />
 

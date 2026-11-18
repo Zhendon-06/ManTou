@@ -1,16 +1,14 @@
 package com.hfad.mantou.view
 
-import android.app.AlertDialog
 import android.content.Context
+import android.graphics.Rect
 import android.os.Bundle
 import android.text.Editable
-import android.text.InputType
 import android.text.TextWatcher
-import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.AutoCompleteTextView
-import android.widget.EditText
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
@@ -18,10 +16,11 @@ import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.doOnNextLayout
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.ConcatAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.textfield.TextInputEditText
@@ -33,6 +32,9 @@ import com.hfad.mantou.data.database.AppDatabase
 import com.hfad.mantou.data.database.ProviderEntity
 import com.hfad.mantou.data.preferences.ActiveModelStore
 import com.hfad.mantou.data.repository.ProviderRepository
+import com.hfad.mantou.view.dialog.ManTouDialog
+import com.hfad.mantou.view.dialog.ManTouDialog.Action
+import com.hfad.mantou.view.dialog.dialogField
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -55,6 +57,7 @@ class ModelSettingActivity : AppCompatActivity() {
     private lateinit var btnRefreshModels: ImageView
     private lateinit var tvModelCount: TextView
     private lateinit var rvModelList: RecyclerView
+    private lateinit var modelSettingsHeader: View
     private lateinit var emptyModelState: View
 
     private lateinit var modelAdapter: ProviderModelAdapter
@@ -93,24 +96,37 @@ class ModelSettingActivity : AppCompatActivity() {
 
     private fun bindViews() {
         toolbar = findViewById(R.id.toolbar)
-        actvProvider = findViewById(R.id.actvProvider)
-        actvProvider2 = findViewById(R.id.actvProvider2)
-        btnDeleteProvider = findViewById(R.id.btnDeleteProvider)
-        btnAddProvider = findViewById(R.id.btnAddProvider)
-        etProviderName = findViewById(R.id.etProviderName)
-        etBaseUrl = findViewById(R.id.etBaseUrl)
-        etApiKey = findViewById(R.id.etApiKey)
-        btnAddModel = findViewById(R.id.btnAddModel)
-        btnRefreshModels = findViewById(R.id.btnRefreshModels)
-        tvModelCount = findViewById(R.id.tvModelCount)
         rvModelList = findViewById(R.id.rvModelList)
-        emptyModelState = findViewById(R.id.emptyModelState)
+        modelSettingsHeader = layoutInflater.inflate(R.layout.item_model_settings_header, rvModelList, false)
+        with(modelSettingsHeader) {
+            actvProvider = findViewById(R.id.actvProvider)
+            actvProvider2 = findViewById(R.id.actvProvider2)
+            btnDeleteProvider = findViewById(R.id.btnDeleteProvider)
+            btnAddProvider = findViewById(R.id.btnAddProvider)
+            etProviderName = findViewById(R.id.etProviderName)
+            etBaseUrl = findViewById(R.id.etBaseUrl)
+            etApiKey = findViewById(R.id.etApiKey)
+            btnAddModel = findViewById(R.id.btnAddModel)
+            btnRefreshModels = findViewById(R.id.btnRefreshModels)
+            tvModelCount = findViewById(R.id.tvModelCount)
+            emptyModelState = findViewById(R.id.emptyModelState)
+        }
     }
 
     private fun applyInsets() {
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
-            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            val ime = WindowInsetsCompat.Type.ime()
+            val contentInsets = insets.getInsets(WindowInsetsCompat.Type.systemBars() or ime)
+            val keyboardShrankViewport = insets.isVisible(ime) && contentInsets.bottom > v.paddingBottom
+            v.setPadding(contentInsets.left, contentInsets.top, contentInsets.right, contentInsets.bottom)
+            if (keyboardShrankViewport) {
+                rvModelList.doOnNextLayout { list ->
+                    val input = list.findFocus() as? TextInputEditText ?: return@doOnNextLayout
+                    val bounds = Rect()
+                    input.getDrawingRect(bounds)
+                    input.requestRectangleOnScreen(bounds, true)
+                }
+            }
             insets
         }
     }
@@ -125,10 +141,17 @@ class ModelSettingActivity : AppCompatActivity() {
             ActiveModelStore.setActive(this, pid, modelName)
             Toast.makeText(this, "已选择模型：$modelName", Toast.LENGTH_SHORT).show()
         }
-        rvModelList.layoutManager = LinearLayoutManager(this)
+        val headerAdapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+            override fun getItemCount() = 1
+
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
+                object : RecyclerView.ViewHolder(modelSettingsHeader) {}
+
+            override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) = Unit
+        }
         rvModelList.setHasFixedSize(true)
         rvModelList.itemAnimator = null
-        rvModelList.adapter = modelAdapter
+        rvModelList.adapter = ConcatAdapter(headerAdapter, modelAdapter)
     }
 
     private fun setupApiFormatDropdown() {
@@ -276,9 +299,7 @@ class ModelSettingActivity : AppCompatActivity() {
         modelsJob = lifecycleScope.launch {
             providerRepository.getModelsForProvider(providerId).collectLatest { models ->
                 val names = models.map { it.modelName }
-                modelAdapter.submitList(names) {
-                    rvModelList.requestLayout()
-                }
+                modelAdapter.submitList(names)
                 updateModelCount(names.size)
                 emptyModelState.visibility = if (names.isEmpty()) View.VISIBLE else View.GONE
 
@@ -301,30 +322,25 @@ class ModelSettingActivity : AppCompatActivity() {
     // ===================================================================
 
     private fun showAddProviderDialog() {
-        val view = LayoutInflater.from(this).inflate(R.layout.dialog_add_provider, null, false)
-        val input: EditText = view.findViewById(R.id.etNewProviderName)
-        val btnCancel: TextView = view.findViewById(R.id.btnDialogCancel)
-        val btnConfirm: TextView = view.findViewById(R.id.btnDialogConfirm)
-
-        val dialog = AlertDialog.Builder(this)
-            .setView(view)
-            .create()
-        dialog.window?.setBackgroundDrawableResource(android.R.color.transparent)
-
-        btnCancel.setOnClickListener { dialog.dismiss() }
-        btnConfirm.setOnClickListener {
-            val name = input.text?.toString()?.trim().orEmpty()
-            if (name.isEmpty()) {
-                Toast.makeText(this, "请输入 Provider 名称", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
+        val input = dialogField("例如 DeepSeek")
+        ManTouDialog(
+            this,
+            title = "新增 Provider",
+            content = input,
+            secondary = Action("取消"),
+            primary = Action("新增", dismissOnClick = false) { dialog ->
+                val name = input.text?.toString()?.trim().orEmpty()
+                if (name.isEmpty()) {
+                    dialog.showFieldError("请输入 Provider 名称")
+                    return@Action
+                }
+                lifecycleScope.launch {
+                    val newId = providerRepository.createProvider(name)
+                    providerRepository.getProviderById(newId)?.let { switchToProvider(it) }
+                }
+                dialog.dismiss()
             }
-            lifecycleScope.launch {
-                val newId = providerRepository.createProvider(name)
-                providerRepository.getProviderById(newId)?.let { switchToProvider(it) }
-            }
-            dialog.dismiss()
-        }
-        dialog.show()
+        ).show()
     }
 
     private fun confirmDeleteCurrentProvider() {
@@ -333,11 +349,12 @@ class ModelSettingActivity : AppCompatActivity() {
             Toast.makeText(this, "当前没有 Provider 可删除", Toast.LENGTH_SHORT).show()
             return
         }
-        AlertDialog.Builder(this)
-            .setTitle("删除 Provider")
-            .setMessage("删除后该 Provider 及其模型将一并移除。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("删除") { _, _ ->
+        ManTouDialog(
+            this,
+            title = "删除 Provider",
+            message = "删除后该 Provider 及其模型将一并移除。",
+            secondary = Action("取消"),
+            primary = Action("删除", destructive = true) {
                 lifecycleScope.launch {
                     providerRepository.deleteProvider(pid)
                     ActiveModelStore.clearIfMatches(this@ModelSettingActivity, pid)
@@ -346,7 +363,7 @@ class ModelSettingActivity : AppCompatActivity() {
                     // observeProviders Flow 会回调，自动切到剩余第一个或 resetForm
                 }
             }
-            .show()
+        ).show()
     }
 
     // ===================================================================
@@ -408,27 +425,28 @@ class ModelSettingActivity : AppCompatActivity() {
             Toast.makeText(this, "请先选择 Provider", Toast.LENGTH_SHORT).show()
             return
         }
-        val input = EditText(this).apply {
-            hint = "模型名，例如 gpt-4o"
-            inputType = InputType.TYPE_CLASS_TEXT
-            setPadding(48, 32, 48, 32)
-        }
-        AlertDialog.Builder(this)
-            .setTitle("新增模型")
-            .setView(input)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("确定") { _, _ ->
-                val n = input.text?.toString()?.trim().orEmpty()
-                if (n.isEmpty()) return@setPositiveButton
+        val input = dialogField("模型名，例如 gpt-4o")
+        ManTouDialog(
+            this,
+            title = "新增模型",
+            content = input,
+            secondary = Action("取消"),
+            primary = Action("新增", dismissOnClick = false) { dialog ->
+                val name = input.text?.toString()?.trim().orEmpty()
+                if (name.isEmpty()) {
+                    dialog.showFieldError("请输入模型名")
+                    return@Action
+                }
                 lifecycleScope.launch {
                     val existing = providerRepository.getModelsForProviderOnce(providerId)
                         .map { it.modelName }
-                    if (n !in existing) {
-                        providerRepository.replaceModels(providerId, existing + n)
+                    if (name !in existing) {
+                        providerRepository.replaceModels(providerId, existing + name)
                     }
                 }
+                dialog.dismiss()
             }
-            .show()
+        ).show()
     }
 
     private fun labelToApiFormat(label: String?): String {

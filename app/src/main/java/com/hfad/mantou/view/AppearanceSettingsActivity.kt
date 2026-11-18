@@ -49,9 +49,13 @@ class AppearanceSettingsActivity : AppCompatActivity() {
         ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri ?: return@registerForActivityResult
+        if (!renderWallpaper(uri)) {
+            renderWallpaper(WallpaperStore.getWallpaperUri(this))
+            Toast.makeText(this, "无法读取所选壁纸", Toast.LENGTH_SHORT).show()
+            return@registerForActivityResult
+        }
         persistReadPermission(uri)
         WallpaperStore.setWallpaperUri(this, uri)
-        renderWallpaper(uri)
         Toast.makeText(this, "壁纸已更新", Toast.LENGTH_SHORT).show()
     }
 
@@ -74,7 +78,7 @@ class AppearanceSettingsActivity : AppCompatActivity() {
         binding.btnClearWallpaper.setOnClickListener {
             WallpaperStore.clearWallpaper(this)
             renderWallpaper(null)
-            Toast.makeText(this, "已恢复默认背景", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "已恢复默认壁纸", Toast.LENGTH_SHORT).show()
         }
 
         setupColorOptions()
@@ -84,25 +88,11 @@ class AppearanceSettingsActivity : AppCompatActivity() {
         renderWallpaper(WallpaperStore.getWallpaperUri(this))
     }
 
-    private fun renderWallpaper(uri: Uri?) {
-        if (uri == null) {
-            binding.ivWallpaperPreview.setImageDrawable(null)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                binding.ivWallpaperPreview.setRenderEffect(null)
-            }
-            binding.ivWallpaperPreview.visibility = View.GONE
-            binding.wallpaperPreviewMask.visibility = View.GONE
-            binding.tvWallpaperEmpty.visibility = View.VISIBLE
-            binding.tvWallpaperPath.text = "未设置自定义壁纸"
-            return
-        }
-
-        binding.ivWallpaperPreview.visibility = View.VISIBLE
-        binding.wallpaperPreviewMask.visibility = View.VISIBLE
-        binding.tvWallpaperEmpty.visibility = View.GONE
-        binding.ivWallpaperPreview.setImageURI(uri)
-        binding.tvWallpaperPath.text = uri.toString()
+    private fun renderWallpaper(uri: Uri?): Boolean {
+        val usesCustomWallpaper = binding.ivWallpaperPreview.showWallpaper(uri)
+        binding.tvWallpaperPath.text = if (usesCustomWallpaper) uri.toString() else "默认壁纸"
         updatePreviewEffects()
+        return usesCustomWallpaper
     }
 
     private fun setupSeekBars() {

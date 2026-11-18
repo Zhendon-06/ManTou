@@ -69,7 +69,7 @@ class WorkspaceFileOpenPolicyTest {
             WorkspaceFileOpenPolicy.modeForWorkspacePath("/workspace/other/styles.css", "styles.css")
         )
         assertEquals(
-            WorkspaceFileOpenMode.UNSUPPORTED,
+            WorkspaceFileOpenMode.IMAGE,
             WorkspaceFileOpenPolicy.modeForWorkspacePath(
                 "/workspace/generated_apps/demo/image.png",
                 "image.png"

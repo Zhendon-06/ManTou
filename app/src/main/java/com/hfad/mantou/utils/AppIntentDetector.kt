@@ -4,19 +4,18 @@ import android.content.Context
 import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.JsonParser
-import com.hfad.mantou.data.api.ApiEndpointResolver
+import com.hfad.mantou.data.api.ApiMessage
 import com.hfad.mantou.data.api.ChatCallConfig
+import com.hfad.mantou.data.api.ChatHttpRequest
+import com.hfad.mantou.data.api.ChatRequest
 import com.hfad.mantou.data.api.ModelTokenUsage
 import com.hfad.mantou.data.api.ModelTokenUsageResolver
 import com.hfad.mantou.data.logging.ApiDiagnosticContext
-import com.hfad.mantou.data.logging.ApiRequestTrace
 import com.hfad.mantou.data.logging.ApiLoggingInterceptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -25,8 +24,7 @@ import java.util.concurrent.TimeUnit
 object AppIntentDetector {
 
     private const val TAG = "AppIntentDetector"
-    private const val ANTHROPIC_VERSION = "2023-06-01"
-    private const val INTENT_MAX_TOKENS = 20
+    private const val INTENT_MAX_TOKENS = 512
     private const val INTENT_SYSTEM_PROMPT = """你是一个严格的二分类路由器。判断用户当前是否要求直接生成或修改一个可运行、可交互的网页应用。
 返回 {"intent":"generate_app"}：用户明确或隐式要求产出网页、App、小程序、工具、游戏、交互页面，或在已有网页应用上继续修改功能和界面。
 返回 {"intent":"chat"}：用户只是在询问开发方法、解释/分析/推荐应用、排查已有代码、生成文章或代码片段，或明确说不要生成应用。
@@ -40,6 +38,7 @@ object AppIntentDetector {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
+        .addInterceptor(ChatHttpRequest.parameterCompatibility)
         .addInterceptor(ApiLoggingInterceptor())
         .build()
 
@@ -95,6 +94,26 @@ object AppIntentDetector {
         "再大", "再小", "大一点", "小一点", "用深色", "用浅色", "深色模式",
         "浅色模式", "add", "change", "update", "remove", "fix", "continue"
     )
+    private val workspaceFileActions = listOf(
+        "文件", "目录", "工作区", "filesystem", "file", "folder", "directory", "diff", "patch", "补丁"
+    )
+    private val workspaceFileVerbs = listOf(
+        "读", "查看", "看看", "列出", "写", "创建", "新建", "保存", "编辑", "修改", "更新",
+        "调整", "改", "替换", "添加", "追加", "应用", "删除", "设置", "read", "list", "write",
+        "create", "edit", "change", "update", "append", "apply", "replace", "delete", "set"
+    )
+    private val workspaceDocs = listOf("人格", "灵魂", "系统提示词", "长期记忆", "personality", "persona")
+    private val textDocumentReference = Regex("""[\p{L}\p{N}_-]+\.(?:md|txt|rst|adoc|ya?ml|toml|ini|cfg|properties|csv|tsv)(?![\p{L}\p{N}_])""")
+    private val otherFileReference = Regex("""[\p{L}\p{N}_-]+\.(?:json|xml|css|html?|js|tsx?|jsx|kt|java|py|go|rs|sh)(?![\p{L}\p{N}_])""")
+
+    internal fun isWorkspaceFileRequest(message: String): Boolean {
+        val lower = message.lowercase(Locale.ROOT)
+        if (!lower.containsAnyTerm(workspaceFileVerbs)) return false
+        if (lower.containsAnyTerm(workspaceDocs) || textDocumentReference.containsMatchIn(lower)) return true
+        return !requestsNewApp(message) && (
+            lower.containsAnyTerm(workspaceFileActions) || otherFileReference.containsMatchIn(lower)
+        )
+    }
 
     private fun isAppGenerationByKeywords(
         message: String,
@@ -105,6 +124,13 @@ object AppIntentDetector {
         if (hasGeneratedAppInSession && signals.hasFollowUpAction) return true
         if (signals.hasNonGenerationContext) return false
         return signals.hasCreateAction && signals.hasAppTarget
+    }
+
+    internal fun requestsNewApp(message: String): Boolean {
+        val signals = analyzeLocalSignals(message)
+        return signals.hasCreateAction && signals.hasAppTarget && !signals.hasNegativeContext &&
+            !signals.hasNonGenerationContext && !message.trimStart().startsWith("继续") &&
+            !message.trimStart().startsWith("continue", ignoreCase = true)
     }
 
     suspend fun isAppGenerationIntent(
@@ -168,13 +194,13 @@ object AppIntentDetector {
 
         try {
             val llmStartMs = System.currentTimeMillis()
-            val builder = buildIntentRequest(
+            val request = buildIntentRequest(
                 config = config,
                 userMessage = userMessage,
                 hasGeneratedAppInSession = hasGeneratedAppInSession,
                 diagnosticContext = diagnosticContext,
             )
-            client.newCall(builder.build()).execute().use { response ->
+            client.newCall(request).execute().use { response ->
                 val responseBody = response.body?.string()
                 if (responseBody == null) {
                     Log.d(
@@ -428,53 +454,18 @@ object AppIntentDetector {
         userMessage: String,
         hasGeneratedAppInSession: Boolean,
         diagnosticContext: ApiDiagnosticContext? = null,
-    ): Request.Builder {
-        val routingMessage = routingMessage(userMessage, hasGeneratedAppInSession)
-        val requestJson = if (config.isAnthropic) {
-            gson.toJson(mapOf(
-                "model" to config.model,
-                "system" to INTENT_SYSTEM_PROMPT,
-                "messages" to listOf(
-                    mapOf("role" to "user", "content" to routingMessage)
-                ),
-                "stream" to false,
-                "max_tokens" to INTENT_MAX_TOKENS,
-            ))
-        } else {
-            gson.toJson(mapOf(
-                "model" to config.model,
-                "messages" to listOf(
-                    mapOf("role" to "system", "content" to INTENT_SYSTEM_PROMPT),
-                    mapOf("role" to "user", "content" to routingMessage)
-                ),
-                "stream" to false,
-                "max_tokens" to INTENT_MAX_TOKENS,
-            ))
-        }
-
-        val requestBody = requestJson.toRequestBody("application/json; charset=utf-8".toMediaType())
-        val builder = Request.Builder()
-            .tag(ApiRequestTrace::class.java, ApiRequestTrace.create(diagnosticContext))
-            .url(
-                if (config.isAnthropic) {
-                    ApiEndpointResolver.anthropicMessagesUrl(config.baseUrl)
-                } else {
-                    ApiEndpointResolver.openAiChatCompletionsUrl(config.baseUrl)
-                }
-            )
-            .addHeader("Content-Type", "application/json")
-            .post(requestBody)
-
-        if (config.isAnthropic) {
-            builder.addHeader("anthropic-version", ANTHROPIC_VERSION)
-            if (config.apiKey.isNotEmpty()) {
-                builder.addHeader("x-api-key", config.apiKey)
-            }
-        } else if (config.apiKey.isNotEmpty()) {
-            builder.addHeader("Authorization", "Bearer ${config.apiKey}")
-        }
-        return builder
-    }
+    ): Request = ChatHttpRequest.build(
+        config,
+        ChatRequest(
+            model = config.model,
+            messages = listOf(
+                ApiMessage("system", INTENT_SYSTEM_PROMPT),
+                ApiMessage("user", routingMessage(userMessage, hasGeneratedAppInSession))
+            ),
+            maxTokens = INTENT_MAX_TOKENS,
+            diagnosticContext = diagnosticContext
+        )
+    )
 
     private fun routingMessage(
         userMessage: String,

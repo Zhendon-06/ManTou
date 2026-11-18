@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.Flow
 
 interface ChatSession {
     val currentSessionId: LiveData<Long?>
+    val selectedWorkspace: LiveData<String?>
     val messages: LiveData<List<ChatMessage>>
     val allSessions: Flow<List<ChatSessionEntity>>
     val archivedSessions: Flow<List<ChatSessionEntity>>
@@ -23,8 +24,9 @@ interface ChatSession {
     val noModelConfigured: LiveData<Boolean>
     val currentSessionTokenUsage: LiveData<SessionTokenUsage>
     fun refreshActiveModel()
-    fun createEmptySession()
+    suspend fun createEmptySession(): Boolean
     fun switchToSession(sessionId: Long)
+    fun selectWorkspace(name: String?)
     fun sendMessage(content: String, imagePath: String? = null, imageUris: List<Uri>? = null)
     fun stopStreaming()
     fun deleteSession(sessionId: Long)

@@ -198,138 +198,198 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent">
 
-            <HorizontalScrollView
-                android:id="@+id/selectedImageChipScroll"
+            <LinearLayout
+                android:id="@+id/workspaceSelector"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginHorizontal="18dp"
-                android:layout_marginBottom="8dp"
-                android:clipToPadding="false"
-                android:overScrollMode="never"
-                android:scrollbars="none"
-                android:visibility="gone"
+                android:layout_marginHorizontal="16dp"
+                android:layout_marginBottom="6dp"
+                android:clickable="true"
+                android:elevation="8dp"
+                android:focusable="true"
+                android:foreground="?attr/selectableItemBackground"
+                android:gravity="center_vertical"
+                android:minHeight="48dp"
+                android:paddingHorizontal="14dp"
+                android:tag="glass:capsule"
                 app:layout_constraintEnd_toEndOf="parent"
                 app:layout_constraintStart_toStartOf="parent"
                 app:layout_constraintTop_toTopOf="parent">
 
-                <com.google.android.material.chip.ChipGroup
-                    android:id="@+id/selectedImageChipGroup"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    app:singleLine="true" />
-            </HorizontalScrollView>
+                <ImageView
+                    android:id="@+id/ivConversationWorkspace"
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_folder_outline" />
 
-            <!-- 输入框卡片 -->
-            <FrameLayout
+                <TextView
+                    android:id="@+id/tvConversationWorkspace"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:text="工作区 · 根目录"
+                    android:textColor="@color/mt_text_primary"
+                    android:textSize="14sp" />
+
+                <ImageView
+                    android:id="@+id/ivConversationWorkspaceChevron"
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_chevron_down" />
+            </LinearLayout>
+
+            <LinearLayout
                 android:id="@+id/inputCard"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginHorizontal="16dp"
-                android:layout_marginBottom="14dp"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="12dp"
                 android:background="@android:color/transparent"
-                android:elevation="8dp"
+                android:orientation="vertical"
+                android:paddingStart="12dp"
+                android:paddingTop="12dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="8dp"
                 android:tag="glass:panel"
                 app:layout_constraintBottom_toBottomOf="parent"
-                app:layout_constraintTop_toBottomOf="@id/selectedImageChipScroll"
+                app:layout_constraintEnd_toEndOf="parent"
                 app:layout_constraintStart_toStartOf="parent"
-                app:layout_constraintEnd_toEndOf="parent">
+                app:layout_constraintTop_toBottomOf="@id/workspaceSelector">
 
-                <LinearLayout
-                    android:id="@+id/ll_input"
+                <HorizontalScrollView
+                    android:id="@+id/selectedImageScroll"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:paddingStart="18dp"
-                    android:paddingTop="12dp"
-                    android:paddingEnd="12dp"
-                    android:paddingBottom="10dp">
-
-                    <EditText
-                        android:id="@+id/etInput"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:background="@null"
-                        android:hint="请输入内容"
-                        android:inputType="textMultiLine"
-                        android:imeOptions="flagNoEnterAction"
-                        android:maxLines="4"
-                        android:minHeight="40dp"
-                        android:padding="0dp"
-                        android:textColor="@color/mt_text_primary"
-                        android:textColorHint="@color/mt_text_muted"
-                        android:textSize="16sp" />
+                    android:layout_marginBottom="8dp"
+                    android:clipToPadding="false"
+                    android:overScrollMode="never"
+                    android:scrollbars="none"
+                    android:visibility="gone">
 
                     <LinearLayout
-                        android:id="@+id/inputToolbar"
-                        android:layout_width="match_parent"
-                        android:layout_height="44dp"
-                        android:layout_marginTop="6dp"
-                        android:gravity="center_vertical"
-                        android:orientation="horizontal">
+                        android:id="@+id/selectedImageStrip"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:paddingHorizontal="6dp" />
+                </HorizontalScrollView>
 
-                        <ImageButton
-                            android:id="@+id/ivAdd"
-                            android:layout_width="38dp"
-                            android:layout_height="38dp"
-                            android:background="@drawable/bg_input_action_circle"
-                            android:contentDescription="选择图片"
-                            android:foreground="?attr/selectableItemBackgroundBorderless"
-                            android:padding="7dp"
-                            android:scaleType="centerInside"
-                            android:src="@drawable/ic_input_image" />
+                <EditText
+                    android:id="@+id/etInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@null"
+                    android:hint="输入消息"
+                    android:imeOptions="flagNoEnterAction"
+                    android:inputType="textMultiLine"
+                    android:maxLines="4"
+                    android:minHeight="40dp"
+                    android:paddingHorizontal="6dp"
+                    android:textColor="@color/mt_text_primary"
+                    android:textColorHint="@color/mt_text_muted"
+                    android:textSize="16sp" />
 
-                        <com.hfad.mantou.view.ContextProgressButton
-                            android:id="@+id/ivContextLimit"
-                            android:layout_width="38dp"
-                            android:layout_height="38dp"
-                            android:layout_marginStart="10dp"
-                            android:background="@drawable/bg_input_action_circle"
-                            android:contentDescription="上下文限制"
-                            android:foreground="?attr/selectableItemBackgroundBorderless"
-                            android:padding="7dp" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="4dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
 
-                        <ImageButton
+                    <ImageButton
+                        android:id="@+id/ivVoiceInput"
+                        android:layout_width="40dp"
+                        android:layout_height="match_parent"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="语音输入"
+                        android:padding="0dp"
+                        android:scaleType="center"
+                        android:src="@drawable/ic_composer_voice"
+                        app:tint="@color/mt_text_primary" />
+
+                    <FrameLayout
+                        android:layout_width="0dp"
+                        android:layout_height="match_parent"
+                        android:layout_marginStart="4dp"
+                        android:layout_marginEnd="4dp"
+                        android:layout_weight="1">
+
+                        <LinearLayout
                             android:id="@+id/ivModelPicker"
-                            android:layout_width="38dp"
-                            android:layout_height="38dp"
-                            android:layout_marginStart="10dp"
-                            android:background="@drawable/bg_input_action_circle"
-                            android:contentDescription="选择模型"
-                            android:foreground="?attr/selectableItemBackgroundBorderless"
-                            android:padding="7dp"
-                            android:scaleType="centerInside"
-                            android:src="@drawable/ic_model_picker" />
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:layout_gravity="start|center_vertical"
+                            android:background="@drawable/bg_chat_model_pill"
+                            android:clickable="true"
+                            android:focusable="true"
+                            android:foreground="?attr/selectableItemBackground"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal"
+                            android:paddingStart="6dp"
+                            android:paddingEnd="10dp">
 
-                        <ImageButton
-                            android:id="@+id/ivVoiceInput"
-                            android:layout_width="38dp"
-                            android:layout_height="38dp"
-                            android:layout_marginStart="10dp"
-                            android:background="@drawable/bg_input_action_circle"
-                            android:contentDescription="语音输入"
-                            android:foreground="?attr/selectableItemBackgroundBorderless"
-                            android:padding="7dp"
-                            android:scaleType="centerInside"
-                            android:src="@drawable/ic_voice" />
+                            <ImageView
+                                android:id="@+id/ivActiveModelIcon"
+                                android:layout_width="26dp"
+                                android:layout_height="26dp"
+                                android:background="@drawable/bg_chat_model_icon"
+                                android:importantForAccessibility="no"
+                                android:padding="2dp"
+                                android:scaleType="fitCenter"
+                                android:src="@drawable/ic_model_picker" />
 
-                        <Space
-                            android:layout_width="0dp"
-                            android:layout_height="1dp"
-                            android:layout_weight="1" />
+                            <TextView
+                                android:id="@+id/tvActiveModel"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="6dp"
+                                android:ellipsize="end"
+                                android:maxLines="1"
+                                android:text="选择模型"
+                                android:textColor="@color/mt_text_primary"
+                                android:textSize="14sp"
+                                android:textStyle="bold" />
+                        </LinearLayout>
+                    </FrameLayout>
 
-                        <ImageButton
-                            android:id="@+id/ivSend"
-                            android:layout_width="38dp"
-                            android:layout_height="38dp"
-                            android:background="@drawable/bg_send_circle"
-                            android:contentDescription="发送"
-                            android:foreground="?attr/selectableItemBackgroundBorderless"
-                            android:padding="8dp"
-                            android:scaleType="centerInside"
-                            android:src="@drawable/ic_send_up" />
-                    </LinearLayout>
+                    <com.hfad.mantou.view.ContextProgressButton
+                        android:id="@+id/ivContextLimit"
+                        android:layout_width="40dp"
+                        android:layout_height="match_parent"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="上下文控制"
+                        android:padding="0dp" />
+
+                    <ImageButton
+                        android:id="@+id/ivAdd"
+                        android:layout_width="40dp"
+                        android:layout_height="match_parent"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="选择图片"
+                        android:padding="0dp"
+                        android:scaleType="center"
+                        android:src="@drawable/ic_composer_plus"
+                        app:tint="@color/mt_text_primary" />
+
+                    <ImageButton
+                        android:id="@+id/ivSend"
+                        android:layout_width="44dp"
+                        android:layout_height="44dp"
+                        android:layout_marginStart="4dp"
+                        android:background="@drawable/bg_send_circle"
+                        android:contentDescription="发送"
+                        android:foreground="?attr/selectableItemBackgroundBorderless"
+                        android:padding="0dp"
+                        android:scaleType="center"
+                        android:src="@drawable/ic_send_up" />
                 </LinearLayout>
-            </FrameLayout>
+            </LinearLayout>
 
         </androidx.constraintlayout.widget.ConstraintLayout>
 

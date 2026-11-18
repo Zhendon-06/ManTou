@@ -22,12 +22,6 @@ data class ChatRequest(
     @SerializedName("max_tokens")
     val maxTokens: Int = ApiConfig.MAX_TOKENS,
     
-    @SerializedName("temperature")
-    val temperature: Double = ApiConfig.TEMPERATURE,
-    
-    @SerializedName("top_p")
-    val topP: Double = ApiConfig.TOP_P,
-
     @SerializedName("stream_options")
     val streamOptions: StreamOptions? = if (stream) StreamOptions() else null,
 

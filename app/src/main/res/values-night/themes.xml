@@ -7,8 +7,5 @@
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
         <item name="android:windowBackground">@color/white</item>
-        <item name="android:alertDialogTheme">@style/ThemeOverlay.ManTou.GlassAlertDialog</item>
-        <item name="alertDialogTheme">@style/ThemeOverlay.ManTou.GlassAlertDialog</item>
-        <item name="materialAlertDialogTheme">@style/ThemeOverlay.ManTou.GlassAlertDialog</item>
     </style>
 </resources>

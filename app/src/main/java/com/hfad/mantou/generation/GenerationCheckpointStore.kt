@@ -13,7 +13,8 @@ internal data class GenerationCheckpoint(
     val taskState: GenerateTaskState? = null,
     val partialResponse: String = "",
     val revision: Long = 0,
-    val completed: Boolean = false
+    val completed: Boolean = false,
+    val workspaceName: String? = null
 ) {
     fun restoredState(): GenerateTaskState {
         val saved = taskState ?: GenerateTaskState(
@@ -40,23 +41,28 @@ internal class GenerationCheckpointStore(private val directory: File) {
     private val gson = Gson()
 
     @Synchronized
-    fun read(sessionId: Long): GenerationCheckpoint? = runCatching {
-        val checkpoint = gson.fromJson(file(sessionId).readText(), GenerationCheckpoint::class.java)
-        checkpoint.takeIf { it.sessionId == sessionId && it.runId.isNotBlank() }
+    fun read(sessionId: Long, workspaceName: String? = null): GenerationCheckpoint? = runCatching {
+        val checkpoint = gson.fromJson(file(sessionId, workspaceName).readText(), GenerationCheckpoint::class.java)
+        checkpoint.takeIf {
+            it.sessionId == sessionId && it.workspaceName == workspaceName && it.runId.isNotBlank()
+        }
     }.getOrNull()
 
     @Synchronized
     fun begin(checkpoint: GenerationCheckpoint) = write(checkpoint)
 
     @Synchronized
-    fun attachDraft(sessionId: Long, runId: String, draft: File) {
-        val current = read(sessionId)?.takeIf { it.runId == runId } ?: return
+    fun attachDraft(sessionId: Long, runId: String, draft: File, workspaceName: String? = null) {
+        val current = read(sessionId, workspaceName)?.takeIf { it.runId == runId } ?: return
         write(current.copy(draftPath = draft.absolutePath))
     }
 
     @Synchronized
-    fun saveState(sessionId: Long, runId: String, state: GenerateTaskState, revision: Long) {
-        val current = read(sessionId)?.takeIf { it.runId == runId && revision > it.revision } ?: return
+    fun saveState(
+        sessionId: Long, runId: String, state: GenerateTaskState, revision: Long, workspaceName: String? = null
+    ) {
+        val current = read(sessionId, workspaceName)
+            ?.takeIf { it.runId == runId && revision > it.revision } ?: return
         write(current.copy(
             taskState = state,
             revision = revision,
@@ -65,28 +71,29 @@ internal class GenerationCheckpointStore(private val directory: File) {
     }
 
     @Synchronized
-    fun savePartial(sessionId: Long, runId: String, response: String) {
-        val current = read(sessionId)?.takeIf { it.runId == runId && !it.completed } ?: return
+    fun savePartial(sessionId: Long, runId: String, response: String, workspaceName: String? = null) {
+        val current = read(sessionId, workspaceName)?.takeIf { it.runId == runId && !it.completed } ?: return
         write(current.copy(partialResponse = response))
     }
 
     @Synchronized
     fun remove(sessionId: Long) {
-        val target = file(sessionId)
-        check(!target.exists() || target.delete()) { "无法删除生成进度" }
+        val targets = directory.listFiles().orEmpty().filter(File::isDirectory)
+            .map { file(sessionId, it.name) } + file(sessionId, null)
+        targets.forEach { check(!it.exists() || it.delete()) { "无法删除生成进度" } }
     }
 
     @Synchronized
     fun clear() {
-        directory.listFiles()?.filter { it.extension == "json" }?.forEach {
+        directory.walkTopDown().filter { it.isFile && it.extension == "json" }.forEach {
             check(it.delete()) { "无法删除生成进度" }
         }
     }
 
-    private fun file(sessionId: Long) = File(directory, "$sessionId.json")
+    private fun file(sessionId: Long, workspaceName: String?) =
+        File(workspaceName?.let { WebProjectPaths.resolve(directory, it) } ?: directory, "$sessionId.json")
 
     private fun write(checkpoint: GenerationCheckpoint) {
-        check(directory.isDirectory || directory.mkdirs()) { "无法创建生成进度目录" }
-        WebProjectPaths.writeTextAtomically(file(checkpoint.sessionId), gson.toJson(checkpoint))
+        WebProjectPaths.writeTextAtomically(file(checkpoint.sessionId, checkpoint.workspaceName), gson.toJson(checkpoint))
     }
 }

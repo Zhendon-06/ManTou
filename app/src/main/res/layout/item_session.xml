@@ -6,12 +6,9 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginHorizontal="2dp"
-    android:layout_marginBottom="8dp"
-    android:background="@android:color/transparent"
     android:foreground="?attr/selectableItemBackground"
-    android:padding="16dp"
-    android:tag="glass:card">
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="12dp">
 
     <!-- 会话标题（第一个用户问题） -->
     <TextView

@@ -29,12 +29,11 @@
             android:layout_width="0dp"
             android:layout_height="32dp"
             android:layout_weight="1"
-            android:background="@android:color/transparent"
+            android:background="@drawable/bg_appearance_input"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingStart="16dp"
-            android:paddingEnd="14dp"
-            android:tag="glass:input">
+            android:paddingEnd="14dp">
 
             <ImageView
                 android:layout_width="22dp"
@@ -66,11 +65,10 @@
             android:layout_width="32dp"
             android:layout_height="32dp"
             android:layout_marginStart="12dp"
-            android:background="@android:color/transparent"
+            android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="查看归档"
             android:padding="6dp"
             android:src="@drawable/ic_archive_outline"
-            android:tag="glass:circle"
             app:tint="@color/mt_text_primary" />
     </LinearLayout>
 
@@ -137,11 +135,9 @@
             <ImageView
                 android:layout_width="40dp"
                 android:layout_height="40dp"
-                android:background="@android:color/transparent"
                 android:contentDescription="设置"
                 android:padding="8dp"
-                android:src="@drawable/setting"
-                android:tag="glass:circle" />
+                android:src="@drawable/setting" />
 
             <TextView
                 android:layout_width="wrap_content"
@@ -166,11 +162,9 @@
             <ImageView
                 android:layout_width="40dp"
                 android:layout_height="40dp"
-                android:background="@android:color/transparent"
                 android:contentDescription="清空对话"
                 android:padding="8dp"
                 android:src="@drawable/ic_delete_outline"
-                android:tag="glass:circle"
                 app:tint="@color/mt_error" />
 
             <TextView
