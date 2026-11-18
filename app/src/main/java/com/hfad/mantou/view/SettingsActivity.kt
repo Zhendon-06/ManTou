@@ -8,7 +8,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.hfad.mantou.databinding.ActivitySettingsBinding
 import com.hfad.mantou.data.preferences.HarnessSettingsStore
-import com.hfad.mantou.utils.harness.HarnessIntensity
+import com.hfad.mantou.utils.harness.HarnessValidationProfile
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
 class SettingsActivity : AppCompatActivity() {
@@ -28,21 +28,21 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         binding.toolbar.setNavigationOnClickListener { finish() }
-        fun refreshIntensity() {
-            val intensity = HarnessSettingsStore.intensity(this)
-            binding.tvHarnessIntensity.text = "生成强度：${intensity.label}"
+        fun refreshValidation() {
+            val profile = HarnessSettingsStore.validation(this)
+            binding.tvHarnessValidation.text = "验收策略：${profile.label}"
         }
-        refreshIntensity()
-        binding.rowHarnessIntensity.setOnClickListener {
-            val options = HarnessIntensity.entries
+        refreshValidation()
+        binding.rowHarnessValidation.setOnClickListener {
+            val options = HarnessValidationProfile.entries
             MaterialAlertDialogBuilder(this)
-                .setTitle("生成强度")
+                .setTitle("验收策略")
                 .setSingleChoiceItems(
                     options.map { "${it.label} · ${it.description}" }.toTypedArray(),
-                    options.indexOf(HarnessSettingsStore.intensity(this))
+                    options.indexOf(HarnessSettingsStore.validation(this))
                 ) { dialog, index ->
-                    HarnessSettingsStore.setIntensity(this, options[index])
-                    refreshIntensity()
+                    HarnessSettingsStore.setValidation(this, options[index])
+                    refreshValidation()
                     dialog.dismiss()
                 }
                 .setNegativeButton("取消", null)

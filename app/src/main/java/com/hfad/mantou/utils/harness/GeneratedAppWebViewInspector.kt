@@ -17,6 +17,9 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.google.gson.Gson
+import com.google.gson.JsonObject
+import com.google.gson.JsonParser
+import com.hfad.mantou.utils.project.WebAppAcceptanceAssertionType
 import com.hfad.mantou.utils.project.WebAppAcceptanceContract
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -123,7 +126,8 @@ class GeneratedAppWebViewInspector(
         settleMillis: Long = DEFAULT_SETTLE_MILLIS,
         timeoutMillis: Long = DEFAULT_TEST_TIMEOUT_MILLIS,
         requestInterceptor: WebRequestInterceptor? = null,
-        evidenceDirectory: File? = null
+        evidenceDirectory: File? = null,
+        reopenInterceptor: ((String) -> WebRequestInterceptor)? = null
     ): WebInspectionReport = inspectionMutex.withLock {
         require(timeoutMillis > 0) { "timeoutMillis must be greater than zero" }
         val startedAt = SystemClock.elapsedRealtime()
@@ -167,8 +171,27 @@ class GeneratedAppWebViewInspector(
             else -> runCatching {
                 GeneratedAppHarnessScripts.acceptanceSuite(acceptanceContract)
                 acceptanceContract.criteria.map { criterion ->
-                    criterion.id to GeneratedAppHarnessScripts.acceptanceSuite(
-                        WebAppAcceptanceContract(criteria = listOf(criterion))
+                    val reopen = criterion.reopenExpected?.takeIf { it.isNotEmpty() }?.let {
+                        val storageAssertion = criterion.expected.first {
+                            it.type == WebAppAcceptanceAssertionType.STORAGE_EQUALS
+                        }
+                        val storage = JsonObject().apply {
+                            add(
+                                requireNotNull(storageAssertion.target),
+                                JsonParser.parseString(requireNotNull(storageAssertion.value))
+                            )
+                        }
+                        ReopenCheck(
+                            script = GeneratedAppHarnessScripts.acceptanceReopenSuite(criterion, storageAssertion),
+                            storageJson = storage.toString()
+                        )
+                    }
+                    AcceptanceCheck(
+                        criterionId = criterion.id,
+                        script = GeneratedAppHarnessScripts.acceptanceSuite(
+                            WebAppAcceptanceContract(criteria = listOf(criterion))
+                        ),
+                        reopen = reopen
                     )
                 }
             }.getOrElse { error ->
@@ -242,21 +265,62 @@ class GeneratedAppWebViewInspector(
                     }
                 }
 
-                for ((criterionId, acceptanceScript) in acceptanceScripts) {
-                    reports += inspectOnMain(
+                for ((criterionId, acceptanceScript, reopen) in acceptanceScripts) {
+                    val mode = InspectionMode.Tests(
+                        target = target,
+                        testScript = acceptanceScript,
+                        settleMillis = settleMillis.coerceAtLeast(0),
+                        requestInterceptor = requestInterceptor,
+                        expectedViewport = viewport
+                    )
+                    val firstReport = inspectOnMain(
                         stage = WebInspectionStage.TEST_SUITE,
-                        mode = InspectionMode.Tests(
-                            target = target,
-                            testScript = acceptanceScript,
-                            settleMillis = settleMillis.coerceAtLeast(0),
-                            requestInterceptor = requestInterceptor,
-                            expectedViewport = viewport
-                        ),
+                        mode = mode,
                         timeoutMillis = timeoutMillis
-                    ).scopedToViewport(
+                    )
+                    val report = if (firstReport.timedOut && firstReport.diagnostics.none {
+                            it.severity == WebDiagnosticSeverity.ERROR &&
+                                it.category != WebDiagnosticCategory.TIMEOUT
+                        }
+                    ) {
+                        inspectOnMain(
+                            stage = WebInspectionStage.TEST_SUITE,
+                            mode = mode,
+                            timeoutMillis = timeoutMillis
+                        )
+                    } else {
+                        firstReport
+                    }
+                    reports += report.scopedToViewport(
                         viewportId = viewport.id,
                         phaseId = "$ACCEPTANCE_PHASE_ID:$criterionId"
                     )
+                    if (report.passed && reopen != null) {
+                        val reopenedMode = when (target) {
+                            is WebInspectionTarget.Html -> mode.copy(
+                                testScript = reopen.script,
+                                initialStorageJson = reopen.storageJson
+                            )
+                            is WebInspectionTarget.Url -> reopenInterceptor?.let { createInterceptor ->
+                                mode.copy(
+                                    testScript = reopen.script,
+                                    requestInterceptor = createInterceptor(reopen.storageJson)
+                                )
+                            }
+                        }
+                        if (reopenedMode == null) {
+                            additionalDiagnostics += testSuiteDiagnostic(
+                                code = "ACCEPTANCE_REOPEN_UNAVAILABLE",
+                                message = "${viewport.id}/$criterionId: 无法为重新打开的页面初始化测试存储"
+                            )
+                        } else {
+                            reports += inspectOnMain(
+                                stage = WebInspectionStage.TEST_SUITE,
+                                mode = reopenedMode,
+                                timeoutMillis = timeoutMillis
+                            ).scopedToViewport(viewport.id, "acceptance-reopen:$criterionId")
+                        }
+                    }
                 }
             }
         } finally {
@@ -644,7 +708,10 @@ class GeneratedAppWebViewInspector(
             when (target) {
                 is WebInspectionTarget.Html -> webView.loadDataWithBaseURL(
                     target.baseUrl,
-                    WebInspectionParsers.injectRuntimeHarness(target.content, RUNTIME_HARNESS_SCRIPT),
+                    prepareProjectHtmlForInspection(
+                        target.content,
+                        (mode as? InspectionMode.Tests)?.initialStorageJson
+                    ),
                     "text/html",
                     "UTF-8",
                     target.historyUrl
@@ -1268,6 +1335,14 @@ class GeneratedAppWebViewInspector(
         val sha256: String
     )
 
+    private data class AcceptanceCheck(
+        val criterionId: String,
+        val script: String,
+        val reopen: ReopenCheck?
+    )
+
+    private data class ReopenCheck(val script: String, val storageJson: String)
+
     private sealed interface InspectionMode {
         data class Build(val html: String) : InspectionMode
         data class Runtime(
@@ -1280,7 +1355,8 @@ class GeneratedAppWebViewInspector(
             val testScript: String,
             val settleMillis: Long,
             val requestInterceptor: WebRequestInterceptor?,
-            val expectedViewport: WebQualityViewport? = null
+            val expectedViewport: WebQualityViewport? = null,
+            val initialStorageJson: String? = null
         ) : InspectionMode
     }
 
@@ -1309,11 +1385,20 @@ class GeneratedAppWebViewInspector(
 
         private val gson = Gson()
 
-        internal fun prepareProjectHtmlForInspection(html: String): String {
-            return WebInspectionParsers.injectRuntimeHarness(html, RUNTIME_HARNESS_SCRIPT)
+        internal fun prepareProjectHtmlForInspection(html: String): String =
+            prepareProjectHtmlForInspection(html, null)
+
+        internal fun prepareProjectHtmlForInspection(
+            html: String,
+            initialStorageJson: String?
+        ): String {
+            val script = initialStorageJson?.let(::runtimeHarnessScript) ?: RUNTIME_HARNESS_SCRIPT
+            return WebInspectionParsers.injectRuntimeHarness(html, script)
         }
 
-        private val RUNTIME_HARNESS_SCRIPT = """
+        private val RUNTIME_HARNESS_SCRIPT = runtimeHarnessScript(null)
+
+        private fun runtimeHarnessScript(initialStorageJson: String?): String = """
             (function () {
               if (window.$RUNTIME_HARNESS_MARKER) return;
               var state = { errors: [], nativeToolsMode: 'dry-run' };
@@ -1321,7 +1406,7 @@ class GeneratedAppWebViewInspector(
               window.__MANTOU_HARNESS_DRY_RUN__ = true;
               if (!window.MantouApp || typeof window.MantouApp.isMantouApp !== 'function') {
                 var toolCache = {};
-                var storageState = {};
+                var storageState = ${initialStorageJson?.let { "JSON.parse(${gson.toJson(it)})" } ?: "{}"};
                 var storageResponse = function (data, error) {
                   return JSON.stringify({ success: !error, data: data || null, error: error || null });
                 };

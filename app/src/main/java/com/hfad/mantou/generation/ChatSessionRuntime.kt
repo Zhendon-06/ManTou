@@ -26,6 +26,7 @@ import com.hfad.mantou.data.logging.HarnessTraceStatus
 import com.hfad.mantou.data.logging.elapsedMillisSince
 import com.hfad.mantou.data.logging.record
 import com.hfad.mantou.data.preferences.ContextLimitStore
+import com.hfad.mantou.data.preferences.HarnessSettingsStore
 import com.hfad.mantou.data.repository.ChatRepository
 import com.hfad.mantou.service.HarnessForegroundServiceController
 import com.hfad.mantou.service.HarnessProgress
@@ -46,9 +47,9 @@ import com.hfad.mantou.utils.harness.HarnessBuilder
 import com.hfad.mantou.utils.harness.HarnessCheckResult
 import com.hfad.mantou.utils.harness.HarnessFileTask
 import com.hfad.mantou.utils.harness.HarnessFileTool
-import com.hfad.mantou.data.preferences.HarnessSettingsStore
 import com.hfad.mantou.utils.harness.HarnessRunRequest
 import com.hfad.mantou.utils.harness.HarnessRunResult
+import com.hfad.mantou.utils.harness.HarnessTaskComplexity
 import com.hfad.mantou.utils.harness.HarnessToolResult
 import com.hfad.mantou.utils.harness.StreamingHarnessModelRepair
 import com.hfad.mantou.utils.harness.WebQualityGateContract
@@ -939,7 +940,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 message = "开始组装项目系统提示词",
                 iteration = 0
             )
-            val projectSystemPrompt = try {
+            val preparedPrompt = try {
                 withContext(Dispatchers.Default) {
                     AppGenerator.buildProjectSystemPrompt(
                         context = application,
@@ -968,6 +969,26 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 )
                 throw error
             }
+            // A saved draft represents the original task. A published project's full plan
+            // describes the app, so it should not inflate the scope of a follow-up edit.
+            val taskPlan = binding.manifest.takeIf { !isModification || existingFile.isDirectory }
+            val complexity = HarnessTaskComplexity.assess(taskPlan, preparedPrompt.relevantTools)
+            val validation = HarnessSettingsStore.validation(application)
+            val scopeSummary = "${complexity.level.label} · ${complexity.evidence.joinToString("、")}"
+            val projectSystemPrompt = "# 本轮实现重点\n${complexity.level.guidance}\n\n" + preparedPrompt.text
+            traceLogger.record(
+                runId = runId,
+                component = "ORCHESTRATOR",
+                operation = "assess_task_scope",
+                status = HarnessTraceStatus.SUCCEEDED,
+                message = "任务范围已评估",
+                iteration = 0,
+                details = mapOf(
+                    "complexity" to complexity.level.name,
+                    "scope" to scopeSummary,
+                    "validation_profile" to validation.name
+                )
+            )
             traceLogger.record(
                 runId = runId,
                 component = "PROMPT",
@@ -1141,14 +1162,13 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     inspectionAdapter.build(checkRequest)
                 }
             }
-            val intensity = HarnessSettingsStore.intensity(application)
             val orchestrator = AppHarnessOrchestrator(
                 modelRepair = modelRepair,
                 fileTool = harnessFileTool,
                 builder = projectBuilder,
                 inspector = inspectionAdapter,
                 testRunner = inspectionAdapter,
-                limits = intensity.limits(),
+                limits = complexity.limits(validation),
                 eventLogger = { eventRunId, event ->
                     GenerationTrace.logHarnessEvent(state.sessionId, eventRunId, event)
                 },
@@ -1166,7 +1186,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                         testSuiteScript = GeneratedAppHarnessScripts.testSuite,
                         acceptanceContract = binding.manifest.appSpec?.acceptanceContract,
                         acceptanceRequired = binding.manifest.appSpec != null,
-                        qualityGateContract = intensity.qualityGate(binding.manifest.appSpec?.design?.let { design ->
+                        qualityGateContract = validation.qualityGate(binding.manifest.appSpec?.design?.let { design ->
                             WebQualityGateContract().withDesignRequirements(
                                 viewportWidths = design.viewportWidths,
                                 minTouchTargetCssPixels = design.minTouchTargetPx
@@ -1191,7 +1211,9 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                         },
                         metadata = mapOf(
                             "projectId" to binding.manifest.projectId,
-                            "intensity" to intensity.name
+                            "task_complexity" to complexity.level.name,
+                            "task_scope_summary" to scopeSummary,
+                            "validation_profile" to validation.name
                         )
                     )
                 ) { event ->

@@ -660,6 +660,9 @@ class StreamingWebProjectPlanner(
                       "expected":[
                         {"type":"COUNT_EQUALS","target":"[data-testid='item-row']","count":1},
                         {"type":"STORAGE_EQUALS","target":"app-state-v1","value":"{\"items\":[\"测试内容\"]}"}
+                      ],
+                      "reopenExpected":[
+                        {"type":"TEXT_EQUALS","target":"[data-testid='item-row']","value":"测试内容"}
                       ]
                     },
                     {
@@ -689,6 +692,7 @@ class StreamingWebProjectPlanner(
             约束：
             - 直接生成精简规划。只为实际需求增加文件与验收条件；简单项目优先使用示例的三文件结构。
             - 先确定谁在什么场景使用、打开后第一步做什么。screens[].purpose 写出各屏的内容顺序和主操作，components 写出操作反馈及相关状态。
+            - 在 state.fields[].description 说明业务数据来自用户输入、已有数据计算还是已提供的宿主能力。用户记录首次打开默认为空；统计从实际记录得出。没有真实来源的数据写明不可用，只有用户要求演示数据时才规划单独标识的示例。
             - design.theme 用一句话定下适合题材的视觉方向。tokens 为本项目指定实际使用的色彩角色、字号等级和间距，约束写清首屏、主要操作位置、导航或返回路径及键盘遮挡时的行为。示例配色仅说明字段关系。
             - 工具默认参照 Android Material 3 的组件和交互层级。单屏任务用紧凑标题栏和就地操作，多目的地才规划底部导航，短任务可用底部面板，长编辑用独立界面。游戏、绘图等沉浸内容保留题材风格，优先规划画布、控制区、手势冲突与暂停恢复。用户指定的风格和横竖屏优先。
             - 手机主要控件的有效点击区域至少 48 CSS px，正常字号文本与背景至少 4.5:1。使用实际功能决定组件，去掉标语、占位数据、装饰性徽标和重复状态提醒。
@@ -703,6 +707,7 @@ class StreamingWebProjectPlanner(
             - 验收断言 type 仅可使用 EXISTS、NOT_EXISTS、VISIBLE、HIDDEN、TEXT_EQUALS、TEXT_CONTAINS、VALUE_EQUALS、ATTRIBUTE_EQUALS、COUNT_EQUALS、URL_CONTAINS、STORAGE_EQUALS。
             - MANTOU_STORAGE 的 storageKey 表示根 JSON 对象中的唯一字段名；实现必须用 storageGet(storageKey) 和 storageSet(storageKey, JSON.stringify(state)) 读写该字段，不能把它当提示标签。
             - 使用 MANTOU_STORAGE 时必须有 STORAGE_EQUALS 断言；其 target 必须与 state.storageKey 完全相同，value 必须是该字段预期值的合法 JSON 文本。
+            - 使用 MANTOU_STORAGE 时，至少一个 PERSISTENCE 用例要先写入有辨识度的测试值，再用 reopenExpected 声明重开后应恢复的页面内容或控件状态。宿主会用已验证的存储值重新打开入口且不重放操作；优先用 TEXT_EQUALS 或 VALUE_EQUALS 断言同一个测试值，勿只检查固定标题、URL 或存储键。
             - 每条 criterion 必须声明非空 covers，值仅可使用 CORE_SUCCESS、EMPTY_STATE、ERROR_STATE、PERSISTENCE，且同一值不能重复。
             - 每条 criterion 的 setup 或 actions 中必须至少包含一个非 WAIT 动作，不能用纯静态断言或仅等待来伪造验收。
             - TEXT_CONTAINS 和 URL_CONTAINS 的 value 必须是非空白文本，禁止使用恒真空字符串。

@@ -75,7 +75,12 @@ class WebProjectContentServer private constructor(
 
     private val filesByRelativePath = files.associateBy(ProjectFile::relativePath)
 
-    fun intercept(request: WebResourceRequest): WebResourceResponse? {
+    fun intercept(request: WebResourceRequest): WebResourceResponse? = intercept(request, null)
+
+    internal fun intercept(
+        request: WebResourceRequest,
+        entryHtmlTransformer: ((String) -> String)?
+    ): WebResourceResponse? {
         val startedAt = System.nanoTime()
         var requestUrl = ""
         var normalizedMethod = "GET"
@@ -91,7 +96,16 @@ class WebProjectContentServer private constructor(
                     response = errorResponse(resolved),
                     bytes = errorBodyBytes(resolved)
                 )
-                is Resolution.Resource -> resourceResponse(resolved)
+                is Resolution.Resource -> {
+                    val transform = if (
+                        entryHtmlTransformer != null && request.isForMainFrame && resolved.projectFile.file == entryFile
+                    ) {
+                        entryHtmlTransformer
+                    } else {
+                        htmlTransformer
+                    }
+                    resourceResponse(resolved, transform)
+                }
             }
             traceResolution(
                 operation = "intercept",
@@ -214,15 +228,18 @@ class WebProjectContentServer private constructor(
         return filesByRelativePath[normalized.joinToString("/")]
     }
 
-    private fun resourceResponse(resource: Resolution.Resource): ServedResponse {
+    private fun resourceResponse(
+        resource: Resolution.Resource,
+        transformHtml: ((String) -> String)?
+    ): ServedResponse {
         val body = when {
             resource.headOnly -> ResourceBody(
                 input = ByteArrayInputStream(ByteArray(0)),
                 bytes = 0L
             )
-            resource.transformHtml -> {
+            resource.mimeType == MIME_HTML && transformHtml != null -> {
                 val source = resource.projectFile.file.readText(Charsets.UTF_8)
-                val transformed = requireNotNull(htmlTransformer).invoke(source)
+                val transformed = transformHtml(source)
                 val bytes = transformed.toByteArray(Charsets.UTF_8)
                 ResourceBody(
                     input = ByteArrayInputStream(bytes),

@@ -1,5 +1,6 @@
 package com.hfad.mantou.utils.project
 
+import com.google.gson.JsonParser
 import com.hfad.mantou.data.ChatMessage
 import com.hfad.mantou.data.api.ChatCallConfig
 import com.hfad.mantou.data.api.ChatRequest
@@ -370,6 +371,7 @@ class StreamingWebProjectPlannerTest {
             "app-state-v1",
             coreCriterion.expected.last().target
         )
+        assertEquals("Test item", coreCriterion.reopenExpected?.single()?.value)
         assertEquals(
             listOf(
                 WebAppAcceptanceCoverage.CORE_SUCCESS,
@@ -395,6 +397,21 @@ class StreamingWebProjectPlannerTest {
         )
         assertTrue(result.projectPlanJson.contains("\"acceptanceContract\""))
         assertTrue(result.projectPlanJson.contains("\"dependsOn\""))
+    }
+
+    @Test
+    fun oldPersistencePlanStillLoadsButNewPlanRequiresReopenAssertions() {
+        val plan = JsonParser.parseString(structuredPlanJson()).asJsonObject
+        plan.getAsJsonObject("appSpec").getAsJsonObject("acceptanceContract")
+            .getAsJsonArray("criteria")[0].asJsonObject.remove("reopenExpected")
+        val oldPlan = plan.toString()
+
+        val restored = WebProjectPlanCodec.parse(oldPlan).requireAppSpec()
+        assertNull(restored.acceptanceContract.criteria.first().reopenExpected)
+        val error = assertThrows(WebAppProjectValidationException::class.java) {
+            WebProjectPlanCodec.parse(oldPlan, requireAppSpec = true)
+        }
+        assertTrue(error.report.diagnostics.any { it.code == "APP_SPEC_REOPEN_MISSING" })
     }
 
     @Test
@@ -905,6 +922,9 @@ class StreamingWebProjectPlannerTest {
                       "expected":[
                         {"type":"COUNT_EQUALS","target":"[data-testid='item-row']","count":1},
                         {"type":"STORAGE_EQUALS","target":"app-state-v1","value":"{\"items\":[\"Test item\"]}"}
+                      ],
+                      "reopenExpected":[
+                        {"type":"TEXT_EQUALS","target":"[data-testid='item-row']","value":"Test item"}
                       ]
                     },
                     {

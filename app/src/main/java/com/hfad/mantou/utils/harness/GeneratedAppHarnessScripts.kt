@@ -6,6 +6,7 @@ import com.hfad.mantou.utils.project.WebAppAcceptanceActionType
 import com.hfad.mantou.utils.project.WebAppAcceptanceAssertion
 import com.hfad.mantou.utils.project.WebAppAcceptanceAssertionType
 import com.hfad.mantou.utils.project.WebAppAcceptanceContract
+import com.hfad.mantou.utils.project.WebAppAcceptanceCriterion
 
 object GeneratedAppHarnessScripts {
 
@@ -409,9 +410,30 @@ object GeneratedAppHarnessScripts {
         """.trimIndent()
     }
 
-    fun acceptanceSuite(contract: WebAppAcceptanceContract): String {
-        validateAcceptanceContract(contract)
+    fun acceptanceSuite(contract: WebAppAcceptanceContract): String = acceptanceSuite(contract, false)
+
+    internal fun acceptanceReopenSuite(
+        criterion: WebAppAcceptanceCriterion,
+        storageAssertion: WebAppAcceptanceAssertion
+    ): String = acceptanceSuite(
+        WebAppAcceptanceContract(
+            criteria = listOf(
+                criterion.copy(
+                    title = "${criterion.title}（重新打开）",
+                    setup = emptyList(),
+                    actions = emptyList(),
+                    expected = criterion.reopenExpected.orEmpty() + storageAssertion,
+                    reopenExpected = null
+                )
+            )
+        ),
+        reopen = true
+    )
+
+    private fun acceptanceSuite(contract: WebAppAcceptanceContract, reopen: Boolean): String {
+        validateAcceptanceContract(contract, requireActions = !reopen)
         val contractJson = gson.toJson(contract)
+        val testNamePrefix = if (reopen) "acceptance-reopen:" else "acceptance:"
         return """
             return (async function () {
               var contract = $contractJson;
@@ -652,7 +674,7 @@ object GeneratedAppHarnessScripts {
                   trace.push({ phase: 'failure', passed: false, error: message });
                 }
                 cases.push({
-                  name: 'acceptance:' + criterion.priority + ':' + criterion.id,
+                  name: '$testNamePrefix' + criterion.priority + ':' + criterion.id,
                   passed: passed,
                   message: message,
                   details: {
@@ -663,7 +685,7 @@ object GeneratedAppHarnessScripts {
                 });
               }
               cases.unshift({
-                name: 'acceptance-contract-coverage',
+                name: '${if (reopen) "acceptance-reopen-coverage" else "acceptance-contract-coverage"}',
                 passed: cases.length === contract.criteria.length && cases.length > 0,
                 message: cases.length > 0 ? null : 'AcceptanceContract 没有可执行 criterion',
                 details: { expected: contract.criteria.length, executed: cases.length }
@@ -692,7 +714,10 @@ object GeneratedAppHarnessScripts {
         """.trimIndent()
     }
 
-    private fun validateAcceptanceContract(contract: WebAppAcceptanceContract) {
+    private fun validateAcceptanceContract(
+        contract: WebAppAcceptanceContract,
+        requireActions: Boolean
+    ) {
         require(contract.criteria.isNotEmpty()) { "acceptance contract must declare criteria" }
         require(contract.criteria.map { it.id }.distinct().size == contract.criteria.size) {
             "acceptance criterion ids must be unique"
@@ -703,7 +728,7 @@ object GeneratedAppHarnessScripts {
             require(criterion.expected.isNotEmpty()) {
                 "acceptance criterion ${criterion.id} must declare assertions"
             }
-            require((criterion.setup + criterion.actions).any {
+            require(!requireActions || (criterion.setup + criterion.actions).any {
                 it.type != WebAppAcceptanceActionType.WAIT
             }) {
                 "acceptance criterion ${criterion.id} must exercise at least one non-WAIT action"

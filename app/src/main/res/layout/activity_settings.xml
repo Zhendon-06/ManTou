@@ -57,7 +57,7 @@
             </LinearLayout>
 
             <LinearLayout
-                android:id="@+id/rowHarnessIntensity"
+                android:id="@+id/rowHarnessValidation"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:minHeight="72dp"
@@ -67,17 +67,17 @@
                 android:foreground="?attr/selectableItemBackground"
                 android:orientation="vertical">
                 <TextView
-                    android:id="@+id/tvHarnessIntensity"
+                    android:id="@+id/tvHarnessValidation"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="生成强度"
+                    android:text="验收策略"
                     android:textColor="@color/mt_text_primary"
                     android:textSize="15sp" />
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="强度越高，检查更全面、修复预算更大，耗时与用量也更高。新任务生效。"
+                    android:text="生成按任务复杂度自动编排。此处设置验收设备范围和页面自测要求，新任务生效。"
                     android:textColor="@color/mt_text_secondary"
                     android:textSize="12sp" />
             </LinearLayout>

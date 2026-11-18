@@ -380,6 +380,100 @@ class GeneratedAppWebViewInspectorInstrumentedTest {
     }
 
     @Test
+    fun projectReopenAcceptanceRejectsSaveWithoutRestore() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val projectRoot = File(context.cacheDir, "reopen-web-project-${System.nanoTime()}")
+        val savedState = WebAppAcceptanceAssertion(
+            type = WebAppAcceptanceAssertionType.STORAGE_EQUALS,
+            target = "fixture-state",
+            value = """{"name":"馒头"}"""
+        )
+        val displayedRecord = WebAppAcceptanceAssertion(
+            type = WebAppAcceptanceAssertionType.TEXT_EQUALS,
+            target = "#fixture-result",
+            value = "馒头"
+        )
+        val contract = WebAppAcceptanceContract(
+            criteria = listOf(
+                WebAppAcceptanceCriterion(
+                    id = "save-and-reopen",
+                    title = "保存后重开",
+                    priority = WebAppAcceptancePriority.P0,
+                    actions = listOf(
+                        WebAppAcceptanceAction(WebAppAcceptanceActionType.CLICK, "#fixture-action")
+                    ),
+                    expected = listOf(displayedRecord, savedState),
+                    reopenExpected = listOf(displayedRecord)
+                )
+            )
+        )
+        try {
+            val html = VALID_HTML.replace(
+                "<p>Harness fixture content</p>",
+                "<p id=\"fixture-result\">Empty</p>"
+            )
+            for (restoreOnStartup in listOf(true, false)) {
+                val restore = if (restoreOnStartup) {
+                    """
+                        var saved = JSON.parse(storage.storageGet('fixture-state')).data;
+                        if (saved.exists) result.textContent = JSON.parse(saved.valueJson).name;
+                    """.trimIndent()
+                } else {
+                    ""
+                }
+                val entry = writeProjectFile(
+                    projectRoot,
+                    "index.html",
+                    html.replace(
+                        "window.fixtureReady = true;",
+                        """
+                            var storage = window.MantouApp.storage;
+                            var result = document.getElementById('fixture-result');
+                            $restore
+                            document.getElementById('fixture-action').addEventListener('click', function () {
+                              storage.storageSet('fixture-state', JSON.stringify({ name: '馒头' }));
+                              result.textContent = '馒头';
+                            });
+                        """.trimIndent()
+                    )
+                )
+                val server = WebProjectContentServer.create(
+                    projectRoot = projectRoot,
+                    entryFile = entry,
+                    htmlTransformer = GeneratedAppWebViewInspector::prepareProjectHtmlForInspection
+                )
+                val report = inspector.runQualityGateSuite(
+                    target = WebInspectionTarget.Url(server.entryUrl),
+                    qualityGateContract = WebQualityGateContract(
+                        requiredViewports = listOf(WebQualityViewport("storage", 240, 320))
+                    ),
+                    acceptanceContract = contract,
+                    acceptanceRequired = true,
+                    evidenceRunId = "reopen-${System.nanoTime()}",
+                    requestInterceptor = WebRequestInterceptor(server::intercept),
+                    reopenInterceptor = { storageJson ->
+                        WebRequestInterceptor { request ->
+                            server.intercept(request) {
+                                GeneratedAppWebViewInspector.prepareProjectHtmlForInspection(it, storageJson)
+                            }
+                        }
+                    }
+                )
+                assertTrue(report.selfTests.any { it.name.endsWith("acceptance:P0:save-and-reopen") && it.passed })
+                val reopened = report.selfTests.single { it.name.endsWith("acceptance-reopen:P0:save-and-reopen") }
+                assertEquals(restoreOnStartup, reopened.passed)
+                if (restoreOnStartup) {
+                    assertPassed(report)
+                } else {
+                    assertFalse(report.passed)
+                }
+            }
+        } finally {
+            projectRoot.deleteRecursively()
+        }
+    }
+
+    @Test
     fun qualityGateRejectsUnnamedAndUndersizedInteraction() = runBlocking {
         val html = VALID_HTML.replace(
             "<button id=\"fixture-action\" type=\"button\">Run</button>",

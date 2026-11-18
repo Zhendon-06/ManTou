@@ -89,7 +89,17 @@ object WebProjectPlanCodec {
             files = manifestFiles,
             appSpec = appSpec
         )
-        WebAppProjectValidator.validateManifest(manifest)
+        val diagnostics = WebAppProjectValidator.validateManifest(manifest).toMutableList()
+        if (requireAppSpec && appSpec?.state?.persistence == WebAppStatePersistence.MANTOU_STORAGE &&
+            appSpec.acceptanceContract.criteria.none { !it.reopenExpected.isNullOrEmpty() }
+        ) {
+            diagnostics += WebProjectValidationDiagnostic(
+                severity = WebProjectDiagnosticSeverity.ERROR,
+                code = "APP_SPEC_REOPEN_MISSING",
+                message = "MANTOU_STORAGE projects must declare reopenExpected on a PERSISTENCE criterion"
+            )
+        }
+        diagnostics
             .filter { it.severity == WebProjectDiagnosticSeverity.ERROR }
             .takeIf(List<WebProjectValidationDiagnostic>::isNotEmpty)
             ?.let { diagnostics ->
@@ -256,18 +266,12 @@ object WebProjectPlanCodec {
                         criterion.optionalArray("actions", itemContext).orEmpty(),
                         "$itemContext.actions"
                     ),
-                    expected = criterion.requiredArray("expected", itemContext)
-                        .mapIndexed { assertionIndex, assertionElement ->
-                            val assertionContext = "$itemContext.expected[$assertionIndex]"
-                            val assertion = assertionElement.requiredObject(assertionContext)
-                            WebAppAcceptanceAssertion(
-                                type = assertion.requiredEnum("type", assertionContext),
-                                target = assertion.optionalString("target")?.trim(),
-                                value = assertion.optionalString("value"),
-                                attribute = assertion.optionalString("attribute")?.trim(),
-                                count = assertion.optionalInt("count", assertionContext)
-                            )
-                        }
+                    expected = parseAcceptanceAssertions(
+                        criterion.requiredArray("expected", itemContext), "$itemContext.expected"
+                    ),
+                    reopenExpected = criterion.optionalArray("reopenExpected", itemContext)?.let {
+                        parseAcceptanceAssertions(it, "$itemContext.reopenExpected")
+                    }
                 )
             }
         )
@@ -287,6 +291,21 @@ object WebProjectPlanCodec {
                 timeoutMs = action.optionalInt("timeoutMs", itemContext)
             )
         }
+    }
+
+    private fun parseAcceptanceAssertions(
+        elements: Iterable<JsonElement>,
+        context: String
+    ): List<WebAppAcceptanceAssertion> = elements.mapIndexed { index, element ->
+        val itemContext = "$context[$index]"
+        val assertion = element.requiredObject(itemContext)
+        WebAppAcceptanceAssertion(
+            type = assertion.requiredEnum("type", itemContext),
+            target = assertion.optionalString("target")?.trim(),
+            value = assertion.optionalString("value"),
+            attribute = assertion.optionalString("attribute")?.trim(),
+            count = assertion.optionalInt("count", itemContext)
+        )
     }
 
     private fun parseRole(

@@ -57,7 +57,8 @@ class AppHarnessOrchestrator(
                 put("max_iterations", limits.maxCodeIterations.toString())
                 put("max_total_model_turns", limits.maxTotalModelTurns.toString())
                 put("self_test_bypass_allowed", limits.allowSelfTestBypass.toString())
-                request.metadata["intensity"]?.let { put("intensity", it) }
+                request.metadata["task_complexity"]?.let { put("task_complexity", it) }
+                request.metadata["validation_profile"]?.let { put("validation_profile", it) }
             }
         )
 
@@ -79,6 +80,13 @@ class AppHarnessOrchestrator(
             )
             runCatching { eventLogger(request.runId, event) }
             onEvent(event)
+        }
+
+        fun reserveModelTurn() {
+            if (totalModelTurns >= limits.maxTotalModelTurns) {
+                throw HarnessLimitException("已达到 ${limits.maxTotalModelTurns} 次模型编排预算，保留草稿")
+            }
+            totalModelTurns++
         }
 
         val preparedPrompt = try {
@@ -148,7 +156,7 @@ class AppHarnessOrchestrator(
         emit(
             stage = GenerateTaskState.Stage.INPUT,
             outcome = GenerateTaskState.Outcome.PASSED,
-            message = request.metadata["intensity"]?.let { "输入过滤完成 · 执行强度 $it" } ?: "输入过滤完成",
+            message = "输入过滤完成",
             diagnostics = preparedPrompt.notices
         )
         traceLogger.record(
@@ -175,7 +183,8 @@ class AppHarnessOrchestrator(
         emit(
             stage = GenerateTaskState.Stage.PROMPT,
             outcome = GenerateTaskState.Outcome.PASSED,
-            message = "Harness 提示词已就绪"
+            message = request.metadata["task_scope_summary"]?.let { "按任务复杂度编排 · $it" }
+                ?: "Harness 提示词已就绪"
         )
         traceLogger.record(
             runId = request.runId,
@@ -242,10 +251,7 @@ class AppHarnessOrchestrator(
                         )
                     }
                     iterationTurn++
-                    if (totalModelTurns >= limits.maxTotalModelTurns) {
-                        throw HarnessLimitException("已达到 ${limits.maxTotalModelTurns} 次模型编排预算，保留草稿")
-                    }
-                    totalModelTurns++
+                    reserveModelTurn()
                     emit(
                     stage = GenerateTaskState.Stage.MODEL,
                     outcome = GenerateTaskState.Outcome.RUNNING,
@@ -334,6 +340,7 @@ class AppHarnessOrchestrator(
                     return
                 }
 
+                var changedFilesThisTurn = false
                 for (call in turn.toolCalls) {
                     currentCoroutineContext().ensureActive()
                     totalToolCalls++
@@ -371,6 +378,8 @@ class AppHarnessOrchestrator(
                         )
                     )
                     val result = executeTool(request, call, iteration)
+                    changedFilesThisTurn = changedFilesThisTurn ||
+                        (result.success && result.changedFiles.isNotEmpty())
                     artifactPath = result.artifactPath ?: artifactPath
                     messages += HarnessMessage(
                         role = HarnessMessageRole.TOOL,
@@ -427,6 +436,32 @@ class AppHarnessOrchestrator(
                         )
                     )
                 }
+                    if (purpose == HarnessModelPurpose.REPAIR && changedFilesThisTurn &&
+                        (iterationTurn >= limits.maxTaskTurns || totalModelTurns >= limits.maxTotalModelTurns)
+                    ) {
+                        val message = "本轮模型预算已用完，正在复验最后写入的修改"
+                        emit(
+                            stage = GenerateTaskState.Stage.MODEL,
+                            outcome = GenerateTaskState.Outcome.PASSED,
+                            message = message,
+                            operation = "validate_after_repair_budget"
+                        )
+                        traceLogger.record(
+                            runId = request.runId,
+                            component = "ORCHESTRATOR",
+                            operation = "coding_iteration",
+                            status = HarnessTraceStatus.SUCCEEDED,
+                            message = message,
+                            iteration = iteration,
+                            durationMs = elapsedMillisSince(iterationStartedAt),
+                            details = mapOf(
+                                "reason" to "repair_write_at_budget",
+                                "iteration_turns" to iterationTurn.toString(),
+                                "total_model_turns" to totalModelTurns.toString()
+                            )
+                        )
+                        return
+                    }
                     activePurpose = HarnessModelPurpose.TOOL_FOLLOW_UP
                 }
             } catch (error: CancellationException) {
@@ -553,7 +588,7 @@ class AppHarnessOrchestrator(
                 repeat(limits.maxTaskTurns) {
                     if (completed) return@repeat
                     currentCoroutineContext().ensureActive()
-                    totalModelTurns++
+                    reserveModelTurn()
                     emit(
                         stage = GenerateTaskState.Stage.MODEL,
                         outcome = GenerateTaskState.Outcome.RUNNING,

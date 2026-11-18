@@ -284,7 +284,14 @@ class WebViewHarnessInspectorAdapter(
                 acceptanceContract = request.acceptanceContract,
                 acceptanceRequired = request.acceptanceRequired,
                 evidenceRunId = "${request.runId}-iteration-${request.iteration}",
-                requestInterceptor = requestInterceptor
+                requestInterceptor = requestInterceptor,
+                reopenInterceptor = { storageJson ->
+                    WebRequestInterceptor { resourceRequest ->
+                        project.intercept(resourceRequest) { html ->
+                            GeneratedAppWebViewInspector.prepareProjectHtmlForInspection(html, storageJson)
+                        }
+                    }
+                }
             )
 
             HarnessCheckKind.DEVELOPMENT_BUILD,

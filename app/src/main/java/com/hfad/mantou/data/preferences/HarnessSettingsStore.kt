@@ -1,16 +1,20 @@
 package com.hfad.mantou.data.preferences
 
 import android.content.Context
-import com.hfad.mantou.utils.harness.HarnessIntensity
+import com.hfad.mantou.utils.harness.HarnessValidationProfile
 
-object HarnessSettingsStore {
+internal object HarnessSettingsStore {
     private fun prefs(context: Context) = context.applicationContext
         .getSharedPreferences("harness_settings", Context.MODE_PRIVATE)
 
-    fun intensity(context: Context): HarnessIntensity =
-        HarnessIntensity.fromStored(prefs(context).getString("intensity", null))
+    fun validation(context: Context): HarnessValidationProfile = prefs(context).let { preferences ->
+        HarnessValidationProfile.fromStored(
+            value = preferences.getString("validation", null),
+            legacyIntensity = preferences.getString("intensity", null)
+        )
+    }
 
-    fun setIntensity(context: Context, intensity: HarnessIntensity) {
-        prefs(context).edit().putString("intensity", intensity.name).apply()
+    fun setValidation(context: Context, profile: HarnessValidationProfile) {
+        prefs(context).edit().putString("validation", profile.name).apply()
     }
 }

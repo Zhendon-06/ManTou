@@ -518,6 +518,61 @@ class AppHarnessOrchestratorTest {
     }
 
     @Test
+    fun lastRepairWriteRunsAllChecksWithoutAnotherModelRequest() = runBlocking {
+        val modelPurposes = mutableListOf<HarnessModelPurpose>()
+        val checksAfterRepair = mutableListOf<HarnessCheckKind>()
+        var repaired = false
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair { request ->
+                modelPurposes += request.purpose
+                when (request.purpose) {
+                    HarnessModelPurpose.INITIAL -> HarnessModelTurn(content = "ready")
+                    HarnessModelPurpose.REPAIR -> HarnessModelTurn(toolCalls = listOf(
+                        HarnessToolCall("repair-css", "write_file", mapOf("path" to "styles/app.css"))
+                    ))
+                    HarnessModelPurpose.TOOL_FOLLOW_UP -> error("Model budget already reached")
+                }
+            },
+            fileTool = HarnessFileTool { request ->
+                repaired = true
+                HarnessToolResult(request.call.id, true, "written", changedFiles = listOf("styles/app.css"))
+            },
+            builder = HarnessBuilder {
+                if (repaired) checksAfterRepair += it.kind
+                HarnessCheckResult(true, "build ok")
+            },
+            inspector = HarnessInspector {
+                if (repaired) checksAfterRepair += it.kind
+                HarnessCheckResult(true, "runtime ok")
+            },
+            testRunner = HarnessTestRunner {
+                if (repaired) checksAfterRepair += it.kind
+                if (it.kind == HarnessCheckKind.TEST_SUITE && !repaired) {
+                    HarnessCheckResult(false, "tests failed", listOf("CSS contrast failed"))
+                } else {
+                    HarnessCheckResult(true, "tests ok")
+                }
+            },
+            limits = HarnessLimits(maxTaskTurns = 1, maxTotalModelTurns = 2)
+        )
+        val events = mutableListOf<GenerateTaskState.HarnessEvent>()
+
+        assertTrue(orchestrator.run(newRequest()) { events += it } is HarnessRunResult.Delivered)
+        assertEquals(listOf(HarnessModelPurpose.INITIAL, HarnessModelPurpose.REPAIR), modelPurposes)
+        assertEquals(
+            listOf(
+                HarnessCheckKind.DEVELOPMENT_BUILD,
+                HarnessCheckKind.RUNTIME,
+                HarnessCheckKind.SELF_TEST,
+                HarnessCheckKind.FINAL_BUILD,
+                HarnessCheckKind.TEST_SUITE
+            ),
+            checksAfterRepair
+        )
+        assertTrue(events.any { it.operation == "validate_after_repair_budget" })
+    }
+
+    @Test
     fun toolFailureIsReturnedToModelInsteadOfEndingRun() = runBlocking {
         val modelRequests = mutableListOf<HarnessModelRequest>()
         var toolCalls = 0
@@ -975,6 +1030,37 @@ class AppHarnessOrchestratorTest {
             .filter { it.name == "read_file" }
             .map { it.arguments.getValue("path") }
         assertEquals(listOf("project.json", "styles.css", "app.js"), indexReads)
+    }
+
+    @Test
+    fun totalTurnBudgetAlsoAppliesAcrossScheduledFiles() = runBlocking {
+        val modelTasks = mutableListOf<String>()
+        val orchestrator = AppHarnessOrchestrator(
+            modelRepair = HarnessModelRepair { request ->
+                val path = request.metadata.getValue("task_path")
+                modelTasks += path
+                HarnessModelTurn(toolCalls = listOf(
+                    HarnessToolCall("write-$path", "write_file", mapOf("path" to path, "content" to "code"))
+                ))
+            },
+            fileTool = HarnessFileTool { request ->
+                HarnessToolResult(
+                    request.call.id, true, "written",
+                    changedFiles = listOf(request.call.arguments.getValue("path"))
+                )
+            },
+            builder = HarnessBuilder { error("A draft missing a planned file cannot be built") },
+            inspector = HarnessInspector { error("A draft missing a planned file cannot be inspected") },
+            testRunner = HarnessTestRunner { error("A draft missing a planned file cannot be delivered") },
+            limits = HarnessLimits(maxTotalModelTurns = 1)
+        )
+
+        val result = orchestrator.run(newRequest().copy(
+            fileTasks = listOf(HarnessFileTask("index.html"), HarnessFileTask("app.js"))
+        ))
+
+        assertTrue(result is HarnessRunResult.Failed)
+        assertEquals(listOf("index.html"), modelTasks)
     }
 
     @Test

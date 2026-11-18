@@ -108,14 +108,16 @@ object AppGenerator {
             userMessage = userMessage,
             basePrompt = basePrompt,
             requestType = "generate",
-        )
+        ).text
     }
 
-    suspend fun buildProjectSystemPrompt(
+    internal data class ToolAwarePrompt(val text: String, val relevantTools: Set<String>)
+
+    internal suspend fun buildProjectSystemPrompt(
         context: Context,
         userMessage: String,
         isModification: Boolean
-    ): String {
+    ): ToolAwarePrompt {
         val configuration = context.resources.configuration
         val orientation = when (configuration.orientation) {
             Configuration.ORIENTATION_LANDSCAPE -> "landscape"
@@ -205,6 +207,8 @@ object AppGenerator {
             写文件必须返回该文件的完整最终内容，不输出 diff。收到工具结果后再决定下一项动作。Harness 返回诊断时，先读取相关文件，再逐文件修复，最后重新 finish。
 
             # 数据与 Android 能力
+            - 依据计划为每项业务数据使用真实来源。用户记录首次打开默认为空，显示下一步操作；统计由实际记录计算。仅在用户要求时加入明确标识且与正式数据隔离的示例。数据不可用时显示空态、错误或重试入口，不用预填记录、随机数或固定结果冒充成功。
+            - 启动时读取持久化状态并据此渲染页面；没有已存数据时才使用默认状态。保存后重新打开应恢复已提交的内容。
 
             需要跨启动保存的待办、笔记、设置、历史、游戏进度等运行数据必须使用 `window.MantouApp.storage`；源代码中的 JSON 只用于只读种子数据或配置，不能冒充持久化状态。状态 key 必须严格使用 `project.json` 中的 `appSpec.state.storageKey`。
             读取示例：`var r = JSON.parse(window.MantouApp.storage.storageGet('app-state-v1')); var state = r.success && r.data.exists ? JSON.parse(r.data.valueJson) : {};`
@@ -282,7 +286,7 @@ object AppGenerator {
             userMessage = userMessage,
             basePrompt = basePrompt,
             requestType = "modify",
-        )
+        ).text
     }
 
     internal fun modificationNeedsTools(userMessage: String): Boolean {
@@ -385,7 +389,7 @@ object AppGenerator {
         userMessage: String,
         basePrompt: String,
         requestType: String,
-    ): String {
+    ): ToolAwarePrompt {
         val startedAt = System.currentTimeMillis()
         val selection = ToolPromptRetriever.select(context, userMessage)
         val optimizedPrompt = basePrompt + buildToolsSection(selection.documents)
@@ -399,7 +403,14 @@ object AppGenerator {
             elapsedMs = System.currentTimeMillis() - startedAt,
             source = selection.source,
         )
-        return optimizedPrompt
+        val relevantTools = if (selection.source == "required+fallback-all") {
+            emptySet()
+        } else {
+            selection.documents.mapNotNullTo(mutableSetOf()) { document ->
+                document.name.takeUnless(ToolPromptRetriever.REQUIRED_TOOL_NAMES::contains)
+            }
+        }
+        return ToolAwarePrompt(optimizedPrompt, relevantTools)
     }
 
     private fun buildToolsSection(

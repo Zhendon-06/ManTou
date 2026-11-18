@@ -135,7 +135,8 @@ data class WebAppAcceptanceCriterion(
     val covers: List<WebAppAcceptanceCoverage> = emptyList(),
     val setup: List<WebAppAcceptanceAction> = emptyList(),
     val actions: List<WebAppAcceptanceAction> = emptyList(),
-    val expected: List<WebAppAcceptanceAssertion>
+    val expected: List<WebAppAcceptanceAssertion>,
+    val reopenExpected: List<WebAppAcceptanceAssertion>? = null
 )
 
 data class WebAppAcceptanceContract(
@@ -564,6 +565,31 @@ object WebAppSpecValidator {
                     storageKey = storageKey,
                     diagnostics = diagnostics
                 )
+            }
+            val reopenExpected = criterion.reopenExpected.orEmpty()
+            if (reopenExpected.isNotEmpty()) {
+                if (persistence != WebAppStatePersistence.MANTOU_STORAGE ||
+                    WebAppAcceptanceCoverage.PERSISTENCE !in criterion.covers.orEmpty()
+                ) {
+                    diagnostics += error(
+                        "APP_SPEC_REOPEN_UNEXPECTED",
+                        "reopenExpected in ${criterion.id} requires MANTOU_STORAGE and PERSISTENCE coverage"
+                    )
+                }
+                reopenExpected.forEach { assertion ->
+                    if (assertion.type in setOf(
+                            WebAppAcceptanceAssertionType.STORAGE_EQUALS,
+                            WebAppAcceptanceAssertionType.URL_CONTAINS
+                        )
+                    ) {
+                        diagnostics += error(
+                            "APP_SPEC_REOPEN_ASSERTION_INVALID",
+                            "reopenExpected in ${criterion.id} must assert restored page content or state"
+                        )
+                    } else {
+                        validateAssertion(criterion.id, assertion, selectors, persistence, storageKey, diagnostics)
+                    }
+                }
             }
         }
         duplicateIds.forEach { id ->
