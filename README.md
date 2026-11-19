@@ -15,6 +15,7 @@ ManTou 是一款 Android 智能体应用。用自己的模型服务进行多轮�
 | 智能对话 | 流式回复、Markdown、图片附件、MiMo 语音转文字、历史会话搜索与归档 |
 | 模型切换 | 支持 OpenAI Chat Completions 和 Anthropic Messages 兼容接口，聊天页可直接切换已配置模型 |
 | 网页应用生成 | 根据需求规划、生成和修改多文件网页应用，在应用内检查、预览和发布 |
+| 联网搜索 | 聊天和写代码时可查网页资料，也可以查找可复用图片并保存到工作区或项目 |
 | 工作区与桌面 | 从聊天中指定工作目录，管理项目文件、记忆和资源，在虚拟桌面打开已发布的应用 |
 | 任务进度 | 生成任务显示当前步骤。支持相应系统功能的设备还可通过通知查看进度 |
 | 外观与上下文 | 液态玻璃输入框，支持默认或自定义壁纸。聊天底部的上下文圆环可查看 Token 用量、调整阈值和选择验收策略 |
@@ -26,6 +27,15 @@ ManTou 是一款 Android 智能体应用。用自己的模型服务进行多轮�
 3. 返回聊天页发送消息，或输入「帮我做一个番茄钟」试用应用生成。
 
 Base URL 可填服务根地址、`/v1` 或完整的聊天端点。OpenAI 兼容服务使用 `Authorization: Bearer`，Anthropic 兼容服务使用 `x-api-key`。模型使用服务端的默认采样设置。兼容接口明确拒绝输出上限字段或流式用量选项时，应用会尝试调整对应参数。
+
+## 联网搜索
+
+在「设置 → 联网搜索」开启。每条消息都会由当前模型结合最近的对话判断是否需要联网，能理解「那旧版本呢」「再找一个来源」这样的追问。需要搜索时才提炼关键词并发送给搜索服务。
+
+- 网页用 Tavily。API Key 留空即可使用免密钥搜索，有每日额度限制。也可以在 [Tavily 控制台](https://app.tavily.com) 免费申请自己的密钥，使用每月 1,000 积分的账户额度。馒头使用每次 1 积分的基础搜索。[免密钥说明](https://www.tavily.com/blog/give-nanoclaw-a-live-view-of-the-web-with-tavily-no-api-key-required) · [账户额度说明](https://docs.tavily.com/documentation/api-credits)
+- 图片用 Wikimedia Commons，无需 API Key。生成或编辑项目时，符合条件的下载图片保存在 `assets/search/`，每张图片旁带有署名文件，预览和 ZIP 导出都使用这些本地素材。[Wikimedia Commons 图片接口](https://www.mediawiki.org/wiki/API:Imageinfo)
+
+可以试试「联网查一下 Android WebView 的官方文档，把注意事项补进 README.md」，或「做一个班夫旅行网页，找几张可用的真实风景照当配图」。
 
 ## 网页应用如何运行
 

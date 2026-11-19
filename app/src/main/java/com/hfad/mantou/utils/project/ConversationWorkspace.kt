@@ -205,6 +205,10 @@ internal class ConversationWorkspace(private val filesDir: File) {
         !isManagedInternal(file) && file in resourceFiles(importDirectory(name)) && file.delete()
     }
 
+    fun searchAssetRoot(path: String?): File = directory(path).also {
+        require(!isManagedInternal(it, includeDrafts = true)) { "请从项目根目录导入图片" }
+    }
+
     fun directory(path: String?): File {
         if (path == null || path == ROOT_PATH) return filesDir.canonicalFile
         require(path.startsWith("$ROOT_PATH/")) { "无效的工作区目录" }

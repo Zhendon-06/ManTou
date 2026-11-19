@@ -288,6 +288,9 @@ class ChatRepository(private val chatDao: ChatDao) {
         return chatDao.getMessagesBySessionIdOnce(sessionId)
     }
 
+    suspend fun getRecentMessages(sessionId: Long, throughMessageId: Long, limit: Int): List<ChatMessageEntity> =
+        chatDao.getRecentMessages(sessionId, throughMessageId, limit).asReversed()
+
     suspend fun getMessageById(messageId: Long): ChatMessageEntity? {
         return chatDao.getMessageById(messageId)
     }

@@ -28,6 +28,7 @@ import com.hfad.mantou.data.logging.elapsedMillisSince
 import com.hfad.mantou.data.logging.record
 import com.hfad.mantou.data.preferences.ContextLimitStore
 import com.hfad.mantou.data.preferences.HarnessSettingsStore
+import com.hfad.mantou.data.preferences.OnlineSearchSettingsStore
 import com.hfad.mantou.data.repository.ChatRepository
 import com.hfad.mantou.service.HarnessForegroundServiceController
 import com.hfad.mantou.service.HarnessProgress
@@ -87,6 +88,7 @@ import kotlin.math.min
 class ChatSessionRuntime private constructor(private val application: Application) : ChatSession {
     private val checkpoints = GenerationCheckpointStore(File(application.filesDir, ConversationWorkspace.PRIVATE_CHECKPOINTS))
     private val workspaces = ConversationWorkspace(application.filesDir)
+    private val onlineResearch = OnlineResearch()
     private val workspaceSelections = application.getSharedPreferences("conversation_workspaces", Context.MODE_PRIVATE)
     private val checkpointRevision = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
     private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -444,8 +446,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 val finalImagePath = imagePath ?: imageUris?.firstOrNull()?.toString()
                 val imageBase64List = loadImageBase64List(imagePath, imageUris)
 
-                repository.sendUserMessage(sessionId, content, finalImagePath)
-                state.userMessagePersisted = true
+                state.userMessageId = repository.sendUserMessage(sessionId, content, finalImagePath)
 
                 if (repository.getMessageCount(sessionId) == 1) {
                     repository.updateSessionTitle(sessionId, content.ifEmpty { "[图片]" })
@@ -481,7 +482,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         imageBase64List: List<String>
     ) {
         if (AppIntentDetector.isWorkspaceFileRequest(content)) {
-            normalChatFlow(state, config, imageBase64List)
+            normalChatFlow(state, config, content, imageBase64List, editsFiles = true)
             return
         }
 
@@ -524,7 +525,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         }
 
         if (!isAppIntent) {
-            normalChatFlow(state, config, imageBase64List)
+            normalChatFlow(state, config, content, imageBase64List)
             return
         }
 
@@ -850,12 +851,25 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         }
 
         try {
+            val research = researchForTurn(state, config, filteredInput.content, forCode = true, diagnosticId = runId) { progress ->
+                withContext(Dispatchers.Main.immediate) {
+                    updateStreamingStatusText(state, progress.message)
+                    updateHarnessStage(
+                        state = state,
+                        phase = GenerateTaskState.Phase.PREPARING,
+                        stage = GenerateTaskState.Stage.PROMPT,
+                        outcome = GenerateTaskState.Outcome.RUNNING,
+                        message = progress.message,
+                        isModification = isModification
+                    )
+                }
+            }
             val resourcePaths = withContext(Dispatchers.IO) { workspaces.assetPaths(state.workspacePath) }
             val preparedProject = if (existingFile == null) {
                 planAndCreateWebProject(
                     state = state,
                     config = config,
-                    userRequirement = filteredInput.promptPayload + workspaceResourcePrompt(resourcePaths),
+                    userRequirement = filteredInput.promptPayload + workspaceResourcePrompt(resourcePaths) + research.planningContext(),
                     runId = runId,
                     traceLogger = traceLogger
                 )
@@ -920,6 +934,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 checkpoints.attachDraft(state.sessionId, runId, preparedProject.snapshot.contentRoot, state.checkpointWorkspaceKey)
                 workspaces.copyResources(state.workspacePath, resourcePaths, preparedProject.snapshot.contentRoot)
             }
+            val researchContext = research.install { preparedProject.snapshot.contentRoot }
             val binding = MutableWebProjectBinding(
                 workspace = preparedProject.workspace,
                 projectRoot = preparedProject.snapshot.projectRoot,
@@ -1033,7 +1048,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             val validation = HarnessSettingsStore.validation(application)
             val scopeSummary = "${complexity.level.label} · ${complexity.evidence.joinToString("、")}"
             val projectSystemPrompt = "# 本轮实现重点\n${complexity.level.guidance}\n\n" +
-                preparedPrompt.text + workspaceResourcePrompt(copiedResources)
+                preparedPrompt.text + workspaceResourcePrompt(copiedResources) + researchContext.instructions
             traceLogger.record(
                 runId = runId,
                 component = "ORCHESTRATOR",
@@ -1239,6 +1254,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                         workspacePath = binding.contentRoot.absolutePath,
                         systemPrompt = projectSystemPrompt,
                         userInput = filteredInput.content,
+                        referenceContext = researchContext.prompt,
                         artifactPath = binding.entryFile.absolutePath,
                         selfTestScript = if (validation.shallowAcceptance) {
                             GeneratedAppHarnessScripts.basicScenarios(binding.manifest.appSpec?.acceptanceContract)
@@ -1372,7 +1388,8 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                         state = state,
                         release = release,
                         isModification = isModification,
-                        result = result
+                        result = result,
+                        researchFooter = researchContext.footer + research.sourceLinks()
                     )
                     traceLogger.record(
                         runId = runId,
@@ -1755,7 +1772,8 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         state: StreamingSessionState,
         release: WebAppProjectSnapshot,
         isModification: Boolean,
-        result: HarnessRunResult.Delivered
+        result: HarnessRunResult.Delivered,
+        researchFooter: String
     ) {
         val testSummary = result.testCounts?.summary()
         val releaseSummary = when {
@@ -1791,23 +1809,24 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             removeStreamingPlaceholder(state)
             state.thinkingContent.clear()
         }
+        val completionMessage = if (testSummary != null) {
+            "$releaseSummary。点击下方预览 👇"
+        } else if (isModification) {
+            if (result.selfTestBypassed) {
+                "项目修改已完成，并通过构建、WebView 检查和测试集；自测非阻塞放行，点击下方查看 👇"
+            } else {
+                "项目修改已完成，并通过构建、WebView 检查、自测和测试集，点击下方查看 👇"
+            }
+        } else {
+            if (result.selfTestBypassed) {
+                "多文件 Web 应用已生成，并通过构建、WebView 检查和测试集；自测非阻塞放行，点击下方预览 👇"
+            } else {
+                "多文件 Web 应用已生成，并通过完整 Harness，点击下方预览 👇"
+            }
+        }
         addFinalAssistantMessage(
             state = state,
-            content = if (testSummary != null) {
-                "$releaseSummary。点击下方预览 👇"
-            } else if (isModification) {
-                if (result.selfTestBypassed) {
-                    "项目修改已完成，并通过构建、WebView 检查和测试集；自测非阻塞放行，点击下方查看 👇"
-                } else {
-                    "项目修改已完成，并通过构建、WebView 检查、自测和测试集，点击下方查看 👇"
-                }
-            } else {
-                if (result.selfTestBypassed) {
-                    "多文件 Web 应用已生成，并通过构建、WebView 检查和测试集；自测非阻塞放行，点击下方预览 👇"
-                } else {
-                    "多文件 Web 应用已生成，并通过完整 Harness，点击下方预览 👇"
-                }
-            },
+            content = completionMessage + researchFooter,
             appHtmlPath = release.entryFile.absolutePath
         )
         withContext(Dispatchers.Main.immediate) {
@@ -1897,15 +1916,29 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
     private suspend fun normalChatFlow(
         state: StreamingSessionState,
         config: ChatCallConfig,
-        imageBase64List: List<String>
+        content: String,
+        imageBase64List: List<String>,
+        editsFiles: Boolean = false
     ) {
         val sessionId = state.sessionId
         val historyMessages = repository.getMessagesBySessionIdOnce(sessionId)
+        state.thinkingContent.clear()
+        state.reconnectPrefixPending = ""
+        addStreamingPlaceholder(state, status = "正在思考", useLoadingLayout = false)
+        val research = researchForTurn(state, config, content, forCode = editsFiles, historyMessages = historyMessages) {
+            updateStreamingStatusText(state, it.message)
+        }
+        val researchContext = if (editsFiles) {
+            research.install { workspaces.searchAssetRoot(state.workspacePath) }
+        } else research.chatContext()
+        clearReconnectStatus(state)
         val agentPrompt = withContext(Dispatchers.IO) {
             AgentWorkspace.buildSystemPrompt(application)
         }
-        val systemPrompt = agentPrompt + "\n\n" + WorkspaceFileActionProtocol.instructions(state.workspacePath)
-        val apiMessages = buildApiMessages(historyMessages, systemPrompt, imageBase64List)
+        val systemPrompt = agentPrompt + "\n\n" + WorkspaceFileActionProtocol.instructions(state.workspacePath) +
+            researchContext.instructions
+        val apiMessages = buildApiMessages(historyMessages, systemPrompt, imageBase64List) +
+            listOfNotNull(researchContext.prompt.takeIf(String::isNotEmpty)?.let { ApiMessage(ChatMessage.ROLE_USER, it) })
 
         val request = ChatRequest(
             model = config.model,
@@ -1913,17 +1946,39 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             stream = true
         )
 
-        state.thinkingContent.clear()
-        state.reconnectPrefixPending = ""
-        addStreamingPlaceholder(state, status = "正在思考", useLoadingLayout = false)
+        collectChatStreamWithReconnect(state, config, request, researchContext.footer)
+    }
 
-        collectChatStreamWithReconnect(state, config, request)
+    private suspend fun researchForTurn(
+        state: StreamingSessionState,
+        config: ChatCallConfig,
+        content: String,
+        forCode: Boolean,
+        diagnosticId: String = "session-${state.sessionId}",
+        historyMessages: List<ChatMessageEntity>? = null,
+        onProgress: suspend (ResearchProgress) -> Unit
+    ): ResearchFindings {
+        val messageId = requireNotNull(state.userMessageId)
+        val messages = historyMessages
+            ?: repository.getRecentMessages(state.sessionId, messageId, RESEARCH_HISTORY_LIMIT + 1)
+        val currentMessage = messages.lastOrNull { it.messageId == messageId }
+        return onlineResearch.find(
+            requirement = currentMessage?.content ?: content,
+            settings = OnlineSearchSettingsStore.load(application),
+            forCode = forCode,
+            config = config,
+            diagnosticId = diagnosticId,
+            stream = { request -> trackedChatStream(state.sessionId, config, request) },
+            history = messages.filter { it.messageId < messageId }.takeLast(RESEARCH_HISTORY_LIMIT),
+            onProgress = onProgress
+        )
     }
 
     private suspend fun collectChatStreamWithReconnect(
         state: StreamingSessionState,
         config: ChatCallConfig,
-        request: ChatRequest
+        request: ChatRequest,
+        researchFooter: String
     ) {
         var reconnectDeadlineAt: Long? = null
         var baseRequest = request
@@ -2015,7 +2070,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                             if (readingAction) {
                                 addFinalAssistantMessage(state, "本轮已达到工作区工具调用上限。请发送下一条消息继续。")
                             } else if (finalContent.isNotEmpty()) {
-                                addFinalAssistantMessage(state, finalContent)
+                                addFinalAssistantMessage(state, finalContent + researchFooter)
                             }
                             state.streamingContent.clear()
                             state.thinkingContent.clear()
@@ -2952,7 +3007,7 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                     }
 
                     _activeModelName.value = config.model
-                    state.userMessagePersisted = true
+                    state.userMessageId = editedMessage.messageId
 
                     val imageBase64List = loadImageBase64List(imagePath = editedMessage.imagePath)
                     generateResponseForPersistedUserMessage(state, config, content, imageBase64List)
@@ -3035,7 +3090,7 @@ private data class StreamingSessionState(
     val streamingContent: StringBuilder = StringBuilder(),
     val thinkingContent: StringBuilder = StringBuilder(),
     var isGeneratingApp: Boolean = false,
-    var userMessagePersisted: Boolean = false,
+    var userMessageId: Long? = null,
     var hasFinalAssistantMessage: Boolean = false,
     var lastStreamingContentUpdateAt: Long = 0L,
     var lastStreamingThinkingUpdateAt: Long = 0L,
@@ -3045,6 +3100,7 @@ private data class StreamingSessionState(
     var reconnectPrefixPending: String = ""
 ) {
     val checkpointWorkspaceKey = ConversationWorkspace.checkpointKey(workspacePath)
+    val userMessagePersisted: Boolean get() = userMessageId != null
 }
 
 private fun ChatMessageEntity.toChatMessage() = ChatMessage(

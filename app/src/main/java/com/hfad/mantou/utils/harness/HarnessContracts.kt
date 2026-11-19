@@ -24,7 +24,8 @@ data class HarnessRunRequest(
     val planPath: String? = null,
     val fileTasks: List<HarnessFileTask> = emptyList(),
     val metadata: Map<String, String> = emptyMap(),
-    val shallowAcceptance: Boolean = false
+    val shallowAcceptance: Boolean = false,
+    val referenceContext: String = ""
 )
 
 data class HarnessPreparedPrompt(

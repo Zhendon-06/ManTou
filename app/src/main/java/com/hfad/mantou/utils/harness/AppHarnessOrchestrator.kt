@@ -179,7 +179,8 @@ class AppHarnessOrchestrator(
             message = "正在组装 Harness 提示词"
         )
         messages += HarnessMessage(HarnessMessageRole.SYSTEM, preparedPrompt.systemPrompt)
-        messages += HarnessMessage(HarnessMessageRole.USER, preparedPrompt.userPrompt)
+        val userPrompt = preparedPrompt.userPrompt + request.referenceContext
+        messages += HarnessMessage(HarnessMessageRole.USER, userPrompt)
         emit(
             stage = GenerateTaskState.Stage.PROMPT,
             outcome = GenerateTaskState.Outcome.PASSED,
@@ -536,7 +537,7 @@ class AppHarnessOrchestrator(
                 )
                 val taskMessages = mutableListOf(
                     HarnessMessage(HarnessMessageRole.SYSTEM, preparedPrompt.systemPrompt),
-                    HarnessMessage(HarnessMessageRole.USER, preparedPrompt.userPrompt),
+                    HarnessMessage(HarnessMessageRole.USER, userPrompt),
                     HarnessMessage(
                         HarnessMessageRole.USER,
                         buildFileTaskPrompt(task, taskNumber, scheduledTasks.size)

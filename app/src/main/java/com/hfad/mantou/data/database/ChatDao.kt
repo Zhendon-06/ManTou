@@ -119,6 +119,12 @@ interface ChatDao {
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY timestamp ASC")
     suspend fun getMessagesBySessionIdOnce(sessionId: Long): List<ChatMessageEntity>
 
+    @Query("""
+        SELECT * FROM chat_messages WHERE sessionId = :sessionId AND messageId <= :throughMessageId
+        ORDER BY messageId DESC LIMIT :limit
+    """)
+    suspend fun getRecentMessages(sessionId: Long, throughMessageId: Long, limit: Int): List<ChatMessageEntity>
+
     /**
      * 根据 messageId 查询单条消息
      */

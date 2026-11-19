@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="online_search_title">联网搜索</string>
+    <string name="online_search_off">已关闭 · 支持搜索网页和图片素材</string>
+    <string name="online_search_keyless">已开启 · 免密钥网页搜索和图片搜索</string>
+    <string name="online_search_key_configured">已开启 · 使用自己的 Tavily 额度</string>
+    <string name="online_search_enable">允许对话和项目联网搜索</string>
+    <string name="online_search_explanation">开启后，馒头会结合最近对话逐条判断是否需要联网。需要时才把关键词发送给 Tavily 或 Wikimedia Commons。Tavily 密钥留空可使用免密钥额度。</string>
+    <string name="online_search_tavily_key">Tavily API Key（选填）</string>
+    <string name="online_search_invalid_key">请输入有效的 Tavily API Key</string>
+    <string name="online_search_register">https://app.tavily.com</string>
+</resources>
