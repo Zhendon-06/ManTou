@@ -190,6 +190,35 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     private var showArchivedSessions: Boolean = false
     private var adaptiveTextColor: Int = Color.rgb(32, 37, 53)
     private var pendingResourceWorkspace: String? = null
+    private var pendingWorkspaceExport: String? = null
+
+    private val workspaceExportPicker = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val path = pendingWorkspaceExport
+        pendingWorkspaceExport = null
+        val uri = result.data?.data
+        if (result.resultCode == android.app.Activity.RESULT_OK && path != null && uri != null) {
+            val context = requireContext().applicationContext
+            lifecycleScope.launch {
+                val exported = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val file = exportableWorkspaceFile(context, path) ?: error("文件已移走或删除")
+                        file.inputStream().use { input ->
+                            checkNotNull(context.contentResolver.openOutputStream(uri, "w")).use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                    }
+                }
+                Toast.makeText(
+                    context,
+                    if (exported.isSuccess) "文件已导出" else "导出失败：${exported.exceptionOrNull()?.message.orEmpty()}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
 
     private val workspaceResourcePicker = registerForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -240,6 +269,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pendingResourceWorkspace = savedInstanceState?.getString(PENDING_RESOURCE_WORKSPACE)
+        pendingWorkspaceExport = savedInstanceState?.getString("pending_workspace_export")
         webAppDeviceHost = WebAppDeviceHost(requireActivity(), this, this)
         cameraPhotoHost = CameraPhotoHost(
             activity = requireActivity(),
@@ -252,6 +282,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString(PENDING_RESOURCE_WORKSPACE, pendingResourceWorkspace)
+        outState.putString("pending_workspace_export", pendingWorkspaceExport)
     }
 
     override fun onCreateView(
@@ -804,6 +835,7 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         var path = viewModel.selectedWorkspace.value ?: ConversationWorkspace.ROOT_PATH
         val adapter = WorkspaceFileAdapter(
             onFileClick = ::handleWorkspaceFileClick,
+            onFileLongClick = ::handleWorkspaceFileLongClick,
             onDirectoryClick = { node ->
                 path = node.displayPath
                 picker.tvDirectoryPath.text = path
@@ -1062,7 +1094,18 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
         val resourceWorkspace = node.displayPath.takeIf { resourceMarker in it }
             ?.substringBeforeLast(resourceMarker)
         if (resourceWorkspace == null && !WorkspaceFileOpenPolicy.isGeneratedAppPath(node.displayPath)) {
-            return false
+            val file = exportableWorkspaceFile(requireContext(), node.displayPath) ?: return false
+            val mime = android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(file.extension.lowercase()) ?: "application/octet-stream"
+            showActionMenu(listOf(Option("导出文件", icon = R.drawable.ic_file_outline) {
+                pendingWorkspaceExport = node.displayPath
+                workspaceExportPicker.launch(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = mime
+                    putExtra(Intent.EXTRA_TITLE, file.name)
+                })
+            }))
+            return true
         }
         val file = node.absolutePath?.let(::File) ?: return false
         if (!file.exists()) {
@@ -1088,6 +1131,13 @@ class MainFragment : Fragment(), CameraPhotoBridge.Host {
             )
         )
         return true
+    }
+
+    private fun exportableWorkspaceFile(context: Context, path: String): File? {
+        val workspaces = ConversationWorkspace(context.filesDir)
+        val root = workspaces.linuxDirectory(path.substringBeforeLast('/')) ?: return null
+        return runCatching { workspaces.linuxFile(root, path.substringAfterLast('/')) }
+            .getOrNull()?.takeIf(File::isFile)
     }
 
     private fun showRenameWorkspaceFileDialog(file: File) {

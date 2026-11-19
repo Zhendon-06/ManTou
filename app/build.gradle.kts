@@ -8,7 +8,32 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+val includeLinuxRuntime = providers.gradleProperty("withLinuxRuntime").orNull == "true"
+val linuxAssets = layout.buildDirectory.dir("generated/linuxRuntime/assets")
+
+if (includeLinuxRuntime) {
+    val prepareLinuxRuntime = tasks.register<Exec>("prepareLinuxRuntime") {
+        val defaultPython = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
+        val output = linuxAssets.get().dir("linux-runtime/bin")
+        commandLine(
+            providers.gradleProperty("linuxPython").getOrElse(defaultPython),
+            "scripts/build_linux_runtime.py",
+            output.asFile.absolutePath,
+            providers.gradleProperty("linuxNode").getOrElse("node")
+        )
+        workingDir(rootProject.projectDir)
+        inputs.file(rootProject.file("scripts/build_linux_runtime.py"))
+        inputs.files(listOf("init", "runner.py", "snapshot.mjs", "packages.sha256")
+            .map { rootProject.file("scripts/linux-guest/$it") })
+        outputs.dir(output)
+    }
+    tasks.matching { it.name == "preBuild" }.configureEach { dependsOn(prepareLinuxRuntime) }
+}
+
 android {
+    if (includeLinuxRuntime) {
+        sourceSets.getByName("main").assets.srcDir(linuxAssets)
+    }
     namespace = "com.hfad.mantou"
     compileSdk = 37
 

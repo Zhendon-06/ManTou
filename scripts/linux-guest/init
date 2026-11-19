@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+trap 'printf "\nMANTOU_BOOT_ERROR\n" >/dev/ttyS0' EXIT
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+mount -t devtmpfs devtmpfs /dev
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+modprobe 9p
+modprobe 9pnet_virtio
+mount -t 9p -o trans=virtio,version=9p2000.L host9p /mnt
+python3 -B --check-hash-based-pycs never /runner.py
+printf '\nMANTOU_JOB_DONE\n' >/dev/ttyS0
+trap - EXIT
+exec sleep infinity

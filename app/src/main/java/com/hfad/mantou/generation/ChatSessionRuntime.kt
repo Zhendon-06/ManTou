@@ -66,6 +66,10 @@ import com.hfad.mantou.utils.project.WebAppProjectWorkspace
 import com.hfad.mantou.utils.project.WebAppProjectValidator
 import com.hfad.mantou.utils.project.WebProjectFileTool
 import com.hfad.mantou.utils.project.WebProjectToolExecutionResult
+import com.hfad.mantou.utils.linux.AndroidLinuxWorkspace
+import com.hfad.mantou.utils.linux.LinuxWorkspaceJob
+import com.hfad.mantou.utils.linux.LinuxWorkspaceSettings
+import com.hfad.mantou.utils.linux.RUN_LINUX_TOOL
 import com.hfad.mantou.utils.project.WorkspaceFileActionProtocol
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -1076,8 +1080,11 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 )
             )
             var lastPartialSaveAt = 0L
+            val linuxEnabled = LinuxWorkspaceSettings.enabled(application) &&
+                AndroidLinuxWorkspace.isAvailable(application)
             val modelRepair = StreamingHarnessModelRepair(
                 config = config,
+                linuxEnabled = linuxEnabled,
                 maxTokens = AppGenerator.resolveProjectFileOutputLimit(
                     ContextLimitStore.getTokenLimit(application)
                 ),
@@ -1129,7 +1136,8 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                 state = state,
                 binding = binding,
                 projectFileTool = projectFileTool,
-                isModification = isModification
+                isModification = isModification,
+                linuxEnabled = linuxEnabled
             )
 
             inspectorWebView = withContext(Dispatchers.Main.immediate) {
@@ -1662,12 +1670,51 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         state: StreamingSessionState,
         binding: MutableWebProjectBinding,
         projectFileTool: WebProjectFileTool,
-        isModification: Boolean
+        isModification: Boolean,
+        linuxEnabled: Boolean
     ): HarnessFileTool {
         return HarnessFileTool { request ->
             val call = request.call
             val requestedPath = call.arguments[WebProjectFileTool.ARG_PATH]
             val result = when {
+                call.name == RUN_LINUX_TOOL -> {
+                    check(linuxEnabled && LinuxWorkspaceSettings.enabled(application)) {
+                        "请在设置中开启 Linux 工作区"
+                    }
+                    val job = LinuxWorkspaceJob.parse(call.arguments.getValue(WebProjectFileTool.ARG_CONTENT))
+                    val outputPath = job.output
+                    require(outputPath == requestedPath)
+                    if (outputPath != null) {
+                        require(outputPath in binding.declaredPaths && outputPath != PROJECT_PLAN_FILE_NAME &&
+                            !outputPath.startsWith("${ConversationWorkspace.IMPORTED_ASSET_PATH}/")
+                        ) { "Linux 输出需要是 project.json 中已声明的可写项目文件：$outputPath" }
+                    }
+                    val execution = AndroidLinuxWorkspace.run(application, binding.contentRoot, job)
+                    val written = if (execution.exitCode == 0 && outputPath != null) {
+                        val bytes = checkNotNull(execution.output) { "脚本没有生成声明的文件：$outputPath" }
+                        withContext(Dispatchers.IO) {
+                            if (outputPath == binding.manifest.entryPoint) {
+                                val decoder = Charsets.UTF_8.newDecoder()
+                                val html = decoder.decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+                                projectFileTool.write(outputPath, AppGenerator.ensureWebAppIdentity(html))
+                            } else {
+                                projectFileTool.writeLinuxOutput(outputPath, bytes)
+                            }
+                        }
+                    } else {
+                        null
+                    }
+                    WebProjectToolExecutionResult(
+                        success = execution.exitCode == 0,
+                        output = buildString {
+                            append("Linux 脚本退出码 ${execution.exitCode}")
+                            written?.let { append("，已保存到 ${it.path}") }
+                            if (execution.log.isNotBlank()) append('\n').append(execution.log)
+                        },
+                        changedFiles = listOfNotNull(written?.path)
+                    )
+                }
+
                 requestedPath?.startsWith("${ConversationWorkspace.IMPORTED_ASSET_PATH}/") == true &&
                     call.name in setOf(WebProjectFileTool.TOOL_WRITE_FILE, WebProjectFileTool.TOOL_DELETE_FILE) ->
                     WebProjectToolExecutionResult(
@@ -1935,7 +1982,13 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         val agentPrompt = withContext(Dispatchers.IO) {
             AgentWorkspace.buildSystemPrompt(application)
         }
-        val systemPrompt = agentPrompt + "\n\n" + WorkspaceFileActionProtocol.instructions(state.workspacePath) +
+        val linuxDirectory = withContext(Dispatchers.IO) {
+            if (LinuxWorkspaceSettings.enabled(application) && AndroidLinuxWorkspace.isAvailable(application)) {
+                workspaces.linuxDirectory(state.workspacePath)
+            } else null
+        }
+        val systemPrompt = agentPrompt + "\n\n" +
+            WorkspaceFileActionProtocol.instructions(state.workspacePath, linuxDirectory != null) +
             researchContext.instructions
         val apiMessages = buildApiMessages(historyMessages, systemPrompt, imageBase64List) +
             listOfNotNull(researchContext.prompt.takeIf(String::isNotEmpty)?.let { ApiMessage(ChatMessage.ROLE_USER, it) })
@@ -1946,7 +1999,27 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             stream = true
         )
 
-        collectChatStreamWithReconnect(state, config, request, researchContext.footer)
+        collectChatStreamWithReconnect(state, config, request, researchContext.footer, linuxDirectory)
+    }
+
+    private suspend fun executeWorkspaceLinux(root: File, body: String): String {
+        val job = LinuxWorkspaceJob.parse(body)
+        job.inputs.forEach { workspaces.linuxFile(root, it) }
+        job.output?.let { path ->
+            require(!workspaces.linuxFile(root, path).exists()) { "输出路径已存在：$path" }
+        }
+        val execution = AndroidLinuxWorkspace.run(application, root, job)
+        val output = job.output?.takeIf { execution.exitCode == 0 }
+        if (output != null) {
+            workspaces.saveLinuxOutput(root, output, checkNotNull(execution.output) {
+                "脚本没有生成声明的文件：$output"
+            })
+        }
+        return com.google.gson.Gson().toJson(mapOf(
+            "exitCode" to execution.exitCode,
+            "log" to execution.log,
+            "saved" to output
+        ))
     }
 
     private suspend fun researchForTurn(
@@ -1978,7 +2051,8 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         state: StreamingSessionState,
         config: ChatCallConfig,
         request: ChatRequest,
-        researchFooter: String
+        researchFooter: String,
+        linuxDirectory: File?
     ) {
         var reconnectDeadlineAt: Long? = null
         var baseRequest = request
@@ -2044,8 +2118,17 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
                                 val command = possibleAction.toString()
                                 val result = withContext(Dispatchers.IO) {
                                     runCatching {
-                                        val tool = WorkspaceFileActionProtocol.parse(command, "workspace-$toolCalls")
-                                        workspaces.execute(state.workspacePath, tool.name, tool.arguments)
+                                        val tool = WorkspaceFileActionProtocol.parse(
+                                            command, "workspace-$toolCalls", linuxDirectory != null
+                                        )
+                                        if (tool.name == RUN_LINUX_TOOL) {
+                                            check(LinuxWorkspaceSettings.enabled(application)) {
+                                                "请在设置中开启 Linux 工作区"
+                                            }
+                                            executeWorkspaceLinux(checkNotNull(linuxDirectory), tool.arguments.getValue("content"))
+                                        } else {
+                                            workspaces.execute(state.workspacePath, tool.name, tool.arguments)
+                                        }
                                     }
                                 }
                                 val messages = baseRequest.messages + listOf(

@@ -17,6 +17,8 @@ import com.hfad.mantou.R
 import com.hfad.mantou.data.preferences.OnlineSearchSettings
 import com.hfad.mantou.data.preferences.OnlineSearchSettingsStore
 import com.hfad.mantou.databinding.ActivitySettingsBinding
+import com.hfad.mantou.utils.linux.AndroidLinuxWorkspace
+import com.hfad.mantou.utils.linux.LinuxWorkspaceSettings
 import com.hfad.mantou.view.dialog.ManTouDialog
 import com.hfad.mantou.view.dialog.ManTouDialog.Action
 import com.hfad.mantou.view.dialog.dialogDp
@@ -44,6 +46,16 @@ class SettingsActivity : AppCompatActivity() {
         }
         updateOnlineSearchSummary()
         binding.rowOnlineSearch.setOnClickListener { showOnlineSearchSettings() }
+        binding.linuxWorkspaceSwitch.apply {
+            isEnabled = AndroidLinuxWorkspace.isAvailable(this@SettingsActivity)
+            isChecked = isEnabled && LinuxWorkspaceSettings.enabled(this@SettingsActivity)
+            setOnCheckedChangeListener { _, enabled ->
+                LinuxWorkspaceSettings.setEnabled(this@SettingsActivity, enabled)
+            }
+        }
+        if (!binding.linuxWorkspaceSwitch.isEnabled) {
+            binding.linuxWorkspaceSummary.setText(R.string.linux_workspace_unavailable)
+        }
         binding.rowWorkspaceMemory.setOnClickListener {
             startActivity(Intent(this, WorkspaceMemorySettingsActivity::class.java))
         }

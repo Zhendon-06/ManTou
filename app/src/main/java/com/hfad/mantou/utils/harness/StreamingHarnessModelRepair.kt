@@ -10,6 +10,8 @@ import com.hfad.mantou.data.logging.HarnessTraceLogger
 import com.hfad.mantou.data.logging.HarnessTraceStatus
 import com.hfad.mantou.data.logging.elapsedMillisSince
 import com.hfad.mantou.data.logging.record
+import com.hfad.mantou.utils.linux.LinuxWorkspaceJob
+import com.hfad.mantou.utils.linux.RUN_LINUX_TOOL
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
@@ -25,6 +27,7 @@ class StreamingHarnessModelRepair(
     private val onThinking: suspend (String) -> Unit = {},
     private val onProgress: suspend (HarnessModelStreamProgress) -> Unit = {},
     private val traceLogger: HarnessTraceLogger = HarnessTraceLogger {},
+    private val linuxEnabled: Boolean = false,
     private val streamChatCompletion: (ChatCallConfig, ChatRequest) -> Flow<StreamingApiService.StreamEvent> =
         StreamingApiService::streamChatCompletion
 ) : HarnessModelRepair {
@@ -41,7 +44,7 @@ class StreamingHarnessModelRepair(
         val turnSequence = callSequence.incrementAndGet()
         val apiRequest = ChatRequest(
             model = config.model,
-            messages = HarnessSingleActionProtocol.toApiMessages(request.messages),
+            messages = HarnessSingleActionProtocol.toApiMessages(request.messages, linuxEnabled),
             stream = true,
             maxTokens = maxTokens,
             reasoningEffort = config.webProjectReasoningEffort.takeUnless { reasoningEffortRejected.get() },
@@ -225,7 +228,7 @@ class StreamingHarnessModelRepair(
                     "response_sha256" to sha256(response.toString())
                 )
             )
-            val turn = HarnessSingleActionProtocol.parse(response.toString(), callId)
+            val turn = HarnessSingleActionProtocol.parse(response.toString(), callId, linuxEnabled)
             traceLogger.record(
                 runId = request.runId,
                 component = "MODEL_PROTOCOL",
@@ -430,9 +433,10 @@ internal object HarnessSingleActionProtocol {
     private val readPattern = Regex("""\A<mantou-read path="([^"\r\n]+)"\s*/>\z""")
     private val listPattern = Regex("""\A<mantou-list path="([^"\r\n]+)"\s*/>\z""")
     private val deletePattern = Regex("""\A<mantou-delete path="([^"\r\n]+)"\s*/>\z""")
+    private val linuxPattern = Regex("""\A<mantou-run-linux>([\s\S]*)</mantou-run-linux>\z""")
     private val finishPattern = Regex("""\A<mantou-finish\s*/>\z""")
     private val actionTagPattern = Regex(
-        """<\s*/?\s*mantou-(?:write|read|list|delete|finish)\b""",
+        """<\s*/?\s*mantou-(?:write|read|list|delete|finish|run-linux)\b""",
         RegexOption.IGNORE_CASE
     )
     private val historyWritePattern = Regex(
@@ -460,7 +464,19 @@ internal object HarnessSingleActionProtocol {
         `<mantou-history-omitted>` after the tool has already applied them.
     """.trimIndent()
 
-    fun parse(response: String, callId: String): HarnessModelTurn {
+    private val linuxPrompt = """
+        The local Linux action is also available when a computation or file transformation is needed:
+        <mantou-run-linux>{"language":"python","script":"print('hello')","inputs":[],"output":null}</mantou-run-linux>
+        Use "python" for Python 3 with standard libraries, or "shell" for the BusyBox shell.
+        The script starts in /workspace with only the explicitly named project-relative input files.
+        Set output to a declared project-relative file path to save a single result to the draft.
+        In a file task the output must match the target file, and inputs must be task dependencies,
+        the target itself, or user imports under assets/workspace.
+        Set output to null for checks that only need logs. Other changes inside Linux are temporary.
+        Linux has no network connection. Ordinary file edits still use mantou-write.
+    """.trimIndent()
+
+    fun parse(response: String, callId: String, linuxEnabled: Boolean = false): HarnessModelTurn {
         require(callId.isNotBlank()) { "callId cannot be blank" }
         val action = response.trim()
         if (action.isEmpty()) {
@@ -492,6 +508,19 @@ internal object HarnessSingleActionProtocol {
         deletePattern.matchEntire(action)?.let { match ->
             return toolTurn(callId, TOOL_DELETE, decodeAndValidatePath(match.groupValues[1], false))
         }
+        if (linuxEnabled) {
+            linuxPattern.matchEntire(action)?.let { match ->
+                val body = match.groupValues[1]
+                if (actionTagPattern.containsMatchIn(body)) {
+                    throw HarnessModelProtocolException("Linux 动作正文不能包含第二个 workspace 动作")
+                }
+                val job = runCatching { LinuxWorkspaceJob.parse(body) }.getOrElse {
+                    throw HarnessModelProtocolException("Linux 动作参数无效：${it.message?.take(200).orEmpty()}")
+                }
+                val arguments = mapOf("content" to body) + job.output?.let { mapOf("path" to it) }.orEmpty()
+                return HarnessModelTurn(toolCalls = listOf(HarnessToolCall(callId, RUN_LINUX_TOOL, arguments)))
+            }
+        }
         if (finishPattern.matches(action)) {
             return HarnessModelTurn(content = "<mantou-finish/>")
         }
@@ -505,7 +534,7 @@ internal object HarnessSingleActionProtocol {
         throw HarnessModelProtocolException("$reason：${compactForError(action)}")
     }
 
-    fun toApiMessages(messages: List<HarnessMessage>): List<ApiMessage> {
+    fun toApiMessages(messages: List<HarnessMessage>, linuxEnabled: Boolean = false): List<ApiMessage> {
         val system = messages
             .asSequence()
             .filter { it.role == HarnessMessageRole.SYSTEM }
@@ -515,7 +544,8 @@ internal object HarnessSingleActionProtocol {
         val result = mutableListOf(
             ApiMessage(
                 role = "system",
-                content = (system + protocolPrompt).joinToString("\n\n")
+                content = (system + protocolPrompt + listOfNotNull(linuxPrompt.takeIf { linuxEnabled }))
+                    .joinToString("\n\n")
             )
         )
 
@@ -587,6 +617,9 @@ internal object HarnessSingleActionProtocol {
     }
 
     private fun renderToolCall(call: HarnessToolCall): String {
+        if (call.name == RUN_LINUX_TOOL) {
+            return "<mantou-run-linux>${call.arguments["content"].orEmpty()}</mantou-run-linux>"
+        }
         val path = call.arguments["path"]
             ?: throw HarnessModelProtocolException("历史 ${call.name} 动作缺少 path")
         val escapedPath = escapeXmlAttribute(path)

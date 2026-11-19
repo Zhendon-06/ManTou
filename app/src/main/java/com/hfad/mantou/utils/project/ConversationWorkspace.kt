@@ -226,6 +226,33 @@ internal class ConversationWorkspace(private val filesDir: File) {
         return if (relative.isEmpty()) ROOT_PATH else "$ROOT_PATH/$relative"
     }
 
+    fun linuxDirectory(scope: String?): File? {
+        if (scope == null || scope == ROOT_PATH) return null
+        val root = runCatching { directory(scope) }.getOrNull() ?: return null
+        val path = WebProjectPaths.relativePath(filesDir, root)
+        val container = path.substringBefore('/')
+        return root.takeUnless {
+            root.name in CONTAINER_NAMES || (container in CONTAINER_NAMES && container != DIRECTORY) ||
+                isManagedInternal(root, includeDrafts = true)
+        }
+    }
+
+    fun linuxFile(root: File, path: String): File = WebProjectPaths.resolve(root, path).also {
+        require(isVisible(it) && !isManagedInternal(it, includeDrafts = true)) {
+            "Linux 脚本无法访问应用管理的文件：$path"
+        }
+    }
+
+    fun saveLinuxOutput(root: File, path: String, bytes: ByteArray) = synchronized(RESOURCE_LOCK) {
+        val target = linuxFile(root, path)
+        require(!target.exists()) { "文件已存在，请为 Linux 输出选择新路径：$path" }
+        require(bytes.size <= MAX_FILE_BYTES) { "Linux 输出文件超过 8 MiB" }
+        require(target.extension.lowercase(Locale.ROOT) in LINUX_OUTPUT_EXTENSIONS) {
+            "不支持此 Linux 输出格式：$path"
+        }
+        WebProjectPaths.writeBytesAtomically(target, bytes)
+    }
+
     fun execute(scope: String?, tool: String, args: Map<String, String>): String {
         val root = directory(scope)
         val path = args[WebProjectFileTool.ARG_PATH].orEmpty()
@@ -374,9 +401,11 @@ internal class ConversationWorkspace(private val filesDir: File) {
         const val IMPORTED_ASSET_PATH = "assets/workspace"
         val RESOURCE_EXTENSIONS = setOf(
             "png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "svg",
-            "woff", "woff2", "ttf", "otf", "mp3", "wav", "ogg", "mp4", "webm"
+            "woff", "woff2", "ttf", "otf", "mp3", "wav", "ogg", "mp4", "webm",
+            "csv", "tsv"
         )
-        private val BINARY_EXTENSIONS = (RESOURCE_EXTENSIONS - "svg") + setOf(
+        private val LINUX_OUTPUT_EXTENSIONS = RESOURCE_EXTENSIONS + setOf("json", "txt", "md", "zip")
+        private val BINARY_EXTENSIONS = (RESOURCE_EXTENSIONS - setOf("svg", "csv", "tsv")) + setOf(
             "wasm", "zip", "apk", "pdf", "docx", "xlsx", "pptx", "db", "sqlite", "bin"
         )
         private val DIRECTORY_NAME = Regex("[\\p{L}\\p{N}_ -]{1,40}")

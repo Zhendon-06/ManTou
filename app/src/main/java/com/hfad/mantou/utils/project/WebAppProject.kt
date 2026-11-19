@@ -751,7 +751,7 @@ data class WebAppProjectValidationPolicy(
 
     companion object {
         val DEFAULT_ALLOWED_EXTENSIONS = setOf(
-            "html", "htm", "css", "js", "mjs", "json", "svg", "txt", "md",
+            "html", "htm", "css", "js", "mjs", "json", "svg", "txt", "md", "csv", "tsv",
             "png", "jpg", "jpeg", "gif", "webp", "avif", "ico",
             "woff", "woff2", "ttf", "otf", "wasm", "mp3", "wav", "ogg", "mp4", "webm"
         )
@@ -1383,11 +1383,14 @@ internal object WebProjectPaths {
         .joinToString("") { byte -> "%02x".format(byte) }
 
     fun writeTextAtomically(target: File, content: String) {
+        writeBytesAtomically(target, content.toByteArray(Charsets.UTF_8))
+    }
+
+    fun writeBytesAtomically(target: File, bytes: ByteArray) {
         target.parentFile?.mkdirsOrThrow()
         val temporary = File(target.parentFile, ".${target.name}.${UUID.randomUUID()}.tmp")
         try {
             FileOutputStream(temporary).use { stream ->
-                val bytes = content.toByteArray(Charsets.UTF_8)
                 stream.write(bytes)
                 stream.fd.sync()
             }

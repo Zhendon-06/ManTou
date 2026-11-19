@@ -26,12 +26,12 @@ data class WebProjectFileToolPolicy(
 
     companion object {
         val DEFAULT_ALLOWED_EXTENSIONS = setOf(
-            "html", "htm", "css", "js", "mjs", "json", "svg", "txt", "md",
+            "html", "htm", "css", "js", "mjs", "json", "svg", "txt", "md", "csv", "tsv",
             "png", "jpg", "jpeg", "gif", "webp", "avif", "ico",
             "woff", "woff2", "ttf", "otf", "wasm", "mp3", "wav", "ogg", "mp4", "webm"
         )
         val DEFAULT_WRITABLE_EXTENSIONS = setOf(
-            "html", "htm", "css", "js", "mjs", "json", "svg", "txt", "md"
+            "html", "htm", "css", "js", "mjs", "json", "svg", "txt", "md", "csv", "tsv"
         )
     }
 }
@@ -146,12 +146,27 @@ class WebProjectFileTool(
         content: String,
         expectedSha256: String? = null,
         createOnly: Boolean = false
+    ): WebProjectWriteResult = writeBytes(path, content.toByteArray(Charsets.UTF_8), expectedSha256, createOnly)
+
+    internal fun writeLinuxOutput(path: String, content: ByteArray): WebProjectWriteResult =
+        writeBytes(path, content, allowBinary = true)
+
+    private fun writeBytes(
+        path: String,
+        bytes: ByteArray,
+        expectedSha256: String? = null,
+        createOnly: Boolean = false,
+        allowBinary: Boolean = false
     ): WebProjectWriteResult = synchronized(FILE_TOOL_LOCK) {
         requireMutableWorkspace()
         val target = resolve(path)
-        requireAllowedTextFile(target, path)
+        if (allowBinary) {
+            requireAllowedFile(target, path)
+            if (target.extension.lowercase(Locale.US) in policy.writableExtensions) decodeUtf8(bytes)
+        } else {
+            requireAllowedTextFile(target, path)
+        }
         if (target.isDirectory) throw WebAppProjectException("Write target is a directory: $path")
-        val bytes = content.toByteArray(Charsets.UTF_8)
         if (bytes.size.toLong() > policy.maxFileBytes) {
             throw WebAppProjectException("File exceeds ${policy.maxFileBytes} bytes: $path")
         }
@@ -181,7 +196,7 @@ class WebProjectFileTool(
             throw WebAppProjectException("Project size would exceed ${policy.maxTotalBytes} bytes")
         }
 
-        WebProjectPaths.writeTextAtomically(target, content)
+        WebProjectPaths.writeBytesAtomically(target, bytes)
         WebProjectWriteResult(
             path = WebProjectPaths.relativePath(workspaceRoot, target),
             created = !existed,

@@ -5,6 +5,9 @@ import com.hfad.mantou.data.logging.HarnessTraceLogger
 import com.hfad.mantou.data.logging.HarnessTraceStatus
 import com.hfad.mantou.data.logging.elapsedMillisSince
 import com.hfad.mantou.data.logging.record
+import com.hfad.mantou.utils.linux.LinuxWorkspaceJob
+import com.hfad.mantou.utils.linux.RUN_LINUX_TOOL
+import com.hfad.mantou.utils.project.ConversationWorkspace
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -667,7 +670,7 @@ class AppHarnessOrchestrator(
                         diagnostics = compactDiagnostics(result.diagnostics),
                         operation = call.name
                     )
-                    completed = call.name == TOOL_WRITE_FILE &&
+                    completed = (call.name == TOOL_WRITE_FILE || call.name == RUN_LINUX_TOOL) &&
                         call.arguments["path"] == task.path &&
                         result.success &&
                         task.path in result.changedFiles
@@ -1463,7 +1466,7 @@ class AppHarnessOrchestrator(
             appendLine("<harness_file_task_feedback>")
             appendLine("$reason: 目标文件 ${escapeTaskText(task.path)} 尚未成功写入。")
             appendLine("本任务不能提前结束，也不能返回多个动作。")
-            appendLine("请只返回写入 ${escapeTaskText(task.path)} 的单个 mantou-write 动作。")
+            appendLine("请只返回一个能写入 ${escapeTaskText(task.path)} 的可用动作。")
             append("</harness_file_task_feedback>")
         }
     }
@@ -1482,6 +1485,13 @@ class AppHarnessOrchestrator(
         val allowed = when (call.name) {
             TOOL_READ_FILE -> requestedPath in allowedReadPaths
             TOOL_WRITE_FILE -> requestedPath == task.path
+            RUN_LINUX_TOOL -> runCatching {
+                val job = LinuxWorkspaceJob.parse(call.arguments.getValue("content"))
+                job.output == requestedPath && (job.output == null || job.output == task.path) &&
+                    job.inputs.all {
+                        it in allowedReadPaths || it.startsWith("${ConversationWorkspace.IMPORTED_ASSET_PATH}/")
+                    }
+            }.getOrDefault(false)
             else -> false
         }
         if (allowed) return null

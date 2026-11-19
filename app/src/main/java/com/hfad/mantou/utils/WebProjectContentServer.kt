@@ -610,6 +610,8 @@ class WebProjectContentServer private constructor(
                 "json", "map" -> MIME_JSON
                 "webmanifest" -> "application/manifest+json"
                 "txt", "md" -> "text/plain"
+                "csv" -> "text/csv"
+                "tsv" -> "text/tab-separated-values"
                 "xml" -> "application/xml"
                 "svg" -> "image/svg+xml"
                 "png" -> "image/png"

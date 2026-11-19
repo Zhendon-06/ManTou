@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="linux_workspace_title">Linux 工作区</string>
+    <string name="linux_workspace_summary">允许 Agent 在离线隔离环境中运行工作区脚本</string>
+    <string name="linux_workspace_unavailable">此安装包未包含 Linux 运行环境</string>
+</resources>
