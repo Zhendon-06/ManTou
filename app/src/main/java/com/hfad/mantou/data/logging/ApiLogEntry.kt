@@ -24,7 +24,9 @@ data class ApiLogEntry(
     val runId: String? = null,
     val operation: String? = null,
     val iteration: Int? = null,
-    val canceled: Boolean = false
+    val canceled: Boolean = false,
+    val cachedInputTokens: Long? = null,
+    val cacheWriteInputTokens: Long? = null
 ) {
     val inProgress: Boolean
         get() = isStream &&

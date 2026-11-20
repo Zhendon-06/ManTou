@@ -1051,8 +1051,9 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
             val complexity = HarnessTaskComplexity.assess(taskPlan, preparedPrompt.relevantTools)
             val validation = HarnessSettingsStore.validation(application)
             val scopeSummary = "${complexity.level.label} · ${complexity.evidence.joinToString("、")}"
-            val projectSystemPrompt = "# 本轮实现重点\n${complexity.level.guidance}\n\n" +
-                preparedPrompt.text + workspaceResourcePrompt(copiedResources) + researchContext.instructions
+            val projectSystemPrompt = preparedPrompt.text +
+                "\n\n# 本轮实现重点\n${complexity.level.guidance}" +
+                workspaceResourcePrompt(copiedResources) + researchContext.instructions
             traceLogger.record(
                 runId = runId,
                 component = "ORCHESTRATOR",
@@ -1989,14 +1990,15 @@ class ChatSessionRuntime private constructor(private val application: Applicatio
         }
         val systemPrompt = agentPrompt + "\n\n" +
             WorkspaceFileActionProtocol.instructions(state.workspacePath, linuxDirectory != null) +
-            researchContext.instructions
+            "\n\n" + ONLINE_RESEARCH_RULES.trim()
         val apiMessages = buildApiMessages(historyMessages, systemPrompt, imageBase64List) +
             listOfNotNull(researchContext.prompt.takeIf(String::isNotEmpty)?.let { ApiMessage(ChatMessage.ROLE_USER, it) })
 
         val request = ChatRequest(
             model = config.model,
             messages = apiMessages,
-            stream = true
+            stream = true,
+            cacheSystemPrompt = true
         )
 
         collectChatStreamWithReconnect(state, config, request, researchContext.footer, linuxDirectory)

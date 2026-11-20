@@ -33,7 +33,9 @@ internal object ChatHttpRequest {
         if (config.isAnthropic) {
             builder.header("anthropic-version", ANTHROPIC_VERSION)
             if (config.apiKey.isNotEmpty()) builder.header("x-api-key", config.apiKey)
-            return builder.post(buildAnthropicBody(modelRequest).toString().toRequestBody(jsonMediaType)).build()
+            val endpoint = url.toHttpUrl()
+            val cacheSystemPrompt = request.cacheSystemPrompt && endpoint.isHttps && endpoint.host == "api.anthropic.com"
+            return builder.post(buildAnthropicBody(modelRequest, cacheSystemPrompt).toString().toRequestBody(jsonMediaType)).build()
         }
         if (config.apiKey.isNotEmpty()) builder.header("Authorization", "Bearer ${config.apiKey}")
 
@@ -50,7 +52,7 @@ internal object ChatHttpRequest {
 
     internal data class OpenAiChatBody(val json: JsonObject)
 
-    private fun buildAnthropicBody(request: ChatRequest): JsonObject {
+    private fun buildAnthropicBody(request: ChatRequest, cacheSystemPrompt: Boolean): JsonObject {
         val root = JsonObject()
         root.addProperty("model", request.model)
         root.addProperty("max_tokens", request.maxTokens)
@@ -71,7 +73,17 @@ internal object ChatHttpRequest {
             }
         }
         if (systemTexts.isNotEmpty()) {
-            root.addProperty("system", systemTexts.joinToString("\n\n"))
+            val systemText = systemTexts.joinToString("\n\n")
+            if (cacheSystemPrompt && systemText.isNotBlank()) {
+                val block = JsonObject().apply {
+                    addProperty("type", "text")
+                    addProperty("text", systemText)
+                    add("cache_control", JsonObject().apply { addProperty("type", "ephemeral") })
+                }
+                root.add("system", JsonArray().apply { add(block) })
+            } else {
+                root.addProperty("system", systemText)
+            }
         }
         root.add("messages", messagesArr)
         return root

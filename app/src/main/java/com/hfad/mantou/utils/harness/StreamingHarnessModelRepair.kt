@@ -47,6 +47,7 @@ class StreamingHarnessModelRepair(
             messages = HarnessSingleActionProtocol.toApiMessages(request.messages, linuxEnabled),
             stream = true,
             maxTokens = maxTokens,
+            cacheSystemPrompt = true,
             reasoningEffort = config.webProjectReasoningEffort.takeUnless { reasoningEffortRejected.get() },
             diagnosticContext = ApiDiagnosticContext(
                 runId = request.runId,
@@ -544,7 +545,7 @@ internal object HarnessSingleActionProtocol {
         val result = mutableListOf(
             ApiMessage(
                 role = "system",
-                content = (system + protocolPrompt + listOfNotNull(linuxPrompt.takeIf { linuxEnabled }))
+                content = (listOf(protocolPrompt) + system + listOfNotNull(linuxPrompt.takeIf { linuxEnabled }))
                     .joinToString("\n\n")
             )
         )

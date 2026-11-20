@@ -249,6 +249,8 @@ object StreamingApiService {
                     entry.copy(
                         durationMs = System.currentTimeMillis() - requestTrace.startedAtMs,
                         responseBody = "(流式响应已完成，正文未保留)",
+                        cachedInputTokens = tokenUsage.providerCachedInputTokens,
+                        cacheWriteInputTokens = tokenUsage.providerCacheWriteInputTokens,
                         streamCompleted = true,
                         canceled = false
                     )
@@ -381,10 +383,14 @@ object StreamingApiService {
                 ?.takeIf { it.isJsonObject }
                 ?.asJsonObject
                 ?.let { usage ->
+                    val promptDetails = usage.objectValue("prompt_tokens_details")
                     tokenUsage.updateProviderUsage(
                         inputTokens = usage.longValue("prompt_tokens", "input_tokens"),
                         outputTokens = usage.longValue("completion_tokens", "output_tokens"),
-                        totalTokens = usage.longValue("total_tokens")
+                        totalTokens = usage.longValue("total_tokens"),
+                        cachedInputTokens = promptDetails?.longValue("cached_tokens")
+                            ?: usage.longValue("prompt_cache_hit_tokens"),
+                        cacheWriteInputTokens = promptDetails?.longValue("cache_write_tokens")
                     )
                 }
             obj.getAsJsonObject("error")?.let { error ->
@@ -434,24 +440,12 @@ object StreamingApiService {
                 "message_start" -> {
                     obj.getAsJsonObject("message")
                         ?.getAsJsonObject("usage")
-                        ?.let { usage ->
-                            tokenUsage.updateProviderUsage(
-                                inputTokens = usage.longValue("input_tokens"),
-                                outputTokens = usage.longValue("output_tokens"),
-                                totalTokens = null
-                            )
-                        }
+                        ?.let(tokenUsage::updateAnthropicUsage)
                     null
                 }
 
                 "message_delta" -> {
-                    obj.getAsJsonObject("usage")?.let { usage ->
-                        tokenUsage.updateProviderUsage(
-                            inputTokens = usage.longValue("input_tokens"),
-                            outputTokens = usage.longValue("output_tokens"),
-                            totalTokens = null
-                        )
-                    }
+                    obj.getAsJsonObject("usage")?.let(tokenUsage::updateAnthropicUsage)
                     val reason = obj.getAsJsonObject("delta")?.get("stop_reason")
                         ?.takeUnless { it.isJsonNull }?.asString
                     if (reason == "max_tokens") {
@@ -502,6 +496,12 @@ object StreamingApiService {
         private var providerInputTokens: Long? = null
         private var providerOutputTokens: Long? = null
         private var providerTotalTokens: Long? = null
+        var providerCachedInputTokens: Long? = null
+            private set
+        var providerCacheWriteInputTokens: Long? = null
+            private set
+        private var providerInputExcludesCache = false
+
 
         fun record(event: StreamEvent) {
             when (event) {
@@ -520,7 +520,9 @@ object StreamingApiService {
         fun updateProviderUsage(
             inputTokens: Long?,
             outputTokens: Long?,
-            totalTokens: Long?
+            totalTokens: Long?,
+            cachedInputTokens: Long? = null,
+            cacheWriteInputTokens: Long? = null
         ) {
             inputTokens?.takeIf { it >= 0 }?.let { value ->
                 providerInputTokens = maxOf(providerInputTokens ?: 0L, value)
@@ -531,6 +533,29 @@ object StreamingApiService {
             totalTokens?.takeIf { it >= 0 }?.let { value ->
                 providerTotalTokens = maxOf(providerTotalTokens ?: 0L, value)
             }
+            cachedInputTokens?.takeIf { it >= 0 }?.let { value ->
+                providerCachedInputTokens = maxOf(providerCachedInputTokens ?: 0L, value)
+            }
+            cacheWriteInputTokens?.takeIf { it >= 0 }?.let { value ->
+                providerCacheWriteInputTokens = maxOf(providerCacheWriteInputTokens ?: 0L, value)
+            }
+        }
+
+        fun updateAnthropicUsage(usage: JsonObject) {
+            providerInputExcludesCache = true
+            updateProviderUsage(
+                inputTokens = usage.longValue("input_tokens"),
+                outputTokens = usage.longValue("output_tokens"),
+                totalTokens = null,
+                cachedInputTokens = usage.longValue("cache_read_input_tokens"),
+                cacheWriteInputTokens = usage.longValue("cache_creation_input_tokens")
+            )
+        }
+
+        private fun totalInputTokens(): Long? = providerInputTokens?.let { input ->
+            if (providerInputExcludesCache) {
+                input + (providerCachedInputTokens ?: 0L) + (providerCacheWriteInputTokens ?: 0L)
+            } else input
         }
 
         fun reportIfConsumed(streamStarted: Boolean) {
@@ -539,7 +564,7 @@ object StreamingApiService {
             val estimatedOutputTokens = ContextTokenCounter
                 .estimateTextLength(outputCharacterCount)
                 .toLong()
-            val inputTokens = providerInputTokens ?: estimatedInputTokens
+            val inputTokens = totalInputTokens() ?: estimatedInputTokens
             val outputTokens = providerOutputTokens ?: estimatedOutputTokens
             val providerTotal = providerTotalTokens
             val totalTokens = providerTotal ?: (inputTokens + outputTokens)
@@ -558,6 +583,9 @@ object StreamingApiService {
             }
         }
     }
+
+    private fun JsonObject.objectValue(name: String): JsonObject? =
+        get(name)?.takeIf { it.isJsonObject }?.asJsonObject
 
     private fun JsonObject.longValue(vararg names: String): Long? {
         names.forEach { name ->

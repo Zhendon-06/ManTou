@@ -64,6 +64,25 @@ class ChatHttpRequestTest {
     }
 
     @Test
+    fun onlyOfficialAnthropicReceivesTheSystemCacheBreakpoint() {
+        val config = compatibleConfig.copy(apiFormat = ProviderEntity.API_FORMAT_ANTHROPIC)
+        val official = config.copy(baseUrl = "https://api.anthropic.com")
+        val cacheableRequest = chatRequest.copy(cacheSystemPrompt = true)
+
+        val cached = ChatHttpRequest.build(official, cacheableRequest).jsonBody()
+        val system = cached.getAsJsonArray("system").single().asJsonObject
+        assertEquals("text", system.get("type").asString)
+        assertEquals("system instruction", system.get("text").asString)
+        assertEquals("ephemeral", system.getAsJsonObject("cache_control").get("type").asString)
+
+        val uncached = ChatHttpRequest.build(official, chatRequest).jsonBody()
+        assertEquals("system instruction", uncached.get("system").asString)
+        assertEquals(uncached.get("messages"), cached.get("messages"))
+        assertEquals("system instruction", ChatHttpRequest.build(config, cacheableRequest).jsonBody().get("system").asString)
+        assertFalse(ChatHttpRequest.build(compatibleConfig, cacheableRequest).jsonBody().has("cacheSystemPrompt"))
+    }
+
+    @Test
     fun streamingRetriesExplicitRejectionsWithoutChangingMessagesOrBudget() = runBlocking {
         val requests = mutableListOf<Request>()
         val client = mockClient(requests, listOf(

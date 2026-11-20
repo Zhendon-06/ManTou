@@ -75,6 +75,69 @@ class StreamingApiServiceTest {
     }
 
     @Test
+    fun openAiCacheHitsArePartOfTheReportedInputTotal() = runBlocking {
+        ApiLogStore.clear()
+        val tokenUsage = AtomicReference<ModelTokenUsage>()
+        collectOpenAiSse(
+            """
+            data: {"choices":[],"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":64,"cache_write_tokens":25},"completion_tokens":7,"total_tokens":107}}
+
+            data: [DONE]
+
+            """.trimIndent(),
+            testRequest("test-model").copy(tokenUsageListener = tokenUsage::set)
+        )
+
+        val log = ApiLogStore.entries.value.single()
+        assertEquals(64L, log.cachedInputTokens)
+        assertEquals(25L, log.cacheWriteInputTokens)
+        assertEquals(ModelTokenUsage(100, 7, 107, estimated = false), tokenUsage.get())
+    }
+
+    @Test
+    fun deepSeekCacheHitsArePartOfTheReportedInputTotal() = runBlocking {
+        ApiLogStore.clear()
+        val tokenUsage = AtomicReference<ModelTokenUsage>()
+        collectOpenAiSse(
+            """
+            data: {"choices":[],"usage":{"prompt_tokens":100,"prompt_cache_hit_tokens":64,"prompt_cache_miss_tokens":36,"completion_tokens":7,"total_tokens":107}}
+
+            data: [DONE]
+
+            """.trimIndent(),
+            testRequest("test-model").copy(tokenUsageListener = tokenUsage::set)
+        )
+
+        val log = ApiLogStore.entries.value.single()
+        assertEquals(64L, log.cachedInputTokens)
+        assertNull(log.cacheWriteInputTokens)
+        assertEquals(ModelTokenUsage(100, 7, 107, estimated = false), tokenUsage.get())
+    }
+
+    @Test
+    fun anthropicInputIncludesCacheReadsAndWritesFromMessageStart() = runBlocking {
+        ApiLogStore.clear()
+        val tokenUsage = AtomicReference<ModelTokenUsage>()
+        collectOpenAiSse(
+            """
+            data: {"type":"message_start","message":{"usage":{"input_tokens":20,"cache_read_input_tokens":1000,"cache_creation_input_tokens":400,"output_tokens":1}}}
+
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}
+
+            data: {"type":"message_stop"}
+
+            """.trimIndent(),
+            testRequest("test-model").copy(tokenUsageListener = tokenUsage::set),
+            apiFormat = ProviderEntity.API_FORMAT_ANTHROPIC
+        )
+
+        val log = ApiLogStore.entries.value.single()
+        assertEquals(1000L, log.cachedInputTokens)
+        assertEquals(400L, log.cacheWriteInputTokens)
+        assertEquals(ModelTokenUsage(1420, 12, 1432, estimated = false), tokenUsage.get())
+    }
+
+    @Test
     fun streamingRequestsHaveFiniteTimeoutsAndClassifyRetryableFailures() {
         val client = StreamingApiService.createClient()
         assertEquals(

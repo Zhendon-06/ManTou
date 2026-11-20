@@ -90,6 +90,8 @@ class RequestLogAdapter : ListAdapter<ApiLogEntry, RequestLogAdapter.VH>(DIFF) {
                     entry.runId?.let { append("Harness runId: $it\n") }
                     entry.operation?.let { append("操作: $it\n") }
                     entry.iteration?.let { append("代码轮次: $it\n") }
+                    entry.cachedInputTokens?.let { append("缓存命中: $it token\n") }
+                    entry.cacheWriteInputTokens?.let { append("写入缓存: $it token\n") }
                     if (isNotEmpty()) append('\n')
                     if (entry.errorMessage != null) {
                         append("错误: ${entry.errorMessage}\n\n")
